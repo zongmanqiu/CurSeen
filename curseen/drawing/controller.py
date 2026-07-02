@@ -66,16 +66,22 @@ class DrawingController(QObject):
             self._overlay.set_pen(self._pens[index]["color"], self._pens[index]["width"], style)
 
     def start(self, mode: str = "screen"):
+        self._overlay._on_stopped = self._on_overlay_esc
         self._overlay.start_drawing(mode)
         self._drawing = True
         p = self._pens[self._active_pen]
         self._overlay.set_pen(p["color"], p["width"], p["style"])
         self._overlay.set_tool("pen")
 
+    def _on_overlay_esc(self):
+        """覆盖层按 ESC 时通知控制器"""
+        self._drawing = False
+
     def stop(self):
+        self._overlay._on_stopped = None
         self._overlay.stop_drawing()
         self._drawing = False
-        self._history.clear()  # 退出清空
+        self._history.clear()
 
     def toggle(self, mode: str = "screen"):
         import time

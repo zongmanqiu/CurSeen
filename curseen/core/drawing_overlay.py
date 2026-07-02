@@ -21,6 +21,9 @@ class DrawingOverlay(QWidget):
         self._shape_start = None
         self._shape_preview = None
         self._arrow_head = None
+        self._notify_text = ""
+        self._notify_time = 0.0
+        self._on_stopped = None  # 回调：ESC 退出时通知控制器
         self._setup_window()
 
     def _setup_window(self):
@@ -48,6 +51,7 @@ class DrawingOverlay(QWidget):
             self.show()
             self.setFocus()
             self.raise_()
+            self.activateWindow()
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.update()
 
@@ -193,6 +197,8 @@ class DrawingOverlay(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
+            if self._on_stopped:
+                self._on_stopped()
             self.stop_drawing()
 
     def paintEvent(self, event):
