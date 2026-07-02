@@ -113,6 +113,8 @@ class TrailController(QObject):
         if cls is None:
             self._trail_effect = None
             self._trail_timer.stop()
+            if self._on_update:
+                self._on_update()
             return
         self._trail_effect = cls()
         self._trail_effect.apply_settings(settings or {})

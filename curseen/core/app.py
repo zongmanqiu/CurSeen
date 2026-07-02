@@ -339,12 +339,7 @@ class AppController:
             self.main_window.hide()
 
     def quit(self):
-        """退出应用"""
-        # 立即强制退出，不等待监听器线程（daemon 线程由 OS 清理）
-        if self.tray:
-            self.tray.hide()
-        if self.config:
-            self.config.save()
+        """退出应用 — 立即终止，不阻塞"""
         os._exit(0)
 
 
