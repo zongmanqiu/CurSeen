@@ -294,6 +294,7 @@ class GlobalPanel(QWidget):
             "QPushButton:hover { background: #C0392B; }"
         )
         reset_btn.setFixedSize(160, 28)
+        reset_btn.clicked.connect(self._reset_defaults)
         reset_row = QWidget()
         reset_row.setStyleSheet("background: transparent;")
         reset_row.setFixedHeight(32)
