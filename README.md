@@ -2,6 +2,8 @@
 
 **键鼠痕迹呈现工具**：鼠标特效 · 按键显示 · 屏幕书写
 
+**[⬇️ 下载最新版 (1.0.0)](https://gitee.com/qiuzongman/curseen/releases/download/1.0.0/CurSeen_1.0.0.zip)**
+
 - **版本**：1.0.0
 - **作者**：邱宗满（qiuzongman@foxmail.com）
 - **项目地址**：<https://gitee.com/qiuzongman/curseen>
