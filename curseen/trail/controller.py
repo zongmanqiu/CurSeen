@@ -111,11 +111,15 @@ class TrailController(QObject):
         """切换拖尾特效（不影响 _trail_enabled，由全局开关控制）"""
         cls = EFFECT_REGISTRY.get(effect_id)
         if cls is None:
+            if self._trail_effect:
+                self._trail_effect.stop()
             self._trail_effect = None
             self._trail_timer.stop()
             if self._on_update:
                 self._on_update()
             return
+        if self._trail_effect:
+            self._trail_effect.stop()
         self._trail_effect = cls()
         self._trail_effect.apply_settings(settings or {})
         if self._trail_enabled:
