@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Nuitka outputs
+*.exe
+*.manifest
+*.spec
+nuitka-build/
+*.build/
+build_v*/
+
+# Temporary build artifacts
+curseen_logo.svg
+curseen_logo.png
+nuitka-crash-report.xml
+debug_hotkeys.py
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project specific
+config.json
+*.log

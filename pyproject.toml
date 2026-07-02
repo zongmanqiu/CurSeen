@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "curseen"
+version = "0.1.0"
+description = "可寻 / CurSeen — 键鼠痕迹呈现工具：鼠标拖尾 / 按键显示 / 屏幕书写"
+readme = "README.md"
+license = { text = "AGPL-3.0-only" }
+requires-python = ">=3.10"
+authors = [
+    { name = "邱宗满", email = "qiuzongman@foxmail.com" },
+]
+dependencies = [
+    "PySide6>=6.5",
+    "pynput>=1.8",
+]
+
+[project.urls]
+Homepage = "https://gitee.com/qiuzongman/curseen"
+Repository = "https://gitee.com/qiuzongman/curseen"
+
+[tool.setuptools.packages.find]
+include = ["curseen*"]

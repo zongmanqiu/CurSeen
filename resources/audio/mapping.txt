@@ -1,0 +1,17 @@
+# 声音名称映射
+# 格式: 内部名称=显示名称
+# 内部名称对应去掉 .wav 的文件名
+click1=audio1
+click2=audio2
+click3=audio3
+click4=audio4
+click5=audio5
+mouseclick1=audio6
+mouserelease1=audio7
+rollover2=audio8
+rollover3=audio9
+rollover4=audio10
+rollover5=audio11
+switch12=audio12
+switch13=audio13
+switch14=audio14
