@@ -115,8 +115,9 @@ class TrailController(QObject):
                 self._trail_effect.stop()
             self._trail_effect = None
             self._trail_timer.stop()
-            if self._on_update:
-                self._on_update()
+            # 延迟触发覆盖层重绘（避免在信号处理内部调用 update 被合并）
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._on_update and self._on_update())
             return
         if self._trail_effect:
             self._trail_effect.stop()
