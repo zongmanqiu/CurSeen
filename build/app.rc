@@ -1,0 +1,13 @@
+/* CurSeen 的 exe 图标资源。
+ *
+ * 资源名必须是 `MAINICON`：windui 建窗口类时用 `LoadIconW(hinst, "MAINICON")`
+ * 取图标（取不到才回落到资源 id 1），于是**所有** windui 窗口（控制面板、标注工具栏、
+ * 录制完成提示…）的标题栏、任务栏按钮、Alt-Tab 缩略图一并带上它，不用逐个窗设。
+ *
+ * 图由 `build/gen_icon.py` 从 `assets/icons/logo.png` 生成 —— 换 LOGO 只改那张 PNG
+ * 再跑一次脚本，不要手改这里的路径去指向别的文件。
+ *
+ * 本文件由 `build.rs` 交给 Windows SDK 的 `rc.exe` 编译成 .res 并链进 exe；
+ * 机器上没有 SDK 时构建会跳过它（exe 退回系统默认图标），不会因此构建失败。
+ */
+MAINICON ICON "assets/icons/app.ico"

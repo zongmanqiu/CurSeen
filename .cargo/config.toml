@@ -1,0 +1,7 @@
+[build]
+target-dir = "../temp/target"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+# 说明：+crt-static 静态链接 MSVC 运行库，避免依赖 VC++ Redistributable。
+# 代价：exe 增大约 150–250KB；收益：用户机器无需装运行时。符合"解压即用"的产品定位。

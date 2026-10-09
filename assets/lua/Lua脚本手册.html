@@ -1,0 +1,1494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CurSeen Lua 脚本手册（指南 + API 参考）</title>
+<style>
+body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;max-width:960px;margin:0 auto;
+     padding:28px 34px;color:#24292f;background:#fdfdfc;line-height:1.65;font-size:14.5px}
+h1{font-size:26px;border-bottom:2px solid #d8d5cf;padding-bottom:10px;margin-top:6px}
+h2{font-size:20px;border-bottom:1px solid #e3e0da;padding-bottom:6px;margin-top:34px}
+h3{font-size:16.5px;margin-top:24px}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+th,td{border:1px solid #d9d6d0;padding:6px 10px;text-align:left;vertical-align:top}
+th{background:#f0eee9;font-weight:600}
+tr:nth-child(even) td{background:#faf9f6}
+code{background:#f2f0ec;border:1px solid #e6e3dd;border-radius:3px;padding:1px 5px;
+     font-family:Consolas,monospace;font-size:13px;color:#8a3b12}
+pre{background:#f6f5f1;border:1px solid #e3e0da;border-radius:6px;padding:12px 14px;overflow-x:auto}
+pre code{background:none;border:none;padding:0;color:#1f2328}
+blockquote{border-left:4px solid #d9b13b;background:#fdf8ea;margin:12px 0;padding:8px 16px;color:#5c5648}
+hr{border:none;border-top:1px solid #e3e0da;margin:26px 0}
+a{color:#0b62c4;text-decoration:none}
+.part{display:inline-block;background:#0b62c4;color:#fff;border-radius:4px;
+      padding:2px 10px;font-size:13px;letter-spacing:1px;margin-right:10px;vertical-align:middle}
+.meta{color:#8a857c;font-size:12.5px;margin-top:2px}
+@media print{body{max-width:none}}
+</style>
+<style>
+html{scroll-behavior:smooth}
+body{padding-left:280px}
+.toc{position:fixed;top:0;left:0;width:248px;height:100vh;overflow-y:auto;
+     padding:24px 12px 24px 18px;background:#fbfbfa;border-right:1px solid #e7e4de;
+     font-size:13px;line-height:1.5;z-index:50}
+.toc-title{font-weight:700;color:#827c72;font-size:11.5px;letter-spacing:1.5px;
+     text-transform:uppercase;margin:2px 0 12px 6px}
+.toc ul{list-style:none;margin:0;padding:0}
+.toc li{margin:0}
+.toc a{display:block;padding:5px 9px;border-radius:6px;color:#3b3a37;text-decoration:none;
+     border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.toc a:hover{background:#eef0f3;color:#1f2328}
+.toc a.active{background:#eaf1ff;color:#0b62c4;border-left-color:#0b62c4;font-weight:600}
+.toc .toc-l2 a{padding-left:20px}
+.toc .toc-l3 a{padding-left:34px;font-size:12.5px;color:#6b6760}
+@media (max-width:1080px){.toc{display:none}body{padding-left:0}}
+</style>
+</head>
+<body>
+<h1 id="第一部分Lua-脚本指南"><span class="part">第一部分</span>Lua 脚本指南</h1>
+<p class="meta">怎么写、放哪个目录、怎么热加载、有哪些现成例子。</p>
+<h1 id="CurSeen-Lua-脚本指南-脚本作者向">CurSeen Lua 脚本指南（脚本作者向）</h1>
+<blockquote>
+<p>本文件随 <code>assets/</code> 一起分发（部署后位于 <code>&lt;程序目录&gt;/assets/lua/README.md</code>），<br />
+写给<strong>写脚本的人</strong>：把 <code>.lua</code> 丢进本目录即可被面板扫到，不用改代码、不用重编译。</p>
+<p>内部实现契约（每个 API 的精确语义、宿主侧字段）见 <code>main/docs/UI_COMPONENTS.md</code> §三、§四；<br />
+逐条穷尽的 <strong>API 参考清单</strong> 见同目录 <code>API.md</code>（本文件是它的"作者向摘要"）。<br />
+三者不一致时以源码与本仓库文档为准。</p>
+</blockquote>
+<h2 id="一-脚本放哪-怎么生效">一、脚本放哪、怎么生效</h2>
+<ul>
+<li><strong>唯一脚本根 = <code>assets/lua/</code>（递归扫描）</strong>。丢一个 <code>.lua</code> 进去，<strong>重开控制面板</strong>就出现在<br />
+  对应卡片（拖尾 / 悬浮标 / 点击效果 / 击键音效 / 脚本页）。</li>
+<li>★★ <strong>归属由目录决定</strong>（2026-09-28 定稿，与实现一致）：<code>MouseTrail/</code> 拖尾、<br />
+<code>HoverDot/</code> 悬浮标、<code>ClickFx/</code> 点击效果、<code>scripts/</code> 脚本页。<strong>同一份脚本复制到哪个<br />
+  文件夹就能在哪用</strong>（四类宿主共用同一份驱动实现 <code>FxCore</code>，目录只决定挂在哪）；<code>role</code><br />
+  只影响开关语义与菜单归属，<strong>脚本里没有任何字段能改变挂载点</strong>。</li>
+<li><code>scripts/</code> 下任何脚本都在脚本页出卡（<code>keysound</code> 除外——它由键盘页承接）：<br />
+<code>role="image"</code> 开关 = 右键菜单可见性；<strong>其余一切（<code>composite</code> / <code>effect</code> / 未声明<br />
+    role）开关 = 常驻运行</strong>。往 <code>scripts/</code> 里复制一份特效脚本，开关打开就能跑。</li>
+<li><strong>未声明 <code>role</code> 也能跑</strong>：四个挂载目录下缺 <code>role</code> 都有缺省——<code>scripts/</code> 当可运行<br />
+    卡片，<code>MouseTrail/</code> <code>HoverDot/</code> <code>ClickFx/</code> 当拖尾特效（目录已经说明了一切，不必<br />
+    再写一遍）。只有丢在这四个目录<strong>之外</strong>、又没有 <code>menu</code> 的散件才会被跳过（告警）。</li>
+<li><code>scripts/</code> 下的脚本 <strong>id = 相对 <code>assets/lua/</code> 的路径（去扩展名，如 <code>scripts/fireflies</code>）</strong>，<br />
+  脚本页与配置按这个 id 记开关；改名 = 换 id（用户的旧开关会失效）。</li>
+<li>脚本文件改动按 (mtime, 字节数) <strong>热重载</strong>：状态清零、参数重放，不用重启程序。</li>
+</ul>
+<h2 id="二-顶层声明-元信息">二、顶层声明（元信息）</h2>
+<pre><code class="language-lua">name = &quot;显示名&quot;           -- 可选；缺省用文件名（脚本页显示）
+effect_name = &quot;实心圆&quot;     -- role=&quot;effect&quot; 时：拖尾/悬浮标/点击效果**下拉框**里的显示名
+description = &quot;一句话说明&quot; -- 可选；面板脚本页显示
+role = &quot;effect&quot;          -- 可选：四个挂载目录下缺省由目录推断（effect/composite），其余场合才必填
+menu = &quot;图片信息&quot;         -- role=&quot;image&quot; 时：贴图右键「图片操作」里的菜单文本
+hide_cursor = true       -- 悬浮标脚本声明&quot;隐藏系统指针&quot;（如激光笔样式）
+</code></pre>
+<h2 id="三-四类脚本的契约">三、四类脚本的契约</h2>
+<h3 id="3-1-绘制特效-role-effect-拖尾-悬浮标-点击效果">3.1 绘制特效 <code>role="effect"</code>（拖尾 / 悬浮标 / 点击效果）</h3>
+<p>生命周期回调（<strong>全部可选</strong>，按帧驱动）：</p>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>谁在用 / 时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>init()</code></td>
+<td>特效加载 / 参数变更后</td>
+</tr>
+<tr>
+<td><code>on_move(x, y, t, params)</code></td>
+<td><strong>拖尾 / 悬浮标 / 独立卡片</strong>：指针真的移动了；<strong>点击效果</strong>：实现了 <code>on_move</code> 的脚本走常驻通道——每个真实采样都发（见下）；只写 <code>on_press</code> 的脚本出生时补发一次（= 按下点）。指针静止时不发</td>
+</tr>
+<tr>
+<td><code>on_press(x, y, t, params)</code></td>
+<td><strong>全部宿主</strong>：鼠标按下。老名 <code>on_click</code> 仍被识别（自动回退），新脚本一律写 <code>on_press</code></td>
+</tr>
+<tr>
+<td><code>step(dt, t, params)</code></td>
+<td>每帧逻辑（粒子推进、老化——<strong>老化放这里</strong>，否则鼠标不动就不推进）</td>
+</tr>
+<tr>
+<td><code>draw(ctx, params)</code></td>
+<td>每帧绘制；<code>ctx</code> 是 DrawList，<strong>只能在这里发绘图指令</strong></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>★★★ <strong>生命周期跟随脚本能力（2026-09-28）</strong>：在"点击效果"卡片选中一个实现了<br />
+<code>on_move</code> 的脚本（轨迹语义，例如把辉光圆影复制到 <code>ClickFx/</code>），它会获得<strong>常驻<br />
+待遇</strong>——每个真实鼠标采样喂一次 <code>on_move</code>（累积池照常成形）、按下转发<br />
+<code>on_press</code>，不随按下生灭。只写 <code>on_press</code> 的脚本维持"按下出生、画完即死"。<br />
+<strong>文件夹只决定脚本出现在哪张卡片，不影响底层行为</strong>——同一份脚本放哪个目录<br />
+效果都一样。</p>
+<p>★★★ <strong>一个脚本具备几种鼠标效果 = 它实现了几个回调</strong>。<br />
+拖尾 / 悬浮标 / 点击效果<strong>本来就都是 Lua 写的</strong>，所以"把多种功能联合起来用"<br />
+<strong>不需要任何新 API</strong>——写 <code>on_move</code> 就有拖尾，写 <code>on_press</code> 就有点击效果，每帧持续<br />
+输出就是悬浮标，<strong>三种语义在同一帧的 <code>draw</code> 里并存</strong>。想少用几种，把对应回调删掉即可。</p>
+<p>下面是一份可直接用的组合脚本（存成 <code>MouseTrail/combo.lua</code>，重开面板就在拖尾下拉里）：</p>
+<p>```lua<br />
+effect_name = "拖尾+波纹"<br />
+local function clamp(v)<br />
+  if v &lt; 0 then return 0 end<br />
+  if v &gt; 1 then return 1 end<br />
+  return v<br />
+end</p>
+<p>pts, rings = {}, {}<br />
+local TRAIL_LIFE, RING_LIFE = 0.6, 0.8</p>
+<p>function on_move(x, y, t, p) pts[#pts+1] = {x=x, y=y, t=t} end<br />
+function on_press(x, y, t, p) rings[#rings+1] = {x=x, y=y, t=t} end</p>
+<p>-- 老化必须写在 step 里（鼠标停住时 draw 不再被调用，写在那里会漏）<br />
+function step(dt, t, p)<br />
+  while #pts   &gt; 0 and t - pts[1].t   &gt; TRAIL_LIFE do table.remove(pts, 1) end<br />
+  while #rings &gt; 0 and t - rings[1].t &gt; RING_LIFE do table.remove(rings, 1) end<br />
+end</p>
+<p>function draw(ctx, p)<br />
+  for i = 1, #pts do<br />
+    local k = clamp(1 - (elapsed - pts[i].t) / TRAIL_LIFE)<br />
+    ctx:circle(pts[i].x, pts[i].y, 2 + k<em>5, 255, 180, 60, math.floor(k</em>220))<br />
+  end<br />
+  for i = 1, #rings do<br />
+    local age = elapsed - rings[i].t<br />
+    local a = clamp(1 - age / RING_LIFE)<br />
+    ctx:ring(rings[i].x, rings[i].y, 4 + age<em>160, 3, 80, 200, 255, math.floor(a</em>255))<br />
+  end<br />
+end<br />
+```</p>
+<p>★ <code>step</code> 里按时间戳剔除、<code>draw</code> 里再 <code>clamp</code> 一次：<code>t - born</code> 超过寿命那一瞬会算出<br />
+负数 alpha，<code>math.floor(-0.3)</code> 是 -1（<strong>颜色分量必须是 0–255 的整数</strong>，负数不合法）。</p>
+<p>★★ <strong>同一个脚本放哪个文件夹，效果都一样</strong>（四类宿主共用同一份驱动实现<br />
+<code>FxCore</code>）：每帧的序列都是「指针动了发 <code>on_move</code> → 按固定步长 <code>step</code> → <code>draw</code>」，<br />
+环境注入（<code>cursor_*</code> / <code>origin_*</code> / <code>mouse_*</code> / <code>elapsed</code> / <code>screen_*</code> / <code>host</code> /<br />
+<code>wall_ms</code>）也只有一处代码。宿主之间只剩两点差异：<strong>实例什么时候生灭</strong>、<strong>这一帧的<br />
+输入从哪来</strong>。</p>
+<p>★ <code>draw</code> 的<strong>返回值即续帧请求</strong>，但<strong>只对悬浮标（<code>HoverDot/</code> 目录）成立</strong>：返回数字<br />
+<code>n &gt; 0</code> = "n 毫秒后再来一帧"（悬浮标的淡出动画靠它跑完）；不返回 / 0 / 负数 = 不需要额外帧。</p>
+<p>★★ <strong>拖尾（<code>MouseTrail/</code> 目录）不看返回值</strong>——宿主按"这一帧有没有产出绘图指令"判活<br />
+（<code>modules/trail/effects/lua_effect.rs</code> 比 <code>DrawList</code> 长度增量）。所以拖尾想续帧，唯一办法是<br />
+<strong>继续在 <code>draw</code> 里画</strong>；一旦不画就停帧（这正是静止时 0 功耗的来源）。写"返回一个数字就能<br />
+让拖尾多跑几帧"是无效的。</p>
+<p>宿主每帧更新的全局（<strong>四类宿主同一套</strong>）：<code>cursor_x</code> <code>cursor_y</code>（指针位置；点击效果<br />
+出生后每帧仍跟着指针刷新）、<code>origin_x</code> <code>origin_y</code>（实例出生点：拖尾/悬浮标 = 首个采样<br />
+点，点击效果 = 按下点）、<code>mouse_x</code> <code>mouse_y</code>（<code>cursor_*</code> 的老别名）、<code>elapsed</code>（秒）、<br />
+<code>screen_w</code> <code>screen_h</code>、<code>host</code>（<code>"trail"</code> / <code>"hover"</code> / <code>"clickfx"</code> / <code>"panel"</code>）、<br />
+<code>wall_ms</code>（墙钟毫秒）、<code>_params</code>（当前参数表；老脚本读它，新脚本直接用回调第二参）。</p>
+<p>★★ <strong><code>step(dt)</code> 的 <code>dt</code> 四类宿主一律是秒</strong>，且都按固定步长（1/120 秒）子步进——不足<br />
+一步的零头留到下一帧，卡顿后最多补 16 步。历史上有过"拖尾秒 / 点击毫秒""悬浮标<br />
+<code>elapsed</code> 是毫秒""只有悬浮标注入 <code>wall_ms</code>"等分叉，2026-09-27 起全部统一——<br />
+<strong>同一份脚本放哪个文件夹都能跑</strong>，目录只决定它出现在哪个下拉框。</p>
+</blockquote>
+<p><strong>绘图指令</strong>（冒号调用，颜色一律 <code>r,g,b,a</code> 四个 0–255）：</p>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>签名</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>circle</code></td>
+<td><code>(x, y, radius, r, g, b, a)</code> 实心圆</td>
+</tr>
+<tr>
+<td><code>plus_circle</code></td>
+<td>同上，加色（Plus）实心圆，辉光层用</td>
+</tr>
+<tr>
+<td><code>glow</code></td>
+<td>同上，三层加色叠出的辉光（半径 ×2.5 / ×1.2 / ×1）</td>
+</tr>
+<tr>
+<td><code>radial</code></td>
+<td>同上，中心色→边缘透明的径向渐变圆</td>
+</tr>
+<tr>
+<td><code>clear_circle</code></td>
+<td><code>(x, y, radius)</code> 挖洞（圆内清成全透明）</td>
+</tr>
+<tr>
+<td><code>ring</code></td>
+<td><code>(x, y, outer_r, width, r, g, b, a)</code> 圆环，width 从外径向内收</td>
+</tr>
+<tr>
+<td><code>rect</code></td>
+<td><code>(x, y, w, h, r, g, b, a)</code></td>
+</tr>
+<tr>
+<td><code>line</code></td>
+<td><code>(x1, y1, x2, y2, width, r, g, b, a)</code> 圆头描边线</td>
+</tr>
+<tr>
+<td><code>polygon</code></td>
+<td><code>(points, r, g, b, a)</code> 填充多边形，<code>points = {{x,y},…}</code> ≥3 点</td>
+</tr>
+<tr>
+<td><code>fill_polygon</code></td>
+<td>同上，加色版（飘带）</td>
+</tr>
+<tr>
+<td><code>diamond</code></td>
+<td><code>(x, y, size, r, g, b, a)</code> 菱形（加色）</td>
+</tr>
+<tr>
+<td><code>diamond_rot</code></td>
+<td><code>(x, y, s, angle, r, g, b, a)</code> 旋转菱形（加色）</td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td><code>(x, y, scale, a)</code> 悬浮标 PNG（宿主预载，(x,y) 为中心）</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>(x, y, str, size, r, g, b, a)</code> 文字；<code>(x, y)</code> = <strong>排版盒左上角</strong></td>
+</tr>
+<tr>
+<td><code>text_centered</code></td>
+<td><code>(cx, cy, str, size, r, g, b, a)</code> 文字；<code>(cx, cy)</code> = <strong>文字几何中心</strong></td>
+</tr>
+<tr>
+<td><code>layer</code></td>
+<td><code>("base"/"normal"/"top")</code> 后续指令的绘制层；破坏性擦除必须垫底</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>★★ 两个文字入口只差<strong>锚点</strong>，选错就偏半个字：<code>text</code> 的 <code>(x,y)</code> 是排版盒左上角，<br />
+<code>text_centered</code> 的 <code>(cx,cy)</code> 是文字几何中心。特效（"在点击点周围冒出文字"）一律用<br />
+<strong><code>text_centered</code></strong>——居中由<strong>渲染层按真实排版度量</strong>做，模块层拿不到字体、自己算会偏。<br />
+只有"把一段文字排进固定版面"（标签、图例）才用 <code>text</code>。</p>
+</blockquote>
+<p><strong>助手函数</strong>：<code>hsv_to_rgb(h,s,v)</code>、<code>hex_to_rgb("#RRGGBB"|"#RRGGBBAA") → r,g,b,a</code><br />
+（6 位串 a 恒 255）、<code>rng(min,max)</code>、<code>rng_int(min,max)</code>（区间非法退化为 <code>min</code>）、<br />
+<code>clamp(v,lo,hi)</code>、<code>lerp(a,b,t)</code>。</p>
+<h3 id="3-2-击键音效-role-keysound">3.2 击键音效 <code>role="keysound"</code></h3>
+<p>入口 <code>on_key(key, mods, repeated, params)</code>（键名与击键回显同源；<code>mods = {ctrl,alt,shift,win}</code>，<br />
+老式三形参脚本也兼容）。新式统一入口是 <code>run(ctx, params)</code>，<br />
+<code>ctx = { role, sounds={文件名,…}, key, mods, repeated, dt }</code>。</p>
+<p><strong>返回值语义</strong>（两个入口一致）：返回 <code>ctx.sounds</code> 里的文件名或索引 → 播放它；<br />
+返回 <code>false</code> → <strong>强制静音</strong>（连宿主默认音也不响）；返回 <code>nil</code> / <code>true</code> / 其它 → 落回默认音效。</p>
+<h3 id="3-3-图片操作扩展-role-image">3.3 图片操作扩展 <code>role="image"</code></h3>
+<p>入口 <code>run(ctx, params)</code>；<code>ctx = { role="image", image=?, hwnd=? }</code>（<code>hwnd</code> = 目标窗口句柄）。<br />
+<code>image</code> 是<strong>只读快照</strong>，改动不回写贴图：</p>
+<table>
+<thead>
+<tr>
+<th>成员</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.w</code> / <code>.h</code></td>
+<td>只读尺寸（像素）</td>
+</tr>
+<tr>
+<td><code>pixel(x, y)</code></td>
+<td>→ <code>r, g, b, a</code>；越界返回全 <code>nil</code></td>
+</tr>
+<tr>
+<td><code>bytes()</code></td>
+<td>原始 RGBA 缓冲（二进制字符串，长度 = w×h×4，行优先）；配 <code>string.byte</code> 批量统计</td>
+</tr>
+<tr>
+<td><code>png_base64()</code></td>
+<td>base64 编码的 PNG 文本（喂在线接口）</td>
+</tr>
+<tr>
+<td><code>save(path)</code></td>
+<td>存成 PNG（父目录不存在则创建）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>返回值</strong>：返回字符串 → 自动弹可复制的结果框（多行直接用 <code>\n</code>，宿主会归一化成 <code>\r\n</code>）；<br />
+返回空 / <code>nil</code> = 你自己已经用 <code>ext:result</code> 出结果了。</p>
+<h3 id="3-4-复合脚本-role-composite-API-全开放">3.4 复合脚本 <code>role="composite"</code>（API 全开放）</h3>
+<p>一个脚本可以<strong>同时</strong>实现拖尾 + 点击声音 + 悬浮标 + 任意键鼠反应（不借用内置模块）；<br />
+多个复合脚本可同时运行（要三种悬浮标就写三个、全开）。</p>
+<table>
+<thead>
+<tr>
+<th>回调</th>
+<th>时机</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>init()</code></td>
+<td>启用 / 热重载后</td>
+</tr>
+<tr>
+<td><code>on_move(x, y, t, params)</code></td>
+<td>鼠标采样（含快移插值点，与拖尾同密度）</td>
+</tr>
+<tr>
+<td><code>on_mouse_down(button, x, y, params)</code></td>
+<td><code>button</code> = <code>left/right/middle/x1/x2</code></td>
+</tr>
+<tr>
+<td><code>on_key(key, mods, repeated, params)</code></td>
+<td>键盘按下（键名与击键回显同源）</td>
+</tr>
+<tr>
+<td><code>step(dt, t, params)</code></td>
+<td>固定步长推进</td>
+</tr>
+<tr>
+<td><code>draw(ctx, params)</code></td>
+<td>每帧绘制（绘图 API 与特效一致）</td>
+</tr>
+</tbody>
+</table>
+<p>全局：特效脚本全套 + <strong><code>play_sound(file, volume?)</code></strong>（解析链与击键音效同源：绝对路径 /<br />
+便携相对 / <code>assets/Sounds/</code> 裸名；返回是否真的发声）。</p>
+<h2 id="四-参数-schema-自动生成面板控件">四、参数 schema（自动生成面板控件）</h2>
+<p>在 <code>schema()</code> 里返回一个数组，宿主据此造控件并自动取值：</p>
+<pre><code class="language-lua">function schema()
+  return {
+    { key = &quot;size&quot;, label = &quot;大小&quot;, type = &quot;float&quot;, min = 1, max = 100,
+      step = 0.2, default = 12, group = &quot;形状&quot; },
+    { key = &quot;tint&quot;, label = &quot;颜色&quot;, type = &quot;color&quot;, default = &quot;#FF000040&quot;, alpha = true },
+  }
+end
+</code></pre>
+<table>
+<thead>
+<tr>
+<th><code>type</code></th>
+<th>面板控件</th>
+<th>值的形态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>float</code>（默认）</td>
+<td>滑条 + 输入框</td>
+<td>number，按 <code>step</code> 吸附（默认 0.01）</td>
+</tr>
+<tr>
+<td><code>int</code></td>
+<td>滑条 + 输入框</td>
+<td>整数</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td>复选框</td>
+<td>bool</td>
+</tr>
+<tr>
+<td><code>color</code></td>
+<td>取色器</td>
+<td><code>#RRGGBB</code>；<code>alpha = true</code> 时半透明存 <code>#RRGGBBAA</code></td>
+</tr>
+<tr>
+<td><code>choice</code></td>
+<td>下拉</td>
+<td>稳定英文 id；<code>labels = {…}</code> 给中文显示名</td>
+</tr>
+<tr>
+<td><code>sound</code></td>
+<td>下拉（宿主扫描音效目录）</td>
+<td>素材短名或绝对路径</td>
+</tr>
+<tr>
+<td><code>folder</code> / <code>file</code></td>
+<td>目录 / 音频文件浏览器</td>
+<td>路径 / 文件名（复制进 <code>assets/Sounds/</code>）</td>
+</tr>
+<tr>
+<td><code>str</code></td>
+<td>文本框</td>
+<td>原样字符串</td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td>图片路径输入</td>
+<td>图片标识</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>★★ <strong>颜色串只有两种写法：<code>#RRGGBB</code> 与 <code>#RRGGBBAA</code>（alpha 在末尾）。</strong><br />
+项目里<strong>不存在</strong> <code>#AARRGGBB</code>——写成 <code>#FF000040</code> 会被读成"红 + 25% 透明"，<br />
+而不是"不透明红后面跟蓝"。<br />
+未识别的 <code>type</code> 按 <code>float</code> 处理。参数落盘：拖尾特效共用一张表（键 <code>{特效id}.{key}</code>），<br />
+其余 role 各自一张表（直接用 <code>key</code>）。</p>
+</blockquote>
+<h2 id="五-通用-ctx-成员-所有-run-类脚本">五、通用 <code>ctx</code> 成员（所有 <code>run</code> 类脚本）</h2>
+<ul>
+<li><code>ctx.fs</code>：<strong>只读</strong>文件接口，相对脚本目录解析（<code>read / read_bytes / exists / list</code>）；<br />
+  含 <code>../</code> 或绝对路径一律返回 <code>nil</code>（逃逸校验，防手滑）。</li>
+<li><code>ctx.ext</code> / 全局 <code>ext</code>：宿主扩展——<code>ext:get_image()</code>（截屏）、<code>ext:log(...)</code>、<br />
+<code>ext:http(...)</code>（返回 <code>status</code> / <code>body</code> / <code>result</code>）。</li>
+</ul>
+<h2 id="六-性能与正确性规则">六、性能与正确性规则</h2>
+<ol>
+<li><strong>只有 <code>draw</code> 每帧真的产出指令才续帧</strong>——空闲时 CPU 0%。要做持续动画就在 <code>draw</code> 里画。</li>
+<li><strong>不要在任何回调里写死循环</strong>：拖尾 / 复合脚本跑在渲染循环里，卡住即整机掉帧。</li>
+<li>暴露给 Lua 的 API 不会 panic；但<strong>你自己的脚本要自己校验输入</strong>（选区为空、图片越界、<br />
+   网络失败都要有兜底），错误会显示在脚本页结果区，不影响其它脚本。</li>
+<li>手动动作 ≠ 自动运行：<code>image</code> 脚本的开关只管"菜单里有没有这一条"，与常驻运行无关。</li>
+</ol>
+<h2 id="七-出厂参考脚本">七、出厂参考脚本</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>类型</th>
+<th>看它学什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scripts/1.image_info.lua</code></td>
+<td><code>role="image"</code></td>
+<td>最小骨架：声明 + <code>run</code> + 返回结果框</td>
+</tr>
+<tr>
+<td><code>scripts/2.avg_color.lua</code></td>
+<td><code>role="image"</code></td>
+<td>像素采样（<code>bytes()</code> + <code>string.byte</code> 批量统计）</td>
+</tr>
+<tr>
+<td><code>scripts/3.composite_demo.lua</code></td>
+<td><code>role="composite"</code></td>
+<td>拖尾 + 点击音 + 点击效果三合一模板</td>
+</tr>
+<tr>
+<td><code>scripts/ai_chat.lua</code></td>
+<td><code>composite</code></td>
+<td><strong>AI 写脚本</strong>：卡片里填 API Key / 地址 / 模型 / 快捷键，热键呼出多轮对话（<code>ext:input</code> + <code>ext:http</code> + <code>ext:json_decode</code>），系统提示词带 <code>ai_chat_api.txt</code> 速查，可让 AI 辅助写脚本</td>
+</tr>
+<tr>
+<td><code>scripts/unified_sound.lua</code></td>
+<td><code>role="keysound"</code></td>
+<td>统一 <code>run</code> 入口的键音脚本</td>
+</tr>
+<tr>
+<td><code>scripts/class_sound.lua</code></td>
+<td><code>role="keysound"</code></td>
+<td>按键分类挑选音效</td>
+</tr>
+<tr>
+<td><code>MouseTrail/*.lua</code></td>
+<td><code>role="effect"</code></td>
+<td>拖尾特效（9 个）：<code>circle_particles</code>（律动粒子）/ <code>glow</code>（辉光圆影）/ <code>pixie_dust</code>（像素尘埃）/ <code>ribbon</code>（流光飘带）/ <code>spider_web</code>（蛛丝缠网）——上述为出厂 5 个；另有 <code>spring_chain</code>（弹簧珠链）/ <code>bubble_rise</code>（气泡升腾）/ <code>fireflies</code>（流萤）/ <code>snow_flurry</code>（雪花旋落）。<strong>各自唯一性：<code>spring_chain</code> 弹簧物理、<code>fireflies</code> 有自主行为（没被招募时绕着光标游荡）、<code>snow_flurry</code> 线段现画的旋转晶体、<code>bubble_rise</code> 向上浮的描边气泡</strong></td>
+</tr>
+<tr>
+<td><code>HoverDot/*.lua</code></td>
+<td><code>role="effect"</code></td>
+<td>悬浮标（10 个）：<code>laser</code> / <code>locate</code> / <code>png</code> / <code>ring</code> / <code>ruler</code> / <code>solid</code> / <code>spotlight</code>（含 <code>hide_cursor</code> 用例）——上述为出厂 7 个；另有 <code>eyes</code>（眼睛跟随）/ <code>twin</code>（双层光标）/ <code>springy_img</code>（弹簧挂件）。<strong>各自唯一性：<code>eyes</code> 唯一的具象生物形态（眼珠朝指针方向偏转，眼睛本体滞后追赶）、<code>twin</code> 唯一"内点硬跟 + 外环弹性迟滞"双层差速并带按下收缩回弹、<code>springy_img</code> 唯一的弹簧-质点链物理（重力 + 屏幕边缘反弹，串起用户导入的图片）</strong></td>
+</tr>
+<tr>
+<td><code>ClickFx/*.lua</code></td>
+<td><code>role="effect"</code></td>
+<td>点击效果（12 个）：<code>disc</code>（实心圆）/ <code>multi_ring</code>（多重光环）——上述为出厂 2 个；另有 <code>spray</code>（彩色爆散）/ <code>star_burst</code>（星形扩散）/ <code>spark_lines</code>（星芒射线）/ <code>vortex</code>（黑洞内旋）/ <code>wave_grid</code>（点阵波纹）/ <code>synapse</code>（神经结网）/ <code>droplet</code>（水滴坠落）/ <code>wire_cube</code>（线框立方）/ <code>fountain</code>（点击喷泉）/ <strong><code>random_text</code>（随机文字）</strong>。<strong>各自唯一性：<code>vortex</code> 唯一向内收缩、<code>synapse</code> 唯一元素间自动连线、<code>droplet</code> 唯一两段叙事（先坠落再溅起）、<code>wire_cube</code> 唯一真 3D 透视、<code>fountain</code> 唯一"单击 → 持续喷一会儿"的发射器机制（其余都是按下瞬间炸一次）、<code>wave_grid</code> 唯一"波在格子里传播"、<code>spark_lines</code> 唯一"线"语汇、<code>random_text</code> 唯一画</strong>文字<strong>（走 <code>ctx:text_centered</code>，词库由「文字」参数给、按「分隔符」切分，颜色可选彩虹/单色）</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="八-快速排错">八、快速排错</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>先查</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>脚本页没有它</td>
+<td>文件是否真在 <code>assets/lua/scripts/</code> 下；<code>role</code> 是否拼对（扩展 / 复合脚本<strong>必填</strong>）</td>
+</tr>
+<tr>
+<td>拖尾下拉里没有</td>
+<td>文件是否真的在 <code>MouseTrail/</code> 下（<strong>挂载点 = 目录</strong>）；<code>role</code> 是不是写成了 <code>image</code> / <code>keysound</code>（这两类有自己的归宿，会被鼠标下拉排除）</td>
+</tr>
+<tr>
+<td>贴图右键里没有</td>
+<td><code>role="image"</code> + <code>menu="…"</code>；脚本页里这一条是否已勾开</td>
+</tr>
+<tr>
+<td>放进某目录后选了没反应</td>
+<td>挂载点由目录决定：目标是拖尾就得放 <code>MouseTrail/</code>，放错目录不会自动归位（复制一份过去即可，同一份脚本可以多目录共存）</td>
+</tr>
+<tr>
+<td>参数没出现在面板</td>
+<td><code>schema()</code> 是否返回了表；<code>key</code> 是否重复</td>
+</tr>
+<tr>
+<td>颜色不对（透明 / 变色）</td>
+<td>是不是写成了 <code>#AARRGGBB</code>——本项目只认 <code>#RRGGBB</code> / <code>#RRGGBBAA</code></td>
+</tr>
+<tr>
+<td>改了脚本没反应</td>
+<td>是不是改了另一个同名文件；热重载看 (mtime, 字节数)</td>
+</tr>
+<tr>
+<td>画面不动</td>
+<td><code>draw</code> 里是否真的每帧发了指令（没画 = 不续帧 = 停在那里）</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h1 id="第二部分Lua-API-参考"><span class="part">第二部分</span>Lua API 参考</h1>
+<p class="meta">每个函数 / 字段 / 回调的精确签名与行为。</p>
+<h1 id="CurSeen-Lua-脚本-API-参考-完整版">CurSeen Lua 脚本 API 参考（完整版）</h1>
+<blockquote>
+<p>本文件是 <strong>Lua 脚本可用 API 的权威参考</strong>，写给写脚本的人。<br />
+与 <code>README.md</code>（作者向教程，含示例与排错表）互补：这里是<strong>逐条、穷尽</strong>的清单，<br />
+那里是「怎么上手」的引导。两者冲突以源码（<code>src/scripting/api_*.rs</code>、<br />
+<code>src/scripting/engine.rs</code>）与本仓库文档为准。</p>
+<p>★ 所有脚本都跑在一个<strong>受限 Lua 5.4 环境</strong>里：标准库只开了 <code>table</code> / <code>string</code> /<br />
+<code>math</code> / <code>package</code>（外加始终加载的 <code>base</code>，即 <code>pairs</code> / <code>ipairs</code> / <code>type</code> /<br />
+<code>tostring</code> / <code>pcall</code> / <code>error</code> 等基础语言特性）。<strong><code>io</code> / <code>os</code> / <code>debug</code> /<br />
+<code>coroutine</code> / <code>utf8</code> 未加载</strong>——脚本不能自行做文件 I/O 或加载磁盘模块，要用文件读<br />
+<code>ctx.fs</code>、要联网用 <code>ext:http</code>、要算时间用 <code>wall_ms</code> / <code>elapsed</code>。</p>
+</blockquote>
+<hr />
+<h2 id="0-两个-ctx-的约定-极易混淆">0. 两个 <code>ctx</code> 的约定（极易混淆）</h2>
+<p>脚本里会出现两个名字都叫 <code>ctx</code> 的东西，<strong>语义完全不同，不要混用</strong>：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>绘图模型 <code>draw(ctx, params)</code> 的 <code>ctx</code></th>
+<th>运行模型 <code>run(ctx, params)</code> 的 <code>ctx</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>类型</td>
+<td>全局 <strong>userdata</strong> <code>DrawListCtx</code>（不是 table）</td>
+<td>宿主传入的 <strong>Lua table</strong></td>
+</tr>
+<tr>
+<td>怎么用</td>
+<td><code>ctx:circle(...)</code> 冒号调用发绘图指令</td>
+<td><code>ctx.role</code> / <code>ctx.fs</code> / <code>ctx.image</code> 点访问</td>
+</tr>
+<tr>
+<td>字段</td>
+<td><strong>没有</strong> <code>role</code> / <code>fs</code> / <code>ext</code> 字段</td>
+<td><strong>有</strong> <code>role</code> / <code>fs</code> / <code>ext</code> 等</td>
+</tr>
+<tr>
+<td>出现于</td>
+<td>绘制特效（<code>role="effect"</code>）的 <code>draw</code> 回调</td>
+<td><code>image</code> / <code>keysound</code> 角色</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>绘图 userdata 没有 <code>fs</code> / <code>role</code>；运行 table 没有绘图方法。误用在非对应回调里会静默<br />
+失效或报错，按上表区分即可。</p>
+</blockquote>
+<hr />
+<h2 id="1-全局函数-Rust-注入到-Lua-全局表">1. 全局函数（Rust 注入到 Lua 全局表）</h2>
+<h3 id="1-1-颜色-随机-数学助手">1.1 颜色 / 随机 / 数学助手</h3>
+<table>
+<thead>
+<tr>
+<th>Lua 名</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hex_to_rgb</code></td>
+<td><code>hex_to_rgb(hex: string) -&gt; (r, g, b, a)</code></td>
+<td>4 个 <code>u8</code>（0–255）</td>
+<td>解析 <code>#RRGGBB</code> 或 <code>#RRGGBBAA</code>。<strong>8 位顺序是 R,G,B,A</strong>；6 位串 a 恒 255。格式错（含非法字符 / 多字节字符 / 长度不对）不 panic：长度不对整体兜底 <code>(255,0,0,255)</code>，字符非法逐通道兜底（RGB→0、A→255）。</td>
+</tr>
+<tr>
+<td><code>rng</code></td>
+<td><code>rng(min, max) -&gt; number</code></td>
+<td>浮点</td>
+<td>区间随机浮点。<strong>区间不可用（max≤min 或含 NaN）时退化返回 <code>min</code></strong>（<code>min</code> 本身为 NaN 时返回 0，防渲染帧崩溃）。</td>
+</tr>
+<tr>
+<td><code>rng_int</code></td>
+<td><code>rng_int(min, max) -&gt; integer</code></td>
+<td>整数</td>
+<td>闭区间随机整数，<strong>min&gt;max 时退化返回 <code>min</code></strong>。</td>
+</tr>
+<tr>
+<td><code>clamp</code></td>
+<td><code>clamp(v, lo, hi) -&gt; number</code></td>
+<td>浮点</td>
+<td>把 <code>v</code> 夹到 <code>[lo, hi]</code>（不修改原值）。</td>
+</tr>
+<tr>
+<td><code>lerp</code></td>
+<td><code>lerp(a, b, t) -&gt; number</code></td>
+<td>浮点</td>
+<td>线性插值，<code>t</code> 被 clamp 到 <code>[0,1]</code>。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="1-2-HSV-助手">1.2 HSV 助手</h3>
+<table>
+<thead>
+<tr>
+<th>Lua 名</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hsv_to_rgb</code></td>
+<td><code>hsv_to_rgb(h, s, v) -&gt; (r, g, b)</code></td>
+<td>3 个 <code>u8</code></td>
+<td>色相 <code>h</code> 单位<strong>度</strong>（0–360），<code>s</code>、<code>v</code> 为 0–1，返回 0–255 的 RGB。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="1-3-复合脚本专属-播放音效">1.3 复合脚本专属：播放音效</h3>
+<blockquote>
+<p><strong>仅 <code>role = "composite"</code></strong>（宿主 <code>host="panel"</code>）的实例 VM 注入了以下函数；<br />
+其它角色调用会报「找不到全局」。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Lua 名</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>play_sound</code></td>
+<td><code>play_sound(file: string, volume?: integer) -&gt; boolean</code></td>
+<td>布尔</td>
+<td><code>volume</code> 缺省 100，clamp 到 0–100。文件解析链与击键音效「音效文件」行同源（绝对路径 → 便携相对 → <code>assets/Sounds/</code> 裸名补扩展名）。返回是否真的发起了播放；找不到文件返回 <code>false</code>。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-全局环境变量-每帧由宿主注入-脚本只读">2. 全局环境变量（每帧由宿主注入，脚本只读）</h2>
+<blockquote>
+<p>这些变量在脚本加载时给默认值，之后<strong>每帧被刷新</strong>。<strong>只有走绘图 / 特效宿主</strong><br />
+（<code>trail</code> / <code>hover</code> / <code>clickfx</code> / <code>panel</code>）的脚本才会被刷新；走 <code>run</code> 模型的<br />
+<code>image</code> / <code>keysound</code> 脚本不刷新这些全局，应改用 <code>ctx.role</code> 等。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Lua 名</th>
+<th>类型</th>
+<th>语义</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>screen_w</code></td>
+<td>number</td>
+<td>屏幕宽度（像素）</td>
+<td>默认 1920，每帧刷新</td>
+</tr>
+<tr>
+<td><code>screen_h</code></td>
+<td>number</td>
+<td>屏幕高度（像素）</td>
+<td>默认 1080，每帧刷新</td>
+</tr>
+<tr>
+<td><code>elapsed</code></td>
+<td>number</td>
+<td>逐帧累加时间（<strong>秒</strong>）</td>
+<td>覆盖层休眠 / 光标静止不出帧时不前进——<strong>只适合做逐帧动画相位</strong>，<strong>不能</strong>用它测「距某事件过了多久」</td>
+</tr>
+<tr>
+<td><code>cursor_x</code> / <code>cursor_y</code></td>
+<td>number</td>
+<td>指针当前位置</td>
+<td>点击效果里 = 按下点</td>
+</tr>
+<tr>
+<td><code>mouse_x</code> / <code>mouse_y</code></td>
+<td>number</td>
+<td><code>cursor_*</code> 的别名</td>
+<td>兼容老脚本，零改动</td>
+</tr>
+<tr>
+<td><code>origin_x</code> / <code>origin_y</code></td>
+<td>number</td>
+<td>实例出生点</td>
+<td>拖尾首个采样点 / 点击按下点 / 悬浮标当前位置</td>
+</tr>
+<tr>
+<td><code>host</code></td>
+<td>string</td>
+<td>宿主标识</td>
+<td><code>"trail"</code> / <code>"hover"</code> / <code>"clickfx"</code> / <code>"panel"</code>；<code>image</code>/<code>keysound</code> 不刷此全局，改用 <code>ctx.role</code></td>
+</tr>
+<tr>
+<td><code>wall_ms</code></td>
+<td>number</td>
+<td><strong>真实墙钟毫秒</strong>（浮点）</td>
+<td>覆盖层休眠时也随真实时间前进。<strong>静止检测 / 超时淡出必须用它，不要用 <code>elapsed</code></strong></td>
+</tr>
+<tr>
+<td><code>_params</code></td>
+<td>table</td>
+<td>当前参数表的全局别名</td>
+<td>兼容老脚本读全局 <code>_params</code>；所有回调都会把它设为与传给脚本的 <code>params</code> 相同的 table</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-绘图上下文-ctx-全局-userdata-DrawListCtx">3. 绘图上下文 <code>ctx</code>（全局 userdata <code>DrawListCtx</code>）</h2>
+<p>通过 <code>ctx:方法(...)</code> 调用。颜色参数统一为 <code>(r, g, b, a)</code> 四个 <code>u8</code>（0–255）。<br />
+<strong>若在非 <code>draw</code> 期间误调用（如 <code>init</code> 里），<code>TARGET</code> 未设置，静默丢弃、绝不 panic。</strong></p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>签名</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>circle</code></td>
+<td><code>(x, y, radius, r, g, b, a)</code></td>
+<td>填充实心圆（SourceOver）。</td>
+</tr>
+<tr>
+<td><code>clear_circle</code></td>
+<td><code>(x, y, radius)</code></td>
+<td>把圆内像素清成完全透明（Blend::Clear）；聚光灯开光圈用。颜色被忽略。</td>
+</tr>
+<tr>
+<td><code>layer</code></td>
+<td><code>(name: string)</code></td>
+<td>后续指令归入层：<code>"base"</code>（垫底先画）/ <code>"top"</code>（顶层后画）/ <code>"normal"</code>（默认）。未知名按 normal 并告警。破坏性擦除（挖洞）必须垫底。</td>
+</tr>
+<tr>
+<td><code>ring</code></td>
+<td><code>(x, y, outer_r, width, r, g, b, a)</code></td>
+<td>圆环。<code>outer_r</code> 外半径，<code>width</code> 从外径向内收缩（中心线半径 = outer_r − width/2）；<code>width ≥ outer_r</code> 退化为实心圆。</td>
+</tr>
+<tr>
+<td><code>image</code></td>
+<td><code>(x, y, scale, a)</code></td>
+<td>贴出宿主预注入的悬浮标位图（<code>set_hover_image</code>），以 (x,y) 为<strong>中心</strong>，尺寸 = 原尺寸 × <code>scale</code>（缩放倍数，非边长），<code>a</code> 为整体透明度。<code>scale</code> 下限 0.01。无图时静默跳过。</td>
+</tr>
+<tr>
+<td><code>rect</code></td>
+<td><code>(x, y, w, h, r, g, b, a)</code></td>
+<td>轴对齐填充矩形（实色快路）。</td>
+</tr>
+<tr>
+<td><code>line</code></td>
+<td><code>(x1, y1, x2, y2, width, r, g, b, a)</code></td>
+<td>描边线段，圆头圆角（Round cap/join）。</td>
+</tr>
+<tr>
+<td><code>diamond</code></td>
+<td><code>(x, y, size, r, g, b, a)</code></td>
+<td>菱形（四顶点 <code>size</code> 半对角线），加色混合（Blend::Plus）。</td>
+</tr>
+<tr>
+<td><code>glow</code></td>
+<td><code>(x, y, radius, r, g, b, a)</code></td>
+<td>三层辉光（半径 ×2.5 / ×1.2 / ×1 叠加，alpha 0.12 / 0.30 / 1.0），加色混合。</td>
+</tr>
+<tr>
+<td><code>plus_circle</code></td>
+<td><code>(x, y, radius, r, g, b, a)</code></td>
+<td>加色（Blend::Plus）实心圆；颜色已烘进 alpha，cmd alpha 恒 1.0。</td>
+</tr>
+<tr>
+<td><code>radial</code></td>
+<td><code>(x, y, radius, r, g, b, a)</code></td>
+<td>径向渐变圆：中心 color → 边缘透明（SourceOver）。</td>
+</tr>
+<tr>
+<td><code>diamond_rot</code></td>
+<td><code>(x, y, s, angle, r, g, b, a)</code></td>
+<td>旋转菱形（按 <code>angle</code> 弧度旋），加色混合。</td>
+</tr>
+<tr>
+<td><code>polygon</code></td>
+<td><code>(points, r, g, b, a)</code></td>
+<td>普通混合（SourceOver）填充多边形。<code>points</code> 为 <code>{{x,y}, {x,y}, …}</code>（每个点 table 取 <code>[1]=x,[2]=y</code>）。点数 &lt; 3 不绘制。</td>
+</tr>
+<tr>
+<td><code>fill_polygon</code></td>
+<td><code>(points, r, g, b, a)</code></td>
+<td>加色版（Blend::Plus）填充多边形，参数同 <code>polygon</code>。</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>(x, y, s, size, r, g, b, a)</code></td>
+<td>文字，锚点为排版盒<strong>左上角</strong>。</td>
+</tr>
+<tr>
+<td><code>text_centered</code></td>
+<td><code>(cx, cy, s, size, r, g, b, a)</code></td>
+<td>文字，锚点为<strong>几何中心</strong>（点击点周围随机冒字用）。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4-扩展-API-全局-userdata-ext">4. 扩展 API：全局 userdata <code>ext</code></h2>
+<p>每个 VM 都被设为全局 <code>ext</code>，<strong>所有脚本类型都能用</strong>；调用用冒号语法 <code>ext:xxx(...)</code>。</p>
+<table>
+<thead>
+<tr>
+<th>成员</th>
+<th>形式</th>
+<th>签名 / 返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_image</code></td>
+<td>方法</td>
+<td><code>ext:get_image() -&gt; ExtImage | nil</code></td>
+<td>当前贴图（仅贴图动作上下文有值；脚本页 / 无贴图时返回 <code>nil</code>）。</td>
+</tr>
+<tr>
+<td><code>result</code></td>
+<td>函数</td>
+<td><code>ext:result(text: string)</code></td>
+<td>弹出一个可复制文本框（非阻塞，自带消息泵）。</td>
+</tr>
+<tr>
+<td><code>log</code></td>
+<td>函数</td>
+<td><code>ext:log(msg: string)</code></td>
+<td>走 Rust 日志（<code>[ext] msg</code>），便于排障。</td>
+</tr>
+<tr>
+<td><code>http</code></td>
+<td>函数</td>
+<td><code>ext:http(method, url, headers: table, body?: string) -&gt; { status: int, body: string }</code></td>
+<td><strong>阻塞</strong> HTTP（60s 超时）。<code>headers</code> 为 <code>key=value</code> 表；<code>method</code> 支持 GET / DELETE / POST / PUT（其它方法返回 <code>{status=0, body="不支持的 HTTP 方法…"}</code>）。错误时 <code>status=0</code> 且 <code>body</code> 为错误信息字符串（不 panic）。</td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td>方法</td>
+<td><code>ext:input(title: string, default?: string) -&gt; string \| nil</code></td>
+<td>弹一个可编辑输入框（阻塞，自带消息泵）。确定 = 返回输入文本；取消 / <code>Esc</code> / 关窗 = 返回 <code>nil</code>。</td>
+</tr>
+<tr>
+<td><code>json_decode</code></td>
+<td>函数</td>
+<td><code>ext:json_decode(text: string) -&gt; table \| nil</code></td>
+<td>JSON 文本 → Lua 表（数组 → 1 起始序列表）。解析失败返回 <code>nil</code>（不抛错）。</td>
+</tr>
+<tr>
+<td><code>json_encode</code></td>
+<td>函数</td>
+<td><code>ext:json_encode(value) -&gt; string</code></td>
+<td>Lua 表 / 标量 → JSON 文本。<code>1..n</code> 连续整数键的表 = 数组，其余 = 对象；不支持的值（函数等）→ <code>null</code>。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4-1-ExtImage-userdata">4.1 <code>ExtImage</code> userdata</h3>
+<p>由 <code>ext:get_image()</code> 与 <code>run</code> 模型的 <code>ctx.image</code> 返回。只读快照克隆，脚本改动不回写贴图。</p>
+<table>
+<thead>
+<tr>
+<th>成员</th>
+<th>形式</th>
+<th>签名 / 返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>w</code> / <code>h</code></td>
+<td>只读字段</td>
+<td><code>img.w -&gt; int</code> / <code>img.h -&gt; int</code></td>
+<td>位图宽 / 高。</td>
+</tr>
+<tr>
+<td><code>png_base64</code></td>
+<td>方法</td>
+<td><code>img:png_base64() -&gt; string</code></td>
+<td>编码为 base64 PNG 文本（在线接口用）。</td>
+</tr>
+<tr>
+<td><code>save</code></td>
+<td>方法</td>
+<td><code>img:save(path: string)</code></td>
+<td>存成 PNG 文件（父目录会自动创建）。</td>
+</tr>
+<tr>
+<td><code>pixel</code></td>
+<td>方法</td>
+<td><code>img:pixel(x, y) -&gt; r, g, b, a</code></td>
+<td>逐点取 RGBA（4 个 int）。越界（负 / 超宽高）返回<strong>全 nil</strong>，脚本自行判断。</td>
+</tr>
+<tr>
+<td><code>bytes</code></td>
+<td>方法</td>
+<td><code>img:bytes() -&gt; string</code></td>
+<td>原始 RGBA 缓冲（二进制安全字符串，长度 = w×h×4，行优先）。批量采样比逐点 <code>pixel</code> 快一个量级。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="5-文件系统-ctx-fs-只读">5. 文件系统：<code>ctx.fs</code>（只读）</h2>
+<p>仅 <strong><code>run(ctx, params)</code> 模型</strong>的脚本（<code>image</code> / <code>keysound</code>）通过 <code>ctx.fs</code> 拿到。<br />
+根 = 脚本所在目录。逃逸校验：绝对路径、<code>..</code> 父级、<code>C:\</code> / <code>/</code> 前缀一律返回 <code>nil</code> /<br />
+<code>false</code>（防手滑越界，<strong>非安全沙箱</strong>）。</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>签名</th>
+<th>返回</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>read</code></td>
+<td><code>fs:read(rel: string) -&gt; string | nil</code></td>
+<td>文本读取；不存在 / 越界 / 读失败返回 <code>nil</code>。</td>
+<td></td>
+</tr>
+<tr>
+<td><code>read_bytes</code></td>
+<td><code>fs:read_bytes(rel: string) -&gt; string | nil</code></td>
+<td>二进制读取（编码安全字符串）。</td>
+<td></td>
+</tr>
+<tr>
+<td><code>exists</code></td>
+<td><code>fs:exists(rel: string) -&gt; bool</code></td>
+<td>存在性（不区分文件 / 目录）。</td>
+<td></td>
+</tr>
+<tr>
+<td><code>list</code></td>
+<td><code>fs:list(rel: string) -&gt; { names... } | nil</code></td>
+<td>目录条目（文件名 / 目录名，不含 <code>.</code> / <code>..</code>）；读取失败返回 <code>nil</code>。</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-run-ctx-params-模型的-ctx-table-字段">6. <code>run(ctx, params)</code> 模型的 <code>ctx</code> table 字段</h2>
+<p>仅 <code>image</code> 与 <code>keysound</code> 角色走 <code>run</code>。<code>ctx</code> 由宿主构造并固定字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+<th>出现于</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ctx.role</code></td>
+<td>角色字符串（<code>"image"</code> / <code>"keysound"</code> 等）</td>
+<td>所有 run 脚本</td>
+</tr>
+<tr>
+<td><code>ctx.fs</code></td>
+<td>只读文件访问 userdata（见 §5）</td>
+<td>所有 run 脚本</td>
+</tr>
+<tr>
+<td><code>ctx.ext</code></td>
+<td><code>ExtApi</code> 引用（<code>ext</code> 全局的副本）</td>
+<td>所有 run 脚本</td>
+</tr>
+<tr>
+<td><code>ctx.image</code></td>
+<td><code>ExtImage</code> userdata（仅由贴图右键动作触发时有值）</td>
+<td><code>image</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.hwnd</code></td>
+<td>结果框 / 弹窗 owner 窗口句柄（整数）</td>
+<td><code>image</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.sounds</code></td>
+<td>音效候选名数组（1 起索引的 table）</td>
+<td><code>keysound</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.mods</code></td>
+<td>修饰键表 <code>{ ctrl, alt, shift, win }</code>（bool）</td>
+<td><code>keysound</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.key</code></td>
+<td>键名字符串（与击键回显同源，如 <code>"A"</code> / <code>"F5"</code> / <code>"Space"</code>）</td>
+<td><code>keysound</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.repeated</code></td>
+<td>是否长按自动重复（bool）</td>
+<td><code>keysound</code> 角色</td>
+</tr>
+<tr>
+<td><code>ctx.dt</code></td>
+<td>距上次按键时长（整数毫秒，<strong>当前恒 0</strong>，占位）</td>
+<td><code>keysound</code> 角色</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>run</code> 模型脚本<strong>不</strong>刷新 §2 的全局 <code>host</code> / <code>cursor_*</code> / <code>elapsed</code> 等，需要环境信息时<br />
+改用 <code>ctx.role</code> 或自行维护。</p>
+</blockquote>
+<hr />
+<h2 id="7-脚本可声明的顶层全局-由-Rust-读取-非脚本调用">7. 脚本可声明的顶层全局（由 Rust 读取，非脚本调用）</h2>
+<table>
+<thead>
+<tr>
+<th>全局名</th>
+<th>类型</th>
+<th>读取方</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>effect_name</code></td>
+<td>string</td>
+<td>特效三目录扫描取显示名；缺失回退文件名</td>
+<td>特效显示名。</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>string</td>
+<td>统一框架脚本取显示名，缺省文件名</td>
+<td>显示名。</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td>string</td>
+<td>统一框架</td>
+<td>一句话说明（可选）。</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td>string</td>
+<td>注册表</td>
+<td><code>image</code> / <code>effect</code> / <code>keysound</code> / <code>composite</code>；缺省推演见 §8。</td>
+</tr>
+<tr>
+<td><code>menu</code></td>
+<td>string</td>
+<td>统一框架</td>
+<td>贴图右键「图片操作」子菜单文本；<code>nil</code> 表示只出现在脚本页。</td>
+</tr>
+<tr>
+<td><code>hide_cursor</code></td>
+<td>bool</td>
+<td>引擎读取全局</td>
+<td>脚本声明隐藏系统指针时设 <code>true</code>；不存在 / 非布尔 → <code>false</code>。必须在 <code>load_script</code> 之后读取（顶层赋值在执行期写入 globals）。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-脚本必须-可以定义的回调-函数">8. 脚本必须 / 可以定义的回调（函数）</h2>
+<p>这些<strong>不是</strong> Rust 预定义函数，而是宿主在合适时机反向调用脚本里定义的全局函数。<br />
+所有 <code>params</code> 参数都是 <code>schema()</code> 声明的参数表（缺键时用 <code>params.x or 默认</code> 兜底；也可读全局 <code>_params</code>）。</p>
+<table>
+<thead>
+<tr>
+<th>回调</th>
+<th>签名</th>
+<th>被谁调用</th>
+<th>说明 / 返回值契约</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>schema</code></td>
+<td><code>schema() -&gt; table</code></td>
+<td>注册表扫描期 + 运行时</td>
+<td><strong>必需</strong>（否则无参数 UI）。返回参数声明数组。</td>
+</tr>
+<tr>
+<td><code>defaults</code></td>
+<td><code>defaults() -&gt; table</code></td>
+<td>引擎</td>
+<td><strong>遗留兼容</strong>：老脚本不写 <code>schema</code> 时回退用。新脚本请用 <code>schema</code>。</td>
+</tr>
+<tr>
+<td><code>init</code></td>
+<td><code>init()</code></td>
+<td>各宿主</td>
+<td>可选。启用 / 热重载后调一次，清零状态。缺失不报错。</td>
+</tr>
+<tr>
+<td><code>on_move</code></td>
+<td><code>on_move(x, y, t, params)</code></td>
+<td>拖尾 / 悬浮标 / 点击效果 / 复合</td>
+<td>鼠标采样。<code>t</code> = 共享时钟（秒）。</td>
+</tr>
+<tr>
+<td><code>step</code></td>
+<td><code>step(dt, t, params)</code></td>
+<td>同上</td>
+<td>每帧推进。<strong><code>dt</code> 单位 = 秒</strong>；老化 / 淡出必须放这里（鼠标不动也要推进）。</td>
+</tr>
+<tr>
+<td><code>draw</code></td>
+<td><code>draw(ctx, params) -&gt; number?</code></td>
+<td>同上</td>
+<td>每帧绘制。返回值语义 = 续帧请求：返回 <code>n&gt;0</code> = "n 毫秒后再来一帧"；返回 0 / 负数 / 其它类型 / <code>nil</code> = 不请求额外帧。<strong>只对悬浮标（<code>HoverDot/</code>）真正成立</strong>；拖尾 / 点击不看返回值（靠"是否还在画"判活）。</td>
+</tr>
+<tr>
+<td><code>on_press</code></td>
+<td><code>on_press(x, y, t, params)</code></td>
+<td>全部宿主</td>
+<td>指针按下触发一次。<strong>兼容老名 <code>on_click</code></strong>（先找 <code>on_press</code>，没有再回退 <code>on_click</code>，都没有则静默跳过）。</td>
+</tr>
+<tr>
+<td><code>on_mouse_down</code></td>
+<td><code>on_mouse_down(button, x, y, params)</code></td>
+<td>复合脚本专属</td>
+<td>鼠标按下，<code>button</code> ∈ <code>"left"/"right"/"middle"/"x1"/"x2"</code>（参数顺序刻意与 <code>on_press(x,y,t)</code> 不同名，防抄错）。取时间用全局 <code>elapsed</code>。</td>
+</tr>
+<tr>
+<td><code>on_key</code></td>
+<td><code>on_key(key, mods, repeated, params)</code></td>
+<td>复合脚本专属</td>
+<td>键盘按下。<code>key</code> = 键名；<code>mods</code> = <code>{ctrl,alt,shift,win}</code>；<code>repeated</code> = 是否长按重复。返回值当前未被宿主解释，发声请显式调 <code>play_sound()</code>。</td>
+</tr>
+<tr>
+<td><code>run</code></td>
+<td><code>run(ctx, params) -&gt; value</code></td>
+<td><code>image</code> / <code>keysound</code> 角色入口</td>
+<td>无全局 <code>run</code> → 返回 <code>nil</code>。</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>回调容错：除 <code>schema</code> / <code>init</code> 外，缺失的回调<strong>静默跳过</strong>（不报错、不 panic）。纯绘制脚本<br />
+不写 <code>on_press</code> / <code>step</code> 完全正常。</p>
+</blockquote>
+<hr />
+<h2 id="9-schema-参数表结构">9. <code>schema()</code> 参数表结构</h2>
+<p><code>registry.rs::parse_schema_table</code> 解析 <code>schema()</code> 返回的数组，每项为带字段的 table：</p>
+<table>
+<thead>
+<tr>
+<th>字段（Lua 键）</th>
+<th>类型</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>key</code></td>
+<td>string</td>
+<td><strong>配置键</strong>，脚本里 <code>params.&lt;key&gt;</code> 取用。缺省 / 空则跳过该项。</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>string</td>
+<td>UI 显示名；缺省 = <code>key</code>。</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>string</td>
+<td>参数类型（见下表）。未知 / 缺省 → <code>"float"</code>。</td>
+</tr>
+<tr>
+<td><code>min</code> / <code>max</code></td>
+<td>number</td>
+<td>滑块 / 数值范围（bool / choice / sound / folder / str / file / hotkey 忽略）。缺省 0 / 1。</td>
+</tr>
+<tr>
+<td><code>step</code></td>
+<td>number</td>
+<td>滑块步进（仅 UI）。缺省 0.01。</td>
+</tr>
+<tr>
+<td><code>default</code></td>
+<td>number / string / bool</td>
+<td>默认值；缺失时按类型给兜底。</td>
+</tr>
+<tr>
+<td><code>choices</code></td>
+<td>table(array)</td>
+<td><code>choice</code> 类型的候选项字符串（也是存进配置、喂给脚本的稳定值，勿改）。</td>
+</tr>
+<tr>
+<td><code>labels</code></td>
+<td>table(array)</td>
+<td><code>choice</code> 各选项界面显示名（可选，与 <code>choices</code> 一一对应；长度不符则整份丢弃）。</td>
+</tr>
+<tr>
+<td><code>group</code></td>
+<td>string</td>
+<td>分组名（UI 分组标题，可选）。</td>
+</tr>
+<tr>
+<td><code>alpha</code></td>
+<td>bool</td>
+<td><strong>仅 <code>color</code> 用</strong>。为 <code>true</code> 时取色器带透明度条、落盘走 8 位 <code>#RRGGBBAA</code>、脚本 <code>hex_to_rgb</code> 第 4 返回值拿到 0–255 alpha；未开则恒 6 位（<code>alpha</code> 恒 255）。</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>type</code> 取值 → 面板控件</strong>：<code>float</code>（滑条+输入框）/ <code>int</code>（整数滑条）/ <code>bool</code>（开关）/<br />
+<code>color</code>（取色器，<code>alpha=true</code> 出透明度条）/ <code>choice</code>（下拉）/ <code>sound</code>（音效下拉）/<br />
+<code>folder</code>（文件夹）/ <code>image</code>（图片接口，UI 占位）/ <code>str</code>（文本框）/ <code>file</code>（文件浏览）/<br />
+<code>hotkey</code>（快捷键捕获框：点击后按下的组合键写回框内，值 = 规范化按键串如 <code>Ctrl+Alt+H</code>，<br />
+空串 = 停用）。★ <code>hotkey</code> 只有 <code>scripts/</code> 独立脚本会被当成<strong>全局热键</strong>触发运行；<br />
+特效 / 贴图脚本声明它只是存一个键位串。</p>
+<blockquote>
+<p>★★ <strong>颜色串只有两种写法：<code>#RRGGBB</code> 与 <code>#RRGGBBAA</code>（alpha 在末尾）</strong>。项目里<strong><br />
+不存在</strong> <code>#AARRGGBB</code>。<code>hex_to_rgb</code> 的第 4 返回值对应 alpha（0–255）。</p>
+</blockquote>
+<hr />
+<h2 id="10-四类脚本角色-role-与宿主差异">10. 四类脚本角色（<code>role</code>）与宿主差异</h2>
+<p>挂载点 = <strong>目录</strong>（不是脚本里的声明）：</p>
+<table>
+<thead>
+<tr>
+<th>目录 / 角色</th>
+<th><code>role</code>（缺省推演）</th>
+<th>宿主 <code>host</code></th>
+<th>模型</th>
+<th>可用回调</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>assets/lua/MouseTrail/</code></td>
+<td><code>effect</code></td>
+<td><code>"trail"</code></td>
+<td>绘图回调</td>
+<td><code>init</code>, <code>on_move</code>, <code>step</code>, <code>draw</code></td>
+</tr>
+<tr>
+<td><code>assets/lua/HoverDot/</code></td>
+<td><code>effect</code></td>
+<td><code>"hover"</code></td>
+<td>绘图回调</td>
+<td><code>init</code>, <code>draw</code>（可用 <code>ctx:image</code> 贴预载位图）</td>
+</tr>
+<tr>
+<td><code>assets/lua/ClickFx/</code></td>
+<td><code>effect</code></td>
+<td><code>"clickfx"</code></td>
+<td>绘图回调</td>
+<td><code>on_press</code>/<code>on_click</code>, <code>step</code>, <code>draw</code></td>
+</tr>
+<tr>
+<td><code>assets/lua/scripts/</code></td>
+<td>缺 <code>role</code> 且无 <code>menu</code> → <strong><code>composite</code></strong></td>
+<td><code>"panel"</code></td>
+<td>绘图回调 + <code>play_sound</code></td>
+<td><code>init</code>, <code>on_move</code>, <code>on_mouse_down</code>, <code>on_key</code>, <code>step</code>, <code>draw</code></td>
+</tr>
+<tr>
+<td>贴图动作脚本</td>
+<td>有 <code>menu</code> 无 <code>role</code> → <code>image</code></td>
+<td>—（走 <code>run</code>）</td>
+<td><code>run(ctx, params)</code></td>
+<td><code>run</code></td>
+</tr>
+<tr>
+<td>击键音效脚本</td>
+<td><code>keysound</code></td>
+<td>—（走 <code>run</code>）</td>
+<td><code>run(ctx, params)</code></td>
+<td><code>run</code></td>
+</tr>
+<tr>
+<td>其它目录散件</td>
+<td>无 <code>role</code> 且无 <code>menu</code> 又不在上述目录 → <strong>告警并跳过</strong></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="11-关键返回值契约速查">11. 关键返回值契约速查</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>返回值</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>draw(ctx, params)</code></td>
+<td><code>nil</code> / 0 / 负数 / 其它类型</td>
+<td>不请求额外帧（静止时零功耗）。</td>
+</tr>
+<tr>
+<td><code>draw(ctx, params)</code></td>
+<td><code>n &gt; 0</code></td>
+<td>请求 n 毫秒后再来一帧（悬浮标淡出靠它跑完）。</td>
+</tr>
+<tr>
+<td><code>run</code>（image）</td>
+<td>非空 <code>string</code></td>
+<td>自动弹结果框显示该文本。</td>
+</tr>
+<tr>
+<td><code>run</code>（image）</td>
+<td><code>nil</code> / 空串</td>
+<td>脚本已自行用 <code>ext:result</code> 弹框。</td>
+</tr>
+<tr>
+<td><code>run</code>（keysound）</td>
+<td><code>false</code></td>
+<td><strong>强制静音</strong>（连宿主默认音也不响）。</td>
+</tr>
+<tr>
+<td><code>run</code>（keysound）</td>
+<td><code>string</code>（非空，去空白）</td>
+<td>当作音效路径 / 名，经 <code>stored_file_path</code> 解析播放。</td>
+</tr>
+<tr>
+<td><code>run</code>（keysound）</td>
+<td><code>integer</code> / <code>number</code></td>
+<td>当作 <code>ctx.sounds</code> 数组的 1 起索引，选中该候选音；越界 / ≤0 落回默认。</td>
+</tr>
+<tr>
+<td><code>run</code>（keysound）</td>
+<td><code>nil</code> / <code>true</code> / 其它</td>
+<td>落回宿主默认音（出厂 <code>click3</code>）。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="12-实现位置索引-按文件">12. 实现位置索引（按文件）</h2>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>负责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scripting/engine.rs</code></td>
+<td>VM 生命周期 + 所有 <code>call_*</code> 反向调用 + 环境注入（<code>update_env</code> / <code>set_wall_ms</code>）+ <code>get_effect_name</code> / <code>get_hide_cursor</code> + 全局 <code>ext</code> 注册</td>
+</tr>
+<tr>
+<td><code>scripting/api_draw.rs</code></td>
+<td>绘图 userdata <code>DrawListCtx</code>（§3）+ 全局 <code>ctx</code> / <code>hsv_to_rgb</code> 注册</td>
+</tr>
+<tr>
+<td><code>scripting/api_effect.rs</code></td>
+<td>颜色 / 随机 / 数学全局函数（§1.1）+ 环境变量初值（§2）</td>
+</tr>
+<tr>
+<td><code>scripting/api_ext.rs</code></td>
+<td><code>ext</code> userdata <code>ExtApi</code>（§4）+ <code>ExtImage</code>（§4.1）</td>
+</tr>
+<tr>
+<td><code>scripting/fs_api.rs</code></td>
+<td><code>ctx.fs</code> 只读文件访问（§5）+ 逃逸校验</td>
+</tr>
+<tr>
+<td><code>scripting/registry.rs</code></td>
+<td>特效三目录 Manifest 扫描 + <code>ParamType</code> / <code>ParamDef</code> / <code>EffectSchema</code></td>
+</tr>
+<tr>
+<td><code>scripting/registry_ext.rs</code></td>
+<td>统一框架（递归扫 <code>assets/lua/</code>）Manifest + <code>role</code> 推演</td>
+</tr>
+<tr>
+<td><code>scripting/ext_runner.rs</code></td>
+<td>贴图 / 脚本页扩展脚本执行器（<code>run(ctx,params)</code> + <code>ctx.image</code> / <code>ctx.hwnd</code> 注入）</td>
+</tr>
+<tr>
+<td><code>scripting/runtime.rs</code></td>
+<td>宿主级 VM 缓存 <code>EngineCache</code>（热更新 + GC）</td>
+</tr>
+<tr>
+<td><code>modules/trail/companion.rs</code></td>
+<td>复合脚本宿主：注入 <code>play_sound</code>、<code>host="panel"</code>、调用各回调</td>
+</tr>
+<tr>
+<td><code>modules/key_sound.rs</code></td>
+<td><code>keysound</code> 宿主：构造 <code>ctx.sounds/mods/key/repeated/dt</code> 并 <code>run</code></td>
+</tr>
+<tr>
+<td><code>modules/trail/fx_core.rs</code></td>
+<td><code>FxCore</code> 驱动（拖尾 / 悬浮标 / 点击效果 / 复合共用的引擎）</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<p class="meta">CurSeen 随包文档 · 由仓库 <code>assets/lua/README.md</code> 与 <code>assets/lua/API.md</code> 生成 · 界面文案与实现一致</p>
+<nav class="toc" aria-label="目录">
+<div class="toc-title">目录</div>
+<ul>
+<li class="toc-l1"><a href="#第一部分Lua-脚本指南">第一部分Lua 脚本指南</a></li>
+<li class="toc-l1"><a href="#CurSeen-Lua-脚本指南-脚本作者向">CurSeen Lua 脚本指南（脚本作者向）</a></li>
+<li class="toc-l2"><a href="#一-脚本放哪-怎么生效">一、脚本放哪、怎么生效</a></li>
+<li class="toc-l2"><a href="#二-顶层声明-元信息">二、顶层声明（元信息）</a></li>
+<li class="toc-l2"><a href="#三-四类脚本的契约">三、四类脚本的契约</a></li>
+<li class="toc-l3"><a href="#3-1-绘制特效-role-effect-拖尾-悬浮标-点击效果">3.1 绘制特效 role=&quot;effect&quot;（拖尾 / 悬浮标 / 点击效果）</a></li>
+<li class="toc-l3"><a href="#3-2-击键音效-role-keysound">3.2 击键音效 role=&quot;keysound&quot;</a></li>
+<li class="toc-l3"><a href="#3-3-图片操作扩展-role-image">3.3 图片操作扩展 role=&quot;image&quot;</a></li>
+<li class="toc-l3"><a href="#3-4-复合脚本-role-composite-API-全开放">3.4 复合脚本 role=&quot;composite&quot;（API 全开放）</a></li>
+<li class="toc-l2"><a href="#四-参数-schema-自动生成面板控件">四、参数 schema（自动生成面板控件）</a></li>
+<li class="toc-l2"><a href="#五-通用-ctx-成员-所有-run-类脚本">五、通用 ctx 成员（所有 run 类脚本）</a></li>
+<li class="toc-l2"><a href="#六-性能与正确性规则">六、性能与正确性规则</a></li>
+<li class="toc-l2"><a href="#七-出厂参考脚本">七、出厂参考脚本</a></li>
+<li class="toc-l2"><a href="#八-快速排错">八、快速排错</a></li>
+<li class="toc-l1"><a href="#第二部分Lua-API-参考">第二部分Lua API 参考</a></li>
+<li class="toc-l1"><a href="#CurSeen-Lua-脚本-API-参考-完整版">CurSeen Lua 脚本 API 参考（完整版）</a></li>
+<li class="toc-l2"><a href="#0-两个-ctx-的约定-极易混淆">0. 两个 ctx 的约定（极易混淆）</a></li>
+<li class="toc-l2"><a href="#1-全局函数-Rust-注入到-Lua-全局表">1. 全局函数（Rust 注入到 Lua 全局表）</a></li>
+<li class="toc-l3"><a href="#1-1-颜色-随机-数学助手">1.1 颜色 / 随机 / 数学助手</a></li>
+<li class="toc-l3"><a href="#1-2-HSV-助手">1.2 HSV 助手</a></li>
+<li class="toc-l3"><a href="#1-3-复合脚本专属-播放音效">1.3 复合脚本专属：播放音效</a></li>
+<li class="toc-l2"><a href="#2-全局环境变量-每帧由宿主注入-脚本只读">2. 全局环境变量（每帧由宿主注入，脚本只读）</a></li>
+<li class="toc-l2"><a href="#3-绘图上下文-ctx-全局-userdata-DrawListCtx">3. 绘图上下文 ctx（全局 userdata DrawListCtx）</a></li>
+<li class="toc-l2"><a href="#4-扩展-API-全局-userdata-ext">4. 扩展 API：全局 userdata ext</a></li>
+<li class="toc-l3"><a href="#4-1-ExtImage-userdata">4.1 ExtImage userdata</a></li>
+<li class="toc-l2"><a href="#5-文件系统-ctx-fs-只读">5. 文件系统：ctx.fs（只读）</a></li>
+<li class="toc-l2"><a href="#6-run-ctx-params-模型的-ctx-table-字段">6. run(ctx, params) 模型的 ctx table 字段</a></li>
+<li class="toc-l2"><a href="#7-脚本可声明的顶层全局-由-Rust-读取-非脚本调用">7. 脚本可声明的顶层全局（由 Rust 读取，非脚本调用）</a></li>
+<li class="toc-l2"><a href="#8-脚本必须-可以定义的回调-函数">8. 脚本必须 / 可以定义的回调（函数）</a></li>
+<li class="toc-l2"><a href="#9-schema-参数表结构">9. schema() 参数表结构</a></li>
+<li class="toc-l2"><a href="#10-四类脚本角色-role-与宿主差异">10. 四类脚本角色（role）与宿主差异</a></li>
+<li class="toc-l2"><a href="#11-关键返回值契约速查">11. 关键返回值契约速查</a></li>
+<li class="toc-l2"><a href="#12-实现位置索引-按文件">12. 实现位置索引（按文件）</a></li>
+</ul>
+</nav>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var map = {}; links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h1[id],h2[id],h3[id]'));
+  function onScroll(){
+    var cur = heads.length ? heads[0].id : null;
+    for (var i=0;i<heads.length;i++){
+      if (heads[i].getBoundingClientRect().top <= 90) cur = heads[i].id; else break;
+    }
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if (cur && map[cur]) map[cur].classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+
+</body>
+</html>

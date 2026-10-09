@@ -1,0 +1,277 @@
+[package]
+name = "windui"
+version = "0.20.0"
+edition = "2021"
+description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText）"
+authors = ["huanfeng <huanfengf@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/huanfeng/wind-ui-rust"
+homepage = "https://github.com/huanfeng/wind-ui-rust"
+documentation = "https://docs.rs/windui"
+readme = "README.md"
+keywords = ["gui", "ui", "desktop", "windows", "macos"]
+categories = ["gui", "rendering", "os::windows-apis", "os::macos-apis"]
+# 发布到 crates.io 时排除非源码资产，保持包精简。
+exclude = [".github/", ".remember/", "/scripts", "/temp", "/artifacts"]
+
+[features]
+# SVG 支持默认开启；体积敏感可 `--no-default-features` 关掉以剔除 resvg/usvg 依赖树。
+default = ["svg", "d2d"]
+svg = ["dep:resvg"]
+d2d = []
+# CurSeen fork：逐像素透明覆盖层（WS_EX_LAYERED + UpdateLayeredWindow + DIB section）。
+# 上游 0.19.0 没有这项能力，由我们的 fork 引入（见 src/platform/win32/layered.rs）。
+layered = []
+# 跨平台 GPU 渲染后端（wgpu）。
+#
+# **macOS 上无需开启，它恒可用**：那里 GPU 后端是唯一的硬件加速路径（Windows 有 D2D），
+# 依赖声明在 macOS 的 target 段里、非 optional，门控由 build.rs 发的 `cfg(gpu_backend)`
+# 接管。之所以不写成「macOS 的默认 feature」，是因为 **Cargo 没有按 target 生效的默认
+# feature**：`default` 是全局的，把 gpu 放进去 Windows 也会跟着编一遍 wgpu 依赖树。
+#
+# 本 feature 因此只对**非 macOS**目标有意义：Windows 上开它是为了跑 GPU 后端的离屏测试
+# （DX12/WARP），Linux 平台层将来落地时也走这里。默认关——那两处的默认渲染路径分别是
+# D2D 与软光栅，多编一棵 wgpu 依赖树只是纯代价。
+#
+# 详见 docs/gpu-cross-platform-design.md。
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+# SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
+# SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
+svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
+
+# 构建脚本依赖：把 assets/windui.ico 嵌进示例 exe 的资源（见 build.rs）。
+# 只在 host 为 Windows 时拉取——Win32 资源在别的 host 上无从编译，那里 build.rs
+# 整段被 cfg 关掉，不需要这个依赖。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+# 跨平台依赖（所有目标平台共用）。
+[dependencies]
+# 与 resvg 0.48 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
+tiny-skia = "0.12"
+# 系统原生文件/目录选择对话框（PickDialog）。仅用阻塞 API，禁用异步 feature。
+rfd = { version = "0.17", default-features = false }
+# SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
+# 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
+resvg = { version = "0.48", optional = true, default-features = false }
+# 主题配置（TOML 映射）。
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+# 日志门面：库只发不收，后端由应用装（不装就是空操作）。平台层的消息入口、宿主的浮层
+# 开合、拖放路由都有记录，下游排"点了没反应"的问题靠它对时间线。
+log = "0.4"
+# ---- GPU 后端（wgpu）：非 macOS 目标，随 `gpu` feature 引入 ----
+# macOS 那份声明在下面的 target 段里且**非 optional**（那里恒编入，理由见 [features] 的
+# `gpu` 注释）。同一个依赖在两个 target 段各声明一次是 Cargo 支持的写法，两边版本必须
+# 一致——否则同一棵树里会出现两份 wgpu。
+#
+# wgpu：跨平台 GPU 抽象（macOS→Metal / Linux→Vulkan,GL / Windows→DX12）。版本锁在单一大版本，
+# 其 API 迭代快，升级时只需改 src/render/gpu/（面积受控）。
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30", optional = true }
+# 实例缓冲的 Rust 结构体 ↔ 字节切片转换。
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+# wgpu 的 adapter/device 请求与 buffer map 是 async，本项目无运行时，用它就地阻塞。
+pollster = { version = "1", optional = true }
+
+
+# ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
+[target.'cfg(windows)'.dependencies]
+# #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
+# 0.62 起 implement 宏由 windows-core 无条件导出（windows 不再有 implement feature）。
+windows-core = "0.62"
+# rfd 的 set_parent 需要 HasWindowHandle（与 rfd 0.14 依赖版本对齐）。
+raw-window-handle = "0.6"
+# D2D 几何/画刷端点用 Matrix3x2/Vector2（windows 0.62 已把数值类型拆到 windows-numerics）。
+windows-numerics = "0.3"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Media",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Touch",
+    # ★ CurSeen 补丁 093：直接吃 WM_POINTER（数位板笔起笔零延迟，见 mod.rs）。
+    "Win32_UI_Input_Pointer",
+    "Win32_System_LibraryLoader",
+    # 读「应用使用浅色模式」那一项（见 `platform::win32::system_prefers_dark`）。
+    # 系统主题偏好没有别的读法：UISettings 要 WinRT，为一个 DWORD 拉进整套 COM 不划算。
+    "Win32_System_Registry",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_Ole",
+    # 拖出（DoDragDrop）：IDropSource 的按键位在 SystemServices，IDataObject 的
+    # STGMEDIUM 挂在 Com_StructuredStorage 下。
+    "Win32_System_SystemServices",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+# ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
+# objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
+# 缺哪个类型就在对应 features 里补哪个。
+[target.'cfg(target_os = "macos")'.dependencies]
+# `catch-all`：每次 msg_send 都包一层 @try/@catch，把 Objective-C 异常转成 Rust panic。
+#
+# 为什么必须开：ObjC 异常穿不过 Rust 栈。不接住的话，它一路 unwind 到 main 的
+# catch_unwind 被判成 foreign exception，随即 abort() —— 崩溃日志里只剩
+# `__rust_foreign_exception` 和一句 "abort() called"，异常名与 reason 全丢。
+# WindInput #67 就是这么查了半天，真正的信息（`-[NSApplication activate]:
+# unrecognized selector`）压根没进日志。开了以后同一场景 panic 出的是：
+#   uncaught exception 'NSInvalidArgumentException' reason: -[NSApplication xxx]:
+#   unrecognized selector sent to instance  + 完整 ObjC 栈
+#
+# 为什么不是在外层手工 `exception::catch` 兜一次：兜不住。异常在 `objc_msgSend` 这道
+# extern "C"（nounwind）边界上就已 terminate，根本 unwind 不到外层的 @try。只有逐次
+# 包裹（即本 feature）才能在抛出点接住。
+#
+# ⚠ 收益依赖 `panic = "unwind"`：panic=abort 下转出来的 panic 落在 nounwind 上下文里，
+# 只会得到一句 "panic in a function that cannot unwind"，信息照样丢。宿主 profile 若
+# 设了 panic="abort"，这层保护等于没有。
+#
+# 代价：每个 msg_send 多一组 landing pad，二进制变大、内联受阻；不抛异常时运行时开销为零。
+# 实测 wind_setting release（aarch64）9,477,856 → 9,773,616 字节，+289 KB / +3.1%。
+objc2 = { version = "0.6", features = ["catch-all"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSLocale",
+    "NSURL",
+    "NSData",
+    "NSGeometry",
+    "NSValue",
+    "NSArray",
+    "NSDictionary",
+    "NSAttributedString",
+    "NSRange",
+    "NSObjCRuntime",
+    "NSNotification",
+    "NSThread",
+    "NSTimer",
+    "NSDate",
+    "NSUserNotification",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSView",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSColor",
+    "NSScreen",
+    "NSImage",
+    "NSImageRep",
+    "NSPasteboard",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSButton",
+    "NSControl",
+    "NSCell",
+    "NSMenu",
+    "NSMenuItem",
+    "NSWorkspace",
+    "NSCursor",
+    "NSTrackingArea",
+    "NSText",
+    "NSTextInputClient",
+    "NSTextInputContext",
+    "NSDragging",
+    "NSPasteboardItem",
+    "NSRunningApplication",
+    "NSWindowScripting",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFBase",
+    "CFString",
+    "CFAttributedString",
+    "CFDictionary",
+    "CFArray",
+    "CFData",
+    "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGContext",
+    "CGImage",
+    "CGColorSpace",
+    "CGColor",
+    "CGGeometry",
+    "CGAffineTransform",
+    "CGDataProvider",
+    "CGPath",
+] }
+# ---- GPU 后端（wgpu）：macOS 恒编入，不挂 feature ----
+# macOS 没有第二条硬件加速路径（Windows 有 D2D），把它藏在一个默认关的 feature 后面，
+# 等于默认没有硬件加速、而下游还得先去读 Cargo.toml 才知道有这回事。恒编入之后，
+# 开不开由运行期的 `App::renderer` 决定（默认仍是 `Renderer::Software`）。
+#
+# 代价写在明处：macOS 下游无条件多编一棵 wgpu 依赖树（编译 +1~2 分钟、二进制 +2~4MB），
+# `--no-default-features` 也关不掉它——那个开关管的是 svg/d2d。
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+# QuartzCore/CoreAnimation：GPU 后端把 `CAMetalLayer` 挂到内容视图上，wgpu 从该 layer 建
+# surface（见 platform/macos/window.rs）。只要 CALayer/CAMetalLayer 两个类型——不开
+# `objc2-metal`，Metal 设备与像素格式全由 wgpu 在 layer 上设置，本项目不碰。
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMetalLayer",
+    "CATransaction",
+    "objc2-core-foundation",
+] }
+objc2-core-text = { version = "0.3", features = [
+    "CTLine",
+    "CTFramesetter",
+    "CTFrame",
+    "CTTypesetter",
+    "CTRun",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTParagraphStyle",
+    "CTStringAttributes",
+] }
+
+# 这两个示例用到 svg feature 才有的 API（`icon_svg` / `image_svg`）。声明 required-features
+# 后，`--no-default-features` 下它们被跳过而非编译失败——其余示例仍自动发现，无需逐个声明。
+[[example]]
+name = "fullshowcase"
+required-features = ["svg"]
+
+[[example]]
+name = "image"
+required-features = ["svg"]
+
+# 仅作用于本 crate 的独立构建（examples）；作为依赖时 profile 由宿主决定。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# ⚠ 这行让 objc2 的 catch-all 在 examples 上失效：转出来的 panic 落在 nounwind 上下文，
+# 只剩一句 "panic in a function that cannot unwind"。示例以体积为先，接受这个取舍；
+# 但**下游应用不要跟着抄** —— 详见上面 objc2 依赖处的说明。
+panic = "abort"
+strip = true
+
+# docs.rs 默认在 Linux x86_64 构建文档，但本 crate 仅 Windows/macOS 可编译
+# （Linux 会触发 platform/mod.rs 的 compile_error!）。指定构建目标，否则文档页常红。
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "aarch64-apple-darwin"]
+all-features = true

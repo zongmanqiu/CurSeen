@@ -1,0 +1,364 @@
+{
+  "name": "ANSI 60",
+  "defaults": {
+    "font_size": 14,
+    "corner_radius": 8,
+    "click_through": false,
+    "always_on_top": true,
+    "fullscreen_avoid": true
+  },
+  "rows": [
+    {
+      "keys": [
+        {
+          "code": "`",
+          "text": "`",
+          "shift_text": "~"
+        },
+        {
+          "code": "1",
+          "text": "1",
+          "shift_text": "!"
+        },
+        {
+          "code": "2",
+          "text": "2",
+          "shift_text": "@"
+        },
+        {
+          "code": "3",
+          "text": "3",
+          "shift_text": "#"
+        },
+        {
+          "code": "4",
+          "text": "4",
+          "shift_text": "$"
+        },
+        {
+          "code": "5",
+          "text": "5",
+          "shift_text": "%"
+        },
+        {
+          "code": "6",
+          "text": "6",
+          "shift_text": "^"
+        },
+        {
+          "code": "7",
+          "text": "7",
+          "shift_text": "&"
+        },
+        {
+          "code": "8",
+          "text": "8",
+          "shift_text": "*"
+        },
+        {
+          "code": "9",
+          "text": "9",
+          "shift_text": "("
+        },
+        {
+          "code": "0",
+          "text": "0",
+          "shift_text": ")"
+        },
+        {
+          "code": "-",
+          "text": "-",
+          "shift_text": "_"
+        },
+        {
+          "code": "=",
+          "text": "=",
+          "shift_text": "+"
+        },
+        {
+          "code": "Backspace",
+          "text": "Backspace",
+          "w": 2.0
+        }
+      ]
+    },
+    {
+      "keys": [
+        {
+          "code": "Tab",
+          "text": "Tab",
+          "w": 1.5
+        },
+        {
+          "code": "q",
+          "text": "q",
+          "shift_text": "Q",
+          "caps": true
+        },
+        {
+          "code": "w",
+          "text": "w",
+          "shift_text": "W",
+          "caps": true
+        },
+        {
+          "code": "e",
+          "text": "e",
+          "shift_text": "E",
+          "caps": true
+        },
+        {
+          "code": "r",
+          "text": "r",
+          "shift_text": "R",
+          "caps": true
+        },
+        {
+          "code": "t",
+          "text": "t",
+          "shift_text": "T",
+          "caps": true
+        },
+        {
+          "code": "y",
+          "text": "y",
+          "shift_text": "Y",
+          "caps": true
+        },
+        {
+          "code": "u",
+          "text": "u",
+          "shift_text": "U",
+          "caps": true
+        },
+        {
+          "code": "i",
+          "text": "i",
+          "shift_text": "I",
+          "caps": true
+        },
+        {
+          "code": "o",
+          "text": "o",
+          "shift_text": "O",
+          "caps": true
+        },
+        {
+          "code": "p",
+          "text": "p",
+          "shift_text": "P",
+          "caps": true
+        },
+        {
+          "code": "[",
+          "text": "[",
+          "shift_text": "{"
+        },
+        {
+          "code": "]",
+          "text": "]",
+          "shift_text": "}"
+        },
+        {
+          "code": "\\",
+          "text": "\\",
+          "shift_text": "|",
+          "w": 1.5
+        }
+      ]
+    },
+    {
+      "keys": [
+        {
+          "code": "CapsLock",
+          "text": "Caps",
+          "w": 1.75
+        },
+        {
+          "code": "a",
+          "text": "a",
+          "shift_text": "A",
+          "caps": true
+        },
+        {
+          "code": "s",
+          "text": "s",
+          "shift_text": "S",
+          "caps": true
+        },
+        {
+          "code": "d",
+          "text": "d",
+          "shift_text": "D",
+          "caps": true
+        },
+        {
+          "code": "f",
+          "text": "f",
+          "shift_text": "F",
+          "caps": true
+        },
+        {
+          "code": "g",
+          "text": "g",
+          "shift_text": "G",
+          "caps": true
+        },
+        {
+          "code": "h",
+          "text": "h",
+          "shift_text": "H",
+          "caps": true
+        },
+        {
+          "code": "j",
+          "text": "j",
+          "shift_text": "J",
+          "caps": true
+        },
+        {
+          "code": "k",
+          "text": "k",
+          "shift_text": "K",
+          "caps": true
+        },
+        {
+          "code": "l",
+          "text": "l",
+          "shift_text": "L",
+          "caps": true
+        },
+        {
+          "code": ";",
+          "text": ";",
+          "shift_text": ":"
+        },
+        {
+          "code": "'",
+          "text": "'",
+          "shift_text": "\""
+        },
+        {
+          "code": "Enter",
+          "text": "Enter",
+          "w": 2.25
+        }
+      ]
+    },
+    {
+      "keys": [
+        {
+          "code": "LShift",
+          "text": "Shift",
+          "w": 2.25
+        },
+        {
+          "code": "z",
+          "text": "z",
+          "shift_text": "Z",
+          "caps": true
+        },
+        {
+          "code": "x",
+          "text": "x",
+          "shift_text": "X",
+          "caps": true
+        },
+        {
+          "code": "c",
+          "text": "c",
+          "shift_text": "C",
+          "caps": true
+        },
+        {
+          "code": "v",
+          "text": "v",
+          "shift_text": "V",
+          "caps": true
+        },
+        {
+          "code": "b",
+          "text": "b",
+          "shift_text": "B",
+          "caps": true
+        },
+        {
+          "code": "n",
+          "text": "n",
+          "shift_text": "N",
+          "caps": true
+        },
+        {
+          "code": "m",
+          "text": "m",
+          "shift_text": "M",
+          "caps": true
+        },
+        {
+          "code": ",",
+          "text": ",",
+          "shift_text": "<"
+        },
+        {
+          "code": ".",
+          "text": ".",
+          "shift_text": ">"
+        },
+        {
+          "code": "/",
+          "text": "/",
+          "shift_text": "?"
+        },
+        {
+          "code": "RShift",
+          "text": "Shift",
+          "w": 2.75
+        }
+      ]
+    },
+    {
+      "keys": [
+        {
+          "code": "LCtrl",
+          "text": "Ctrl",
+          "w": 1.25
+        },
+        {
+          "code": "LWin",
+          "text": "Win",
+          "w": 1.25
+        },
+        {
+          "code": "LAlt",
+          "text": "Alt",
+          "w": 1.25
+        },
+        {
+          "code": "Space",
+          "text": "",
+          "w": 6.25
+        },
+        {
+          "code": "RAlt",
+          "text": "Alt",
+          "w": 1.25
+        },
+        {
+          "code": "RWin",
+          "text": "Win",
+          "w": 1.25
+        },
+        {
+          "code": "Menu",
+          "text": "Menu",
+          "w": 1.25
+        },
+        {
+          "code": "RCtrl",
+          "text": "Ctrl",
+          "w": 1.25
+        }
+      ]
+    }
+  ]
+}

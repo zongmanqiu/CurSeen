@@ -1,0 +1,2637 @@
+//! tiny-skia 后端：把 `Canvas` 图元光栅化到 `Pixmap`（RGBA 预乘）。
+//!
+//! 支持矩形裁剪栈：用 alpha `Mask` 表示当前裁剪区，所有绘制传入栈顶 mask。
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use tiny_skia::{
+    FillRule, FilterQuality, GradientStop as SkStop, LineCap, LineJoin, LinearGradient, Mask,
+    Paint as SkPaint, PathBuilder, Pixmap, PixmapMut, PixmapPaint, Point as SkPoint,
+    RadialGradient, Shader, SpreadMode, Stroke, Transform,
+};
+
+/// 阴影缓存键：(物理宽, 物理高, 圆角, 模糊半径, 颜色 RGBA)。
+type ShadowKey = (i32, i32, i32, i32, u32);
+
+thread_local! {
+    /// 模糊后阴影 Pixmap 缓存。阴影几何帧间通常不变，缓存避免每帧重复 box-blur（卡顿主因）。
+    static SHADOW_CACHE: RefCell<HashMap<ShadowKey, Pixmap>> = RefCell::new(HashMap::new());
+}
+
+/// 是否禁用阴影绘制（环境变量 WINDUI_NOSHADOW；低端机降级或排查阴影开销用）。读一次缓存。
+/// `pub(crate)`：D2D 后端的 `draw_shadow` 复用同一开关，保证两后端阴影禁用语义一致。
+pub(crate) fn shadows_disabled() -> bool {
+    use std::sync::OnceLock;
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var("WINDUI_NOSHADOW").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+/// 构造一张模糊后的圆角矩形阴影 Pixmap（位置无关，可缓存复用）。
+fn build_shadow_pixmap(
+    tw: i32,
+    th: i32,
+    margin: i32,
+    pw: f32,
+    ph: f32,
+    pr: f32,
+    pblur: f32,
+    color: Color,
+) -> Pixmap {
+    let mut tmp =
+        Pixmap::new(tw as u32, th as u32).unwrap_or_else(|| Pixmap::new(1, 1).expect("1x1 pixmap"));
+    if let Some(path) = rounded_rect_path(margin as f32, margin as f32, pw, ph, pr) {
+        let mut sp = SkPaint::default();
+        sp.set_color(to_sk_color(color));
+        sp.anti_alias = true;
+        tmp.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), None);
+    }
+    let r = pblur.round() as usize;
+    if r > 0 {
+        box_blur(&mut tmp, r);
+    }
+    tmp
+}
+
+use super::image::{Fit, Image};
+use super::{rounded_rect_path, BlendMode, Canvas, Paint};
+use crate::geometry::{Color, Point, Rect};
+use crate::spec::Align;
+use crate::text::TextEngine;
+
+/// 裁剪层：有效裁剪矩形（各级交集）+ 对应 alpha mask。
+///
+/// **不变量：`mask` 恒是 `rect` 对应的轴对齐矩形**（`clip_rect` 是唯一的入栈处，
+/// 那里用 `push_rect` 填充、且不开抗锯齿）。`SkiaCanvas::fast_fill_rect` 依赖这一点
+/// 直接对 `rect` 求交而**不读 `mask`**。若将来新增 `clip_path` 之类的非矩形裁剪，
+/// 必须同时让快路认得出它并退回通用路径——否则那条路会静默画错：不报错、不 panic，
+/// 只是裁剪失效，多出来的部分照画。
+struct Clip {
+    rect: Rect,
+    mask: Mask,
+}
+
+/// 离屏合成层：与主缓冲同尺寸的透明子缓冲 + 整体不透明度。
+struct Layer {
+    pixmap: Pixmap,
+    opacity: f32,
+}
+
+/// 让 [`SkiaCanvas`] 既能借用一份自有 `Pixmap`，也能**直接指向外部内存**——
+/// 后者是 CurSeen 补丁 015（单缓冲）的前提：分层覆盖层把 GDI DIB section 的 bits 当作
+/// 唯一后备缓冲，省掉一份整屏 `Pixmap`（1080p 7.9MB / 4K 33MB）。
+///
+/// 用 trait 而不是把字段改成 `PixmapMut` 后逼所有调用点改写成 `pm.as_mut()`：
+/// `SkiaCanvas::new(&mut pm)` 这种写法全仓有四十余处（几乎都在测试里），桥接一层能把
+/// 改动面收敛到渲染层自身。
+pub trait IntoPixmapMut<'a> {
+    fn into_pixmap_mut(self) -> PixmapMut<'a>;
+}
+
+impl<'a> IntoPixmapMut<'a> for &'a mut Pixmap {
+    fn into_pixmap_mut(self) -> PixmapMut<'a> {
+        self.as_mut()
+    }
+}
+
+impl<'a> IntoPixmapMut<'a> for PixmapMut<'a> {
+    fn into_pixmap_mut(self) -> PixmapMut<'a> {
+        self
+    }
+}
+
+/// 直接绘制到借入的 `Pixmap`。
+///
+/// 控件树用**逻辑坐标**（dp）；本 canvas 通过 `scale` 把逻辑坐标变换为物理像素：
+/// 图形走 tiny-skia `Transform::from_scale`，文字按物理字号交 DirectWrite 渲染。
+pub struct SkiaCanvas<'a> {
+    /// 目标缓冲。是 `PixmapMut` 而非 `&mut Pixmap`：单缓冲模式下它指向 GDI DIB section
+    /// 的内存（见 [`IntoPixmapMut`]），此时并不存在任何自有 `Pixmap`。
+    pixmap: PixmapMut<'a>,
+    engine: Option<&'a mut dyn TextEngine>,
+    clips: Vec<Clip>,
+    /// save() 记录的栈深度，restore() 据此回弹。
+    saves: Vec<usize>,
+    /// 逻辑→物理缩放因子（DPI / 96）。
+    scale: f32,
+    /// 局部重绘原点（**逻辑坐标**）：pixmap 是脏区大小的子缓冲，其 (0,0) 对应世界 `offset`。
+    /// 所有图元绘制时减去此偏移，使世界坐标落入子 pixmap。全窗重绘时为 (0,0)。
+    offset: Point,
+    /// 离屏合成层栈（子树 opacity 用）：非空时绘制重定向到栈顶层。
+    layers: Vec<Layer>,
+}
+
+impl<'a> SkiaCanvas<'a> {
+    /// 无文字能力（仅图形），scale=1。
+    pub fn new(pixmap: impl IntoPixmapMut<'a>) -> Self {
+        Self {
+            pixmap: pixmap.into_pixmap_mut(),
+            engine: None,
+            clips: Vec::new(),
+            saves: Vec::new(),
+            scale: 1.0,
+            offset: Point::new(0, 0),
+            layers: Vec::new(),
+        }
+    }
+
+    /// 带文字引擎与 DPI 缩放（全窗重绘，无偏移）。
+    pub fn with_text(
+        pixmap: impl IntoPixmapMut<'a>,
+        engine: &'a mut dyn TextEngine,
+        scale: f32,
+    ) -> Self {
+        Self::with_text_offset(pixmap, engine, scale, Point::new(0, 0))
+    }
+
+    /// 局部重绘：`offset`（逻辑坐标）为子 pixmap 在世界中的左上角。
+    pub fn with_text_offset(
+        pixmap: impl IntoPixmapMut<'a>,
+        engine: &'a mut dyn TextEngine,
+        scale: f32,
+        offset: Point,
+    ) -> Self {
+        Self {
+            pixmap: pixmap.into_pixmap_mut(),
+            engine: Some(engine),
+            clips: Vec::new(),
+            saves: Vec::new(),
+            scale,
+            offset,
+            layers: Vec::new(),
+        }
+    }
+
+    /// 纯色 paint（stroke/line 用；渐变在 fill 路径单独处理）。
+    fn sk_paint(p: &Paint) -> SkPaint<'static> {
+        let mut sp = SkPaint::default();
+        sp.set_color(to_sk_color(p.color));
+        sp.anti_alias = p.anti_alias;
+        sp.blend_mode = to_sk_blend(p.blend);
+        sp
+    }
+
+    /// fill 类 paint：有 gradient 时按 (x,y,w,h) 逻辑矩形构造渐变 shader，
+    /// 坐标交由 self.tf() 统一缩放/平移（与 path 同一变换空间）。无 gradient 退纯色。
+    fn fill_paint(p: &Paint, x: f32, y: f32, w: f32, h: f32) -> SkPaint<'static> {
+        let mut sp = SkPaint::default();
+        match p.gradient.as_ref().and_then(|g| sk_shader(g, x, y, w, h)) {
+            Some(s) => sp.shader = s,
+            None => sp.set_color(to_sk_color(p.color)),
+        }
+        sp.anti_alias = p.anti_alias;
+        sp.blend_mode = to_sk_blend(p.blend);
+        sp
+    }
+
+    /// 在当前绘制目标（栈顶离屏层，或主缓冲）上填充路径，带栈顶裁剪 mask。
+    fn fill_path_on_target(&mut self, path: &tiny_skia::Path, sp: &SkPaint, tf: Transform) {
+        let mask = self.clips.last().map(|c| &c.mask);
+        match self.layers.last_mut() {
+            Some(l) => l.pixmap.fill_path(path, sp, FillRule::Winding, tf, mask),
+            None => self.pixmap.fill_path(path, sp, FillRule::Winding, tf, mask),
+        };
+    }
+
+    /// 当前绘制目标缓冲（栈顶离屏层，或主缓冲）。仅用于无 self.clips/self.engine
+    /// 并发借用的场景（draw_image 自带局部 mask）；其余处内联 match 以满足借用拆分。
+    ///
+    /// ★ 返回**自有** `PixmapMut` 而不是 `&mut`：两个分支的底层类型不同（离屏层是自有
+    /// `Pixmap`，主缓冲可能是外部内存的 `PixmapMut`，见 [`IntoPixmapMut`]），
+    /// 只有 tiny-skia 的 `PixmapMut` 能同时表示两者。
+    fn target_pixmap(&mut self) -> Option<PixmapMut<'_>> {
+        if let Some(l) = self.layers.last_mut() {
+            return Some(l.pixmap.as_mut());
+        }
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        PixmapMut::from_bytes(self.pixmap.data_mut(), w, h)
+    }
+
+    /// 在当前绘制目标上描边路径，带栈顶裁剪 mask。
+    fn stroke_path_on_target(
+        &mut self,
+        path: &tiny_skia::Path,
+        sp: &SkPaint,
+        stroke: &Stroke,
+        tf: Transform,
+    ) {
+        let mask = self.clips.last().map(|c| &c.mask);
+        match self.layers.last_mut() {
+            Some(l) => l.pixmap.stroke_path(path, sp, stroke, tf, mask),
+            None => self.pixmap.stroke_path(path, sp, stroke, tf, mask),
+        };
+    }
+
+    /// 纯色轴对齐矩形的快路径：跳过路径光栅化，直接按行写像素。
+    ///
+    /// tiny-skia 只对**不透明纯色**有 memset 级快路；一旦半透明就落进通用 raster
+    /// pipeline（每像素转 f32 过一遍 stage 链）。实测 1920×1080 全屏填充：不透明
+    /// 0.22ms，半透明 3.94ms——同样的 source-over 直接在整数域按行做只要 0.36ms。
+    /// 而大面积半透明叠层（RoleAlpha 淡底、遮罩层、卡片底）恰是 UI 上最常见的填充，
+    /// 故单独特化。不透明一支同样走这里：省掉建路径与扫描线的固定开销。
+    ///
+    /// 能走快路的前提是**物理边界落在整数像素上**——那时矩形没有抗锯齿边，整行都是
+    /// 同一个值，才可以整段写。`align_to_device` 已把逻辑坐标对齐到 1/scale 网格，
+    /// 这里再校验一次；对不上就返回 `false`，由调用方落回通用路径。宁可慢，也不能
+    /// 画出与通用路径不同的边缘。
+    ///
+    /// 返回 `true` 表示本次填充已完成（含「被裁剪成空、无需落笔」）。
+    ///
+    /// `radius` 为逻辑圆角半径，0 即直角。圆角带内逐像素按到圆心的距离求覆盖率做
+    /// 抗锯齿，其余部分整行写——真实界面里圆角带只占极小面积（`r=10` 时四角合计约
+    /// 400 像素），而通用路径要为这点弧线把**整个**矩形拖进扫描线光栅 + mask 采样：
+    /// 实测一张 1884×412 的不透明圆角卡片要 20.2ms（26ns/像素），而全屏纯色填充只要
+    /// 0.1ns/像素。这条快路针对的正是这个组合。
+    // 用 chunks_exact_mut 而非 as_chunks_mut：后者要 Rust 1.88，而本 crate 已发布到
+    // crates.io 且未声明 rust-version，换过去会让老工具链的下游直接编译失败。两者
+    // 生成的代码等价。
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    #[allow(clippy::too_many_arguments)]
+    fn fast_fill_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        anti_alias: bool,
+        color: Color,
+    ) -> bool {
+        let s = self.scale;
+        // 非有限坐标必须挡在门外。EPS 那道闸门对它们是**失效**的：w 为无穷时
+        // 「差值取整再比较」得到 NaN，而 NaN 与 EPS 的任何比较都是 false——闸门放行，
+        // 无穷取整再饱和成 i32::MAX，于是一路写到缓冲右边缘。通用路径这时什么都不画
+        // （tiny-skia 的 Rect 构造对非有限值返回 None），两者行为相反：上游一个除零
+        // 原本表现为「这块没画出来」，会变成「大片被这个颜色刷掉」。
+        // NaN 那一路本就安全：NaN 转 i32 得 0，使 x0 >= x1，不落笔。
+        // is_finite 必须排在比较之前：NaN 与任何数比较都是 false，先比大小会把它放行。
+        if s <= 0.0
+            || !x.is_finite()
+            || !y.is_finite()
+            || !w.is_finite()
+            || !h.is_finite()
+            || !radius.is_finite()
+            || w <= 0.0
+            || h <= 0.0
+            || radius < 0.0
+        {
+            return false;
+        }
+        let (ox, oy) = (self.offset.x as f32, self.offset.y as f32);
+        let fx0 = (x - ox) * s;
+        let fy0 = (y - oy) * s;
+        let fx1 = (x + w - ox) * s;
+        let fy1 = (y + h - oy) * s;
+        // 容差取 0.01 物理像素：align_to_device 的浮点往返只会带来远小于此的误差，
+        // 而真正的亚像素边界（非 25% 倍数缩放等）会明显超出，从而落回通用路径。
+        const EPS: f32 = 0.01;
+        if (fx0 - fx0.round()).abs() > EPS
+            || (fy0 - fy0.round()).abs() > EPS
+            || (fx1 - fx1.round()).abs() > EPS
+            || (fy1 - fy1.round()).abs() > EPS
+        {
+            return false;
+        }
+        let (mut x0, mut y0) = (fx0.round() as i32, fy0.round() as i32);
+        let (mut x1, mut y1) = (fx1.round() as i32, fy1.round() as i32);
+        // 圆角几何锚在**未裁剪**的矩形上：裁剪只决定写哪些像素，不改变形状。若拿裁剪后
+        // 的边界去算圆心，被滚动容器切到一半的卡片就会在切口处冒出一个本不存在的圆角。
+        let (rx0, ry0, rx1, ry1) = (x0, y0, x1, y1);
+        let pr = (radius * s)
+            .min((rx1 - rx0) as f32 * 0.5)
+            .min((ry1 - ry0) as f32 * 0.5)
+            .max(0.0);
+        // 裁剪求交：`clip_rect` 是唯一的裁剪入口，且只产生轴对齐的矩形 mask，
+        // 故 `Clip.rect` 已精确表达裁剪范围——快路无需读 mask。
+        if let Some(c) = self.clips.last() {
+            let pc = c.rect.offset(-self.offset.x, -self.offset.y).scaled(s);
+            x0 = x0.max(pc.x);
+            y0 = y0.max(pc.y);
+            // 饱和加：Rect::scaled 的 f32→i32 是饱和转换，极端输入下 pc.x 可能已是
+            // i32::MAX，裸加会在 debug 档 panic。当前所有 clip_rect 调用方传的都是
+            // 有界的控件矩形，够不着这里；但通用路径那侧走 mask，根本没有这个算式。
+            x1 = x1.min(pc.x.saturating_add(pc.w));
+            y1 = y1.min(pc.y.saturating_add(pc.h));
+        }
+        // ★ CurSeen 适配：本 fork 的 `target_pixmap()` 返回 `Option<PixmapMut>`（补丁 015
+        //   让主缓冲可能是外部内存的 DIB，见 `IntoPixmapMut`）；拿不到就落回通用路径
+        //   （返回 false = 快路未生效）。
+        let Some(mut target) = self.target_pixmap() else {
+            return false;
+        };
+        let (pw, ph) = (target.width() as i32, target.height() as i32);
+        x0 = x0.max(0);
+        y0 = y0.max(0);
+        x1 = x1.min(pw);
+        y1 = y1.min(ph);
+        if x0 >= x1 || y0 >= y1 || color.a == 0 {
+            return true;
+        }
+        // Pixmap 存**预乘** RGBA8，故源色先预乘再参与合成。
+        let a = color.a as u32;
+        let src = [
+            mul255(color.r as u32, a) as u8,
+            mul255(color.g as u32, a) as u8,
+            mul255(color.b as u32, a) as u8,
+            color.a,
+        ];
+        let stride = pw as usize * 4;
+        let (lo, hi) = (x0 as usize * 4, x1 as usize * 4);
+        let data = target.data_mut();
+        // 圆角带的四条边界（物理、含 0.5 像素中心偏移的比较基准）。直段行落在
+        // [top, bot] 之间，整行同值；圆角行只有左右各 pr 宽需要逐像素。
+        let (top, bot) = (ry0 as f32 + pr, ry1 as f32 - pr);
+        let (left, right) = (rx0 as f32 + pr, rx1 as f32 - pr);
+        for y in y0..y1 {
+            let base = y as usize * stride;
+            let fy = y as f32 + 0.5;
+            let ccy = if fy < top {
+                Some(top)
+            } else if fy > bot {
+                Some(bot)
+            } else {
+                None
+            };
+            let Some(ccy) = ccy else {
+                // 直段：整行同值，走整段写。
+                if color.a == 255 {
+                    for p in data[base + lo..base + hi].chunks_exact_mut(4) {
+                        p.copy_from_slice(&src);
+                    }
+                } else {
+                    let ia = 255 - a;
+                    for p in data[base + lo..base + hi].chunks_exact_mut(4) {
+                        // ★ CurSeen 补丁 090：目标像素**全透明**时 SourceOver 退化为
+                        //   Source（目标不贡献任何颜色），直接写源色即可——省掉四次乘法与
+                        //   "先读后写"的依赖链。覆盖层每帧都从「清屏(透明) → 填图元」开始，
+                        //   这条分支恒命中：实测 2560×1440 聚光灯暗罩光栅 9.80ms → 2.90ms。
+                        if p[3] == 0 {
+                            p.copy_from_slice(&src);
+                        } else {
+                            p[0] = src[0] + mul255(p[0] as u32, ia) as u8;
+                            p[1] = src[1] + mul255(p[1] as u32, ia) as u8;
+                            p[2] = src[2] + mul255(p[2] as u32, ia) as u8;
+                            p[3] = src[3] + mul255(p[3] as u32, ia) as u8;
+                        }
+                    }
+                }
+                continue;
+            };
+            // 圆角行的中段（左右圆心之间）覆盖率恒为 1，和直段一样可以整段写。不拆出来
+            // 的话，一张 1884×412、r=10 的卡片会有约 2×10×1864 ≈ 3.7 万个满覆盖像素
+            // 白白走逐像素分支 + 四次乘法——而这条快路的全部理由就是常数因子。
+            //
+            // 满覆盖的条件是 left <= x+0.5 <= right，即 x ∈ [ceil(left-0.5), floor(right-0.5)]。
+            let mid0 = (left - 0.5).ceil().max(x0 as f32) as i32;
+            let mid1 = ((right - 0.5).floor() + 1.0).min(x1 as f32) as i32;
+            if mid1 > mid0 {
+                let (mlo, mhi) = (mid0 as usize * 4, mid1 as usize * 4);
+                if color.a == 255 {
+                    for p in data[base + mlo..base + mhi].chunks_exact_mut(4) {
+                        p.copy_from_slice(&src);
+                    }
+                } else {
+                    let ia = 255 - a;
+                    for p in data[base + mlo..base + mhi].chunks_exact_mut(4) {
+                        // ★ CurSeen 补丁 090：同上——透明目标直写。
+                        if p[3] == 0 {
+                            p.copy_from_slice(&src);
+                        } else {
+                            p[0] = src[0] + mul255(p[0] as u32, ia) as u8;
+                            p[1] = src[1] + mul255(p[1] as u32, ia) as u8;
+                            p[2] = src[2] + mul255(p[2] as u32, ia) as u8;
+                            p[3] = src[3] + mul255(p[3] as u32, ia) as u8;
+                        }
+                    }
+                }
+            }
+            // 两侧的圆角带：按到所属圆心的距离求覆盖率。
+            for x in x0..x1 {
+                // 中段已整段写过，跳过。
+                if x >= mid0 && x < mid1 {
+                    continue;
+                }
+                let fx = x as f32 + 0.5;
+                let ccx = if fx < left {
+                    Some(left)
+                } else if fx > right {
+                    Some(right)
+                } else {
+                    None
+                };
+                let cov = match ccx {
+                    None => 255,
+                    // 关掉抗锯齿时按像素中心是否落在圆内硬判定，与通用路径的非 AA
+                    // 光栅同口径。这条语义在 GPU 后端已被
+                    // `anti_alias_off_has_no_transition_band` 测成契约（边界上非背景
+                    // 即图元色），软件后端不能自作主张给它加一条过渡带。
+                    Some(ccx) if !anti_alias => {
+                        let (dx, dy) = (fx - ccx, fy - ccy);
+                        if dx * dx + dy * dy <= pr * pr {
+                            255
+                        } else {
+                            0
+                        }
+                    }
+                    Some(ccx) => {
+                        // 4×4 超采样求覆盖率。先前用 `pr + 0.5 - d` 的线性近似，在弧线
+                        // 45° 附近会偏出十几个色阶（实测与通用路径最大差 17）——弧在一个
+                        // 像素尺度上并不够直。超采样把误差压回 ±1 量级，代价是每个边缘
+                        // 像素 16 次平方比较，而圆角带本身只有四角那点面积。
+                        let mut hit = 0u32;
+                        for sy in 0..4 {
+                            let py = fy - 0.5 + (sy as f32 + 0.5) * 0.25 - ccy;
+                            for sx in 0..4 {
+                                let px = fx - 0.5 + (sx as f32 + 0.5) * 0.25 - ccx;
+                                if px * px + py * py <= pr * pr {
+                                    hit += 1;
+                                }
+                            }
+                        }
+                        hit * 255 / 16
+                    }
+                };
+                // 有效 alpha = 源 alpha × 覆盖率；为 0 的像素在圆角外，不落笔。
+                let sa = if cov == 255 { a } else { mul255(a, cov) };
+                if sa == 0 {
+                    continue;
+                }
+                let off = base + x as usize * 4;
+                let p = &mut data[off..off + 4];
+                if sa == 255 {
+                    p.copy_from_slice(&[color.r, color.g, color.b, 255]);
+                } else {
+                    let ia = 255 - sa;
+                    // ★ CurSeen 补丁 090：同上——透明目标直写（源色先按覆盖率缩放）。
+                    if p[3] == 0 {
+                        p[0] = mul255(color.r as u32, sa) as u8;
+                        p[1] = mul255(color.g as u32, sa) as u8;
+                        p[2] = mul255(color.b as u32, sa) as u8;
+                        p[3] = sa as u8;
+                    } else {
+                        p[0] = mul255(color.r as u32, sa) as u8 + mul255(p[0] as u32, ia) as u8;
+                        p[1] = mul255(color.g as u32, sa) as u8 + mul255(p[1] as u32, ia) as u8;
+                        p[2] = mul255(color.b as u32, sa) as u8 + mul255(p[2] as u32, ia) as u8;
+                        p[3] = sa as u8 + mul255(p[3] as u32, ia) as u8;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// 逻辑→物理变换：缩放后平移 -offset（物理像素），把世界坐标映射进子 pixmap。
+    fn tf(&self) -> Transform {
+        Transform::from_scale(self.scale, self.scale).post_translate(
+            -self.offset.x as f32 * self.scale,
+            -self.offset.y as f32 * self.scale,
+        )
+    }
+
+    /// 逻辑矩形 → **物理整数**矩形；落不到整数像素上时返回 `None`。
+    ///
+    /// 只服务于 [`Canvas::fill_round_rect`] 的整块清除快路（见那里）。整数条件是那条
+    /// 快路成立的前提：亚像素矩形在光栅器里边缘带部分覆盖率，直接 memset 会把边界
+    /// 那一圈清多，虽然看不见，但"快路与慢路结果不一致"是不能留的账。
+    ///
+    /// `align_to_device` 已经保证 `x`、`x+w` 落在整数物理坐标上，`offset×scale` 也是整数
+    /// （局部帧的 offset 按 4 逻辑像素对齐），故正常情况下恒为整数；这里的检查是兜底。
+    fn device_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Option<(i32, i32, i32, i32)> {
+        let s = self.scale;
+        let dx = x * s - self.offset.x as f32 * s;
+        let dy = y * s - self.offset.y as f32 * s;
+        let dw = w * s;
+        let dh = h * s;
+        let near = |a: f32, b: f32| (a - b).abs() <= 0.01;
+        let (rx, ry, rw, rh) = (dx.round(), dy.round(), dw.round(), dh.round());
+        if !near(dx, rx) || !near(dy, ry) || !near(dw, rw) || !near(dh, rh) {
+            return None;
+        }
+        Some((rx as i32, ry as i32, rw as i32, rh as i32))
+    }
+}
+
+impl Canvas for SkiaCanvas<'_> {
+    fn dpi_scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// 子 pixmap 覆盖的世界范围。全窗帧即整窗（等于不剔除），局部帧就是那块脏区。
+    ///
+    /// 向外各放一像素：物理→逻辑的除法有取整误差，压边的图元不能因为算窄了被丢掉。
+    fn cull_rect(&self) -> Option<Rect> {
+        let s = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let w = (self.pixmap.width() as f32 / s).ceil() as i32;
+        let h = (self.pixmap.height() as f32 / s).ceil() as i32;
+        Some(Rect::new(self.offset.x, self.offset.y, w, h).inflate(1))
+    }
+
+    fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
+        self.fill_round_rect(x, y, w, h, 0.0, paint);
+    }
+
+    fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
+        // 对齐物理像素整数坐标，**与 `stroke_round_rect` 用同一套公式**。
+        //
+        // 缺了这一步的症状：描边那侧早就对齐了（见其注释），填充这侧却按原始亚像素坐标
+        // 走，于是 125% / 150% 这类非整数 DPI 下，同一个矩形的底色边界与它的边框错开半个
+        // 物理像素——看起来就是「圆角的边框有点偏」。两者必须同源，单独对齐一侧只会把
+        // 错位从「都糊」变成「错开」。
+        //
+        // 对无边框的填充同样是改善：边界落在整数像素上，不再有一列半透明的抗锯齿边。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
+
+        // ★ CurSeen 补丁 009：整块清除的快路。
+        //
+        // `clear_rect` 走的是 `fill_rect → 本函数 → fill_path`，即**通用路径光栅器**：
+        // 轴对齐的整数矩形也要走一遍扫描线转换 + 逐像素混合。实测 1920×1080 清一次
+        // **12–17ms**（约 7ns/像素），而这一步在覆盖层每帧都要做——它就是「拖尾一开
+        // 就卡」的最大单项（见 `PATCHES-CURSEEN.md` 补丁 009 的实测）。
+        //
+        // `Clear` 混合的语义是「不看目标内容，结果恒为 0」，所以只要矩形落在整数物理
+        // 像素上，直接按行 memset 与光栅器的结果**逐像素相同**。亚像素（非整数）矩形
+        // 的边缘有部分覆盖率，那种情况仍回退原路径。
+        //
+        // 裁剪栈 / 离屏层非空时不走快路：前者要求逐像素乘 mask，后者目标是层缓冲。
+        if radius == 0.0
+            && paint.gradient.is_none()
+            && paint.blend == crate::render::BlendMode::Clear
+            && self.clips.is_empty()
+            && self.layers.is_empty()
+        {
+            if let Some(r) = self.device_rect(x, y, w, h) {
+                clear_device_rect(&mut self.pixmap, r);
+                return;
+            }
+        }
+
+        // （注：原补丁 031「实色快路」已作废——上游 0.20.0 的 `fast_fill_rect`
+        //  覆盖且更强，含圆角与 4×4 超采样。见 `PATCHES.md` 迁移判决。）
+
+        // 纯色（含圆角）走特化快路，见 `fast_fill_rect`。渐变仍交通用路径：每像素都要
+        // 算 shader，不是「整行同值」，特化占不到便宜。
+        //
+        // ★ CurSeen 补丁 002 闸：`fast_fill_rect` 的签名里**没有 blend**（只按
+        //   几何 + 颜色判断，内部假定 SourceOver）。不过闸的话，`BlendMode::Clear`
+        //   （清屏）会掉进它、被当成 SourceOver 混色——**编译通过、不报错，但画面
+        //   语义直接错**。所以这里显式排除非 SourceOver：`Clear` 由上面补丁 009 的
+        //   快路接管，`Plus` 走通用路径。
+        if paint.gradient.is_none()
+            && paint.blend == crate::render::BlendMode::SourceOver
+            && self.fast_fill_rect(x, y, w, h, radius, paint.anti_alias, paint.color)
+        {
+            return;
+        }
+        if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
+            let sp = Self::fill_paint(paint, x, y, w, h);
+            let tf = self.tf();
+            self.fill_path_on_target(&path, &sp, tf);
+        }
+    }
+
+    fn stroke_round_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        paint: &Paint,
+    ) {
+        let _g = super::prof::scope(super::prof::STROKE);
+        // 对齐物理像素整数坐标（与 D2DCanvas::stroke_round_rect 同源）：矩形四边乘以 scale
+        // 取整后还原，使描边中心（边 + half_width）在物理坐标上落在半像素（n+0.5），描边两侧
+        // 各 0.5px 恰好覆盖完整一列物理像素，消除非整数 DPI（125%/150%/175% 等）下的亚像素
+        // 抗锯齿模糊。tf() 的局部重绘 offset 已按 4 逻辑像素网格对齐（offset×scale 为整数），
+        // 故此处对齐逻辑坐标后经变换仍落在物理整数。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
+
+        let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
+        let half = width / 2.0;
+        if let Some(path) = rounded_rect_path(
+            x + half,
+            y + half,
+            w - width,
+            h - width,
+            (radius - half).max(0.0),
+        ) {
+            let sp = Self::sk_paint(paint);
+            let stroke = Stroke {
+                width,
+                ..Default::default()
+            };
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
+        }
+    }
+
+    fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::STROKE);
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        if let Some(path) = pb.finish() {
+            let sp = Self::sk_paint(paint);
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Butt,
+                ..Default::default()
+            };
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
+        }
+    }
+
+    fn draw_polyline(&mut self, pts: &[(f32, f32)], width: f32, paint: &Paint) {
+        if pts.len() < 2 {
+            return;
+        }
+        let _g = super::prof::scope(super::prof::STROKE);
+        let mut pb = PathBuilder::new();
+        pb.move_to(pts[0].0, pts[0].1);
+        for &(x, y) in &pts[1..] {
+            pb.line_to(x, y);
+        }
+        if let Some(path) = pb.finish() {
+            let sp = Self::sk_paint(paint);
+            // 端头保持平头（与 `draw_line` 一致，换成圆头会改变既有图形的外观）。
+            // 拐点用 **round** 而非 tiny-skia 默认的 miter：默认实现补的那个圆点
+            // 恰好就是 round join 的定义域，两边取同一种连接，软件路径与 D2D/wgpu
+            // 才画得出同一个形状。笔宽 2px 的对勾上，round 与 miter 的差别不足半像素。
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Butt,
+                line_join: LineJoin::Round,
+                ..Default::default()
+            };
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
+        }
+    }
+
+    fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+            let sp = Self::fill_paint(paint, cx - r, cy - r, 2.0 * r, 2.0 * r);
+            let tf = self.tf();
+            self.fill_path_on_target(&path, &sp, tf);
+        }
+    }
+
+    /// 路径填充：渐变按路径包围盒映射（与 `fill_circle` 同源），受裁剪 mask 与离屏层约束。
+    ///
+    /// **必须覆盖**：trait 的默认实现退化成包围盒矩形，多边形/椭圆会全画成方块。
+    fn fill_path(&mut self, path: &tiny_skia::Path, rule: FillRule, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
+        let b = path.bounds();
+        let sp = Self::fill_paint(paint, b.x(), b.y(), b.width(), b.height());
+        let tf = self.tf();
+        let mask = self.clips.last().map(|c| &c.mask);
+        match self.layers.last_mut() {
+            Some(l) => l.pixmap.fill_path(path, &sp, rule, tf, mask),
+            None => self.pixmap.fill_path(path, &sp, rule, tf, mask),
+        };
+    }
+
+    /// 抹成透明。走 `fill_rect` 以复用设备像素对齐：`Clear` 混合与对齐无关，
+    /// 但**边界必须**与后续绘制落在同一栅格，否则脏区边缘会留一圈没清干净的残留。
+    fn clear_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let _g = super::prof::scope(super::prof::FILL);
+        let p = Paint::fill_blend(Color::TRANSPARENT, BlendMode::Clear);
+        self.fill_rect(x, y, w, h, &p);
+    }
+
+    fn draw_shadow(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        blur: f32,
+        color: Color,
+    ) {
+        let _g = super::prof::scope(super::prof::SHADOW);
+        if color.a == 0 || w <= 0.0 || h <= 0.0 || shadows_disabled() {
+            return;
+        }
+        let s = self.scale;
+        // 逻辑→物理（含局部重绘 offset）。
+        let px = (x - self.offset.x as f32) * s;
+        let py = (y - self.offset.y as f32) * s;
+        let pw = w * s;
+        let ph = h * s;
+        let pr = (radius * s).max(0.0);
+        let pblur = (blur * s).max(0.0);
+        // 3 趟 box-blur（见 `box_blur`）**每趟各扩散 pblur**，总扩散 3×pblur——余量必须给足这么多。
+        //
+        // ★ 曾按 2× 留余量（注释写着"实际可见扩散约 1.5×半径"），那是把单趟当成了全部：
+        //   模糊尾部在 pixmap 边界处被硬截断，阴影最外圈留下一道直角硬边。半径越大越明显，
+        //   在远程桌面下尤其扎眼——RDP 强制走本软后端（见 platform/win32/mod.rs 的后端选择，
+        //   flip-model swapchain 在远程会话不可用），而有损压缩会把这道本就突兀的边缘糊成块。
+        let margin = (pblur * 3.0).ceil() as i32 + 1;
+        let tw = (pw.ceil() as i32 + 2 * margin).max(1);
+        let th = (ph.ceil() as i32 + 2 * margin).max(1);
+        // 体量保护：超大投影直接跳过（避免离屏分配爆炸）。
+        if tw > 8192 || th > 8192 {
+            return;
+        }
+        // 取/建缓存的模糊阴影（位置无关）：避免每帧重复 box-blur，且直接从缓存合成（不 clone，
+        // 省去每帧 memcpy）。借用拆分：src 借缓存、mask 借 self.clips、目标借 self.layers/pixmap，
+        // 分属不同对象/字段，可并存。
+        let color_key = ((color.r as u32) << 24)
+            | ((color.g as u32) << 16)
+            | ((color.b as u32) << 8)
+            | color.a as u32;
+        let key = (tw, th, pr.round() as i32, pblur.round() as i32, color_key);
+        // 合成到主缓冲：左上角对齐投影矩形外扩 margin 处；受当前裁剪 mask 约束（滚动视口）。
+        let dx = px.floor() as i32 - margin;
+        let dy = py.floor() as i32 - margin;
+        // 性能：阴影物理边界完全落在当前裁剪矩形内时，mask 裁不掉任何东西——跳过带 mask 的
+        // 慢合成路径（大阴影 + 全窗 mask 的逐像素采样是卡顿主因），仅在跨裁剪边界时才用 mask。
+        let shadow_inside = match self.clips.last() {
+            Some(c) => {
+                let cr = c
+                    .rect
+                    .offset(-self.offset.x, -self.offset.y)
+                    .scaled(self.scale);
+                dx >= cr.x && dy >= cr.y && dx + tw <= cr.x + cr.w && dy + th <= cr.y + cr.h
+            }
+            None => true,
+        };
+        SHADOW_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            // 防无界增长：不同尺寸有限，超阈值整体清空重建。
+            if cache.len() > 128 {
+                cache.clear();
+            }
+            let src = cache
+                .entry(key)
+                .or_insert_with(|| build_shadow_pixmap(tw, th, margin, pw, ph, pr, pblur, color));
+            let mask = if shadow_inside {
+                None
+            } else {
+                self.clips.last().map(|c| &c.mask)
+            };
+            let pp = PixmapPaint::default();
+            match self.layers.last_mut() {
+                Some(l) => {
+                    l.pixmap
+                        .draw_pixmap(dx, dy, src.as_ref(), &pp, Transform::identity(), mask)
+                }
+                None => {
+                    self.pixmap
+                        .draw_pixmap(dx, dy, src.as_ref(), &pp, Transform::identity(), mask)
+                }
+            };
+        });
+    }
+
+    fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {
+        let _g = super::prof::scope(super::prof::IMAGE);
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
+        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）；局部重绘减 offset 落入子 pixmap。
+        let pdst = dst
+            .offset(-self.offset.x, -self.offset.y)
+            .scaled(self.scale);
+        if pdst.is_empty() {
+            return;
+        }
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+        let (pw, ph) = (pdst.w as f32, pdst.h as f32);
+        let (px, py) = (pdst.x as f32, pdst.y as f32);
+
+        // 按 fit 求缩放因子与绘制原点（均在物理空间）。
+        let (sx, sy) = match fit {
+            Fit::Fill => (pw / iw, ph / ih),
+            Fit::Contain => {
+                let s = (pw / iw).min(ph / ih);
+                (s, s)
+            }
+            Fit::Cover => {
+                let s = (pw / iw).max(ph / ih);
+                (s, s)
+            }
+            // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
+            Fit::None => (self.scale, self.scale),
+        };
+        let (mut sx, mut sy) = (sx, sy);
+        let (mut dw, mut dh) = (iw * sx, ih * sy);
+        // 物理尺寸与源图相差不足 1 像素时吸附为 1:1：DPI 感知的矢量图标经此走上纯
+        // blit 路径，不再被双线性重采样摊糊；`scaled()` 四边各自 round 带来的 ±1
+        // 误差也在此吸收（否则细描边会被 0.97 倍这种"几乎 1:1"的缩放糊掉）。
+        if (dw - iw).abs() < 1.0 && (dh - ih).abs() < 1.0 {
+            sx = 1.0;
+            sy = 1.0;
+            dw = iw;
+            dh = ih;
+        }
+        // 在 dst 框内居中（Cover/None 的溢出由裁剪 mask 收口）。落点取整到物理像素：
+        // 尺寸对上了但平移带半像素，双线性同样会把 1:1 的图糊掉。
+        let tx = (px + (pw - dw) / 2.0).round();
+        let ty = (py + (ph - dh) / 2.0).round();
+
+        // ★ CurSeen 补丁 023：直角 + 1:1 + 无裁剪栈时，**不要那层整屏 Mask**。
+        //
+        // 原实现无条件构造 mask：`Mask::new(画布宽, 画布高)`（1920×1080 = 2 MB 分配 + 清零）
+        // → 把目标圆角矩形**填进 mask**（本来就要走一遍整屏抗锯齿路径填充）→ 再带 mask
+        // 采样混合。三趟整屏操作，而 mask 在下面这条分支里恒等于"目标矩形本身"：
+        //   · 直角（`radius <= 0`）⇒ 没有圆角要收口；
+        //   · 1:1（上一步的吸附已把 `sx/sy` 归一到 1）⇒ 双线性在整数落点上逐像素等于原像素；
+        //   · 裁剪栈 / 离屏层为空 ⇒ mask 不必与视口求交、目标就是主缓冲。
+        // 于是 mask 只剩"把 dst 矩形之外判掉"这一个作用——而 `draw_pixmap` 本来就把源图
+        // 限制在自己那 `iw×ih` 的范围内，不多画一个像素。
+        //
+        // 实测 1080p 整屏底图（CurSeen 叠层冻结帧）：18.7 ms → 5.4 ms（release 出货配置，
+        // 见 `PATCHES-CURSEEN.md` 补丁 023）。这条路径同时服务叠层底图、贴图窗大图、
+        // 悬浮标动画帧与面板图标——它们全都是"直角 + 1:1"。
+        //
+        // `quality` 用 `Nearest`：上面已经把这个分支限制在"1:1 且落点为整数"，此时每个目标
+        // 像素的采样点恰好落在源纹素正中心，最近邻取到的就是那颗纹素本身——与双线性**逐像素
+        // 相同**，但省掉了每像素 4 次取样 + 权重插值。整屏 1080p 底图实测 16.1 ms → 4.4 ms。
+        if radius <= 0.0
+            && sx == 1.0
+            && sy == 1.0
+            && self.clips.is_empty()
+            && self.layers.is_empty()
+        {
+            let fast = PixmapPaint {
+                opacity,
+                quality: FilterQuality::Nearest,
+                ..Default::default()
+            };
+            let img_ref = img.pixmap();
+            if let Some(mut t) = self.target_pixmap() {
+                t.draw_pixmap(
+                    tx as i32,
+                    ty as i32,
+                    img_ref.as_ref(),
+                    &fast,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            return;
+        }
+
+        let transform = Transform::from_scale(sx, sy).post_translate(tx, ty);
+
+        // 裁剪 mask：dst 圆角矩形 ∩ 当前裁剪区。radius<=0 时退化为矩形。
+        //
+        // 注意这块 mask 仍是**整幅窗口**大小（tiny-skia 要求 mask 与目标同尺寸），
+        // 1920×1080 下每张图 2MB 的分配 + 清零。也就是说本函数整体仍是 O(窗口)，
+        // 下面消掉的只是「逐像素求交」那一项；真要根治得把图先画进 dst 大小的临时
+        // pixmap 再合成，或复用一块按帧复位的 mask。
+        let (mw, mh) = (self.pixmap.width(), self.pixmap.height());
+        let Some(mut mask) = Mask::new(mw, mh) else {
+            return;
+        };
+        let pr = (radius * self.scale).min(pw / 2.0).min(ph / 2.0).max(0.0);
+        let Some(path) = rounded_rect_path(px, py, pw, ph, pr) else {
+            return;
+        };
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形（见 `Clip` 的不变量）。
+        //
+        // **不能用 `Mask::intersect_path`**：那是整幅 mask 的操作，成本只与窗口大小有关、
+        // 与图片大小无关——1920×1080 下实测 2.2ms/次，占单张图片绘制的 83%，而真正的
+        // 像素搬运只要 0.36ms。一个图片 tab 里 17 张小图就是 37ms 白付，窗口拖得越大越卡。
+        //
+        // 这里利用一个性质把**这一项**降到 O(dst)：`fill_path` 之后 mask **只有 dst 那一块
+        // 非零**，其余恒为 0，而 0 与任何东西求交还是 0。于是只需在 dst 区域内把裁剪矩形
+        // 之外的像素清零；dst 整个落在裁剪区内时（最常见）更是一点都不用动。
+        //
+        // 「非零区 ⊆ dst」为何是硬保证、而不是碰巧：`rounded_rect_path` 的点集严格落在
+        // `[x,x+w]×[y,y+h]` 闭包内（四段直线加四段 cubic，控制点都是边界 ± r、± k，
+        // 贝塞尔的凸包性质保证曲线也不越界），**而 `px/py/pw/ph` 来自 `pdst` 这个 i32
+        // 矩形、恒为整数**——路径边界压在整数像素栅格上时，抗锯齿扫描线对格外像素的
+        // 覆盖率恒为 0，不存在「AA 边溢出一圈」。承重的是后半句：哪天有人把 `pdst` 改成
+        // 浮点、或给这条路径加 stroke，前提就静默失效，症状是图片边缘越界一像素盖在
+        // 容器边框上，没人会联想到这里。`image_ink_never_escapes_dst` 钉的就是这条。
+        //
+        // 顺带：旧的 `intersect_path` 那条路上，`Rect::from_xywh` 或 `finish()` 返回
+        // `None` 时会**静默地整个不裁剪**；新写法没有这两个逃逸口，更严。
+        if let Some(c) = self.clips.last() {
+            let cr = c
+                .rect
+                .offset(-self.offset.x, -self.offset.y)
+                .scaled(self.scale);
+            if cr.is_empty() {
+                return;
+            }
+            let (cx0, cy0) = (cr.x, cr.y);
+            let (cx1, cy1) = (cr.x + cr.w, cr.y + cr.h);
+            // mask 非零区域 = dst 矩形（圆角只会让它更小），钳进 mask 边界。
+            let bx0 = pdst.x.max(0);
+            let by0 = pdst.y.max(0);
+            let bx1 = (pdst.x + pdst.w).min(mw as i32);
+            let by1 = (pdst.y + pdst.h).min(mh as i32);
+            let fully_inside = cx0 <= bx0 && cy0 <= by0 && cx1 >= bx1 && cy1 >= by1;
+            // `bx1 > bx0 && by1 > by0` 不只是省事的短路：dst 完全落在缓冲之外时
+            // （`pdst.x` 超过 `mw`）会得到 `bx0 > bx1`，而 `i32::clamp` 在 min > max 时
+            // **panic**。少了这个守卫，下面那两行 clamp 会直接崩。
+            if !fully_inside && bx1 > bx0 && by1 > by0 {
+                let stride = mw as usize;
+                let data = mask.data_mut();
+                for y in by0..by1 {
+                    let row = y as usize * stride;
+                    if y < cy0 || y >= cy1 {
+                        // 整行都在裁剪区外。
+                        data[row + bx0 as usize..row + bx1 as usize].fill(0);
+                        continue;
+                    }
+                    // 行内左右两侧超出裁剪区的部分。
+                    let l = cx0.clamp(bx0, bx1);
+                    data[row + bx0 as usize..row + l as usize].fill(0);
+                    let r = cx1.clamp(bx0, bx1);
+                    data[row + r as usize..row + bx1 as usize].fill(0);
+                }
+            }
+        }
+
+        let paint = PixmapPaint {
+            opacity,
+            quality: FilterQuality::Bilinear,
+            ..Default::default()
+        };
+        let img_ref = img.pixmap();
+        if let Some(mut t) = self.target_pixmap() {
+            t.draw_pixmap(0, 0, img_ref.as_ref(), &paint, transform, Some(&mask));
+        }
+    }
+
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        color: Color,
+        align: Align,
+        ts: &crate::text::TextStyle,
+    ) {
+        let _g = super::prof::scope(super::prof::TEXT);
+        // 传逻辑 rect/size/clip；引擎内部持有 scale 自行物理化（与 measure 同源）。
+        // 局部重绘时减去 offset（逻辑），使引擎物理化后落入子 pixmap（×scale 与图元同源）。
+        let off = self.offset;
+        let rect = rect.offset(-off.x, -off.y);
+        // 剔除：物理矩形与（子）pixmap 边界无交集则跳过引擎排版（局部重绘省去离屏文字的 COM 开销）。
+        let bounds = Rect::new(
+            0,
+            0,
+            self.pixmap.width() as i32,
+            self.pixmap.height() as i32,
+        );
+        if rect.scaled(self.scale).intersect(&bounds).is_empty() {
+            return;
+        }
+        let clip = self.clips.last().map(|c| c.rect.offset(-off.x, -off.y));
+        // 绘制目标：栈顶离屏层或主缓冲（与 engine 借用分属不同字段，可并存）。
+        //
+        // ★ 两个分支必须**内联**（不能先绑定成变量）：离屏层是自有 `Pixmap`、主缓冲可能是
+        // `PixmapMut`（单缓冲模式下指向 GDI DIB section 的内存，见 [`IntoPixmapMut`]），
+        // 二者没有共同的 `&mut` 类型；`TextEngine::draw` 收 `&mut PixmapMut`，故只能就地取视图。
+        if let Some(engine) = self.engine.as_deref_mut() {
+            match self.layers.last_mut() {
+                Some(l) => engine.draw(&mut l.pixmap.as_mut(), text, rect, color, align, ts, clip),
+                None => engine.draw(&mut self.pixmap, text, rect, color, align, ts, clip),
+            }
+        }
+    }
+
+    fn measure_text(&mut self, text: &str, ts: &crate::text::TextStyle) -> crate::geometry::Size {
+        // 逻辑入参；引擎内部物理测量后 /scale 回逻辑，与正文绘制度量同源。
+        match self.engine.as_deref_mut() {
+            Some(engine) => engine.measure(text, ts, None),
+            None => crate::geometry::Size::new(
+                (text.chars().count() as f32 * ts.size * 0.6).ceil() as i32,
+                ts.line_height_px().unwrap_or(ts.size).ceil() as i32,
+            ),
+        }
+    }
+
+    fn text_line_metrics(
+        &mut self,
+        text: &str,
+        ts: &crate::text::TextStyle,
+    ) -> crate::text::LineMetrics {
+        // 有引擎时取精确基线；无引擎沿用 trait 默认的 0.8 近似（与 Null 测量一致）。
+        match self.engine.as_deref_mut() {
+            Some(engine) => engine.line_metrics(text, ts),
+            None => {
+                let h = ts.line_height_px().unwrap_or(ts.size);
+                crate::text::LineMetrics {
+                    ascent: h * 0.8,
+                    descent: h * 0.2,
+                }
+            }
+        }
+    }
+
+    fn measure_text_wrapped(
+        &mut self,
+        text: &str,
+        ts: &crate::text::TextStyle,
+        max_width: f32,
+    ) -> crate::geometry::Size {
+        // 与 measure_text 同源，仅多传 max_width 触发引擎按宽度换行。
+        match self.engine.as_deref_mut() {
+            Some(engine) => engine.measure(text, ts, Some(max_width)),
+            None => {
+                // 无引擎的粗略估算：按等宽字符估算每行字数换行，行高按行数累加。
+                let per_line = ((max_width / (ts.size * 0.6)).floor() as usize).max(1);
+                let chars = text.chars().count().max(1);
+                let lines = chars.div_ceil(per_line).max(1);
+                let line_h = ts.line_height_px().unwrap_or(ts.size);
+                crate::geometry::Size::new(
+                    max_width.ceil() as i32,
+                    (line_h.ceil() as i32) * lines as i32,
+                )
+            }
+        }
+    }
+
+    fn push_layer(&mut self, opacity: f32) {
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        // 与主缓冲同尺寸的透明层；分配失败时退化为 1×1/0 透明度（不可见但保持栈平衡）。
+        let layer = match Pixmap::new(w, h) {
+            Some(pm) => Layer {
+                pixmap: pm,
+                opacity: opacity.clamp(0.0, 1.0),
+            },
+            None => Layer {
+                pixmap: Pixmap::new(1, 1).unwrap(),
+                opacity: 0.0,
+            },
+        };
+        self.layers.push(layer);
+    }
+
+    fn pop_layer(&mut self) {
+        if let Some(layer) = self.layers.pop() {
+            let pp = PixmapPaint {
+                opacity: layer.opacity,
+                ..Default::default()
+            };
+            let src = layer.pixmap;
+            match self.layers.last_mut() {
+                Some(parent) => {
+                    parent
+                        .pixmap
+                        .draw_pixmap(0, 0, src.as_ref(), &pp, Transform::identity(), None)
+                }
+                None => {
+                    self.pixmap
+                        .draw_pixmap(0, 0, src.as_ref(), &pp, Transform::identity(), None)
+                }
+            };
+        }
+    }
+
+    fn save(&mut self) {
+        self.saves.push(self.clips.len());
+    }
+
+    fn restore(&mut self) {
+        if let Some(depth) = self.saves.pop() {
+            self.clips.truncate(depth);
+        }
+    }
+
+    fn clip_rect(&mut self, r: Rect) {
+        let _g = super::prof::scope(super::prof::CLIP);
+        // 契约：每次 clip_rect 须配一次先行的 save()，使其与 restore() 成对、
+        // 仅在当前层之上叠加裁剪。否则裁剪会被 restore 遗漏而泄漏。
+        debug_assert!(
+            !self.saves.is_empty(),
+            "clip_rect 必须在 save() 之后调用，以与 restore() 配对"
+        );
+        // 与当前裁剪区求交，构造矩形 mask。
+        let eff = match self.clips.last() {
+            Some(c) => c.rect.intersect(&r),
+            None => r,
+        };
+        let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
+        if let Some(mut mask) = Mask::new(pw, ph) {
+            // mask 用物理整数矩形（与文字 clip 的 rect.scaled 同源），消除取整分歧。
+            // 局部重绘时减 offset（逻辑）再物理化，使 mask 落入子 pixmap。
+            let peff = eff
+                .offset(-self.offset.x, -self.offset.y)
+                .scaled(self.scale);
+            if !peff.is_empty() {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(
+                    peff.x as f32,
+                    peff.y as f32,
+                    peff.w as f32,
+                    peff.h as f32,
+                ) {
+                    let mut pb = PathBuilder::new();
+                    pb.push_rect(rect);
+                    if let Some(path) = pb.finish() {
+                        mask.fill_path(&path, FillRule::Winding, false, Transform::identity());
+                    }
+                }
+            }
+            // clips 存逻辑矩形（intersect 在逻辑空间）。
+            self.clips.push(Clip { rect: eff, mask });
+        }
+    }
+}
+
+/// 把**物理整数**矩形清零（**CurSeen 补丁 009** 的整块清除快路）。
+///
+/// `BlendMode::Clear` 的结果与目标内容无关（恒为 0），所以整块清除等价于按行 memset；
+/// 相比走通用路径光栅器（1920×1080 实测 12–17ms），这里约 0.3–0.6ms。
+///
+/// 矩形按 pixmap 边界收口；完全在界外时什么都不做。声明成自由函数是为了不借
+/// `&mut self`——调用点那会儿还要读 `self.offset`/`scale`。
+fn clear_device_rect(pm: &mut PixmapMut, r: (i32, i32, i32, i32)) {
+    let (x, y, w, h) = r;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let pw = pm.width() as i32;
+    let ph = pm.height() as i32;
+    let x0 = x.clamp(0, pw);
+    let y0 = y.clamp(0, ph);
+    let x1 = (x + w).clamp(0, pw);
+    let y1 = (y + h).clamp(0, ph);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let stride = pm.width() as usize * 4;
+    let data = pm.data_mut();
+    let len = (x1 - x0) as usize * 4;
+    for yy in y0..y1 {
+        let base = yy as usize * stride + x0 as usize * 4;
+        data[base..base + len].fill(0);
+    }
+}
+
+fn to_sk_color(c: Color) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+/// 混合模式映射（**CurSeen 补丁 002**）。tiny-skia 0.12 原生支持三者。
+fn to_sk_blend(b: BlendMode) -> tiny_skia::BlendMode {
+    match b {
+        BlendMode::SourceOver => tiny_skia::BlendMode::SourceOver,
+        BlendMode::Plus => tiny_skia::BlendMode::Plus,
+        BlendMode::Clear => tiny_skia::BlendMode::Clear,
+    }
+}
+/// `x × a / 255`（x、a 均在 0..=255），无除法。
+///
+/// 全定义域内与真除等价（含两端：`mul255(255,255)==255`、`mul255(x,0)==0`），
+/// 供 [`SkiaCanvas::fast_fill_rect`] 的预乘与合成使用。
+#[inline(always)]
+fn mul255(x: u32, a: u32) -> u32 {
+    let t = x * a + 128;
+    (t + (t >> 8)) >> 8
+}
+/// 对预乘 RGBA8 像素做 3 趟可分离 box-blur（≈高斯）。半径 0 时空操作。
+/// 用于浮层投影的离屏柔化；预乘空间内逐通道线性平均，足够投影用。
+fn box_blur(pm: &mut Pixmap, radius: usize) {
+    if radius == 0 {
+        return;
+    }
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    for _ in 0..3 {
+        let src = pm.data().to_vec();
+        blur_h(&src, pm.data_mut(), w, h, radius);
+        let src = pm.data().to_vec();
+        blur_v(&src, pm.data_mut(), w, h, radius);
+    }
+}
+
+/// 水平方向 box-blur（滑动窗口运行和，O(w)/行；边缘窗口收窄即边界 clamp 平均）。
+fn blur_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    for y in 0..h {
+        let base = y * w;
+        let mut acc = [0u32; 4];
+        let mut n = 0u32;
+        for xx in 0..=r.min(w - 1) {
+            let i = (base + xx) * 4;
+            for c in 0..4 {
+                acc[c] += src[i + c] as u32;
+            }
+            n += 1;
+        }
+        for x in 0..w {
+            let o = (base + x) * 4;
+            for c in 0..4 {
+                dst[o + c] = (acc[c] / n) as u8;
+            }
+            let add = x + r + 1;
+            if add < w {
+                let i = (base + add) * 4;
+                for c in 0..4 {
+                    acc[c] += src[i + c] as u32;
+                }
+                n += 1;
+            }
+            if x >= r {
+                let i = (base + (x - r)) * 4;
+                for c in 0..4 {
+                    acc[c] -= src[i + c] as u32;
+                }
+                n -= 1;
+            }
+        }
+    }
+}
+
+/// 垂直方向 box-blur（滑动窗口运行和，O(h)/列）。
+fn blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    for x in 0..w {
+        let mut acc = [0u32; 4];
+        let mut n = 0u32;
+        for yy in 0..=r.min(h - 1) {
+            let i = (yy * w + x) * 4;
+            for c in 0..4 {
+                acc[c] += src[i + c] as u32;
+            }
+            n += 1;
+        }
+        for y in 0..h {
+            let o = (y * w + x) * 4;
+            for c in 0..4 {
+                dst[o + c] = (acc[c] / n) as u8;
+            }
+            let add = y + r + 1;
+            if add < h {
+                let i = (add * w + x) * 4;
+                for c in 0..4 {
+                    acc[c] += src[i + c] as u32;
+                }
+                n += 1;
+            }
+            if y >= r {
+                let i = ((y - r) * w + x) * 4;
+                for c in 0..4 {
+                    acc[c] -= src[i + c] as u32;
+                }
+                n -= 1;
+            }
+        }
+    }
+}
+
+/// 把归一化渐变映射到逻辑矩形 (x,y,w,h) 并构造 tiny-skia shader。
+/// 坐标在逻辑空间构造，物理化交给 fill_path 的 self.tf()（与 path 同源）。
+/// stops 不足 2 或构造失败时返回 None（调用方退回纯色）。
+fn sk_shader(
+    g: &crate::render::Gradient,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<Shader<'static>> {
+    use crate::render::Gradient;
+    let sk_stops: Vec<SkStop> = g
+        .stops()
+        .iter()
+        .map(|s| SkStop::new(s.offset.clamp(0.0, 1.0), to_sk_color(s.color)))
+        .collect();
+    if sk_stops.len() < 2 {
+        return None;
+    }
+    match g {
+        Gradient::Linear { start, end, .. } => {
+            let p0 = SkPoint::from_xy(x + start.0 * w, y + start.1 * h);
+            let p1 = SkPoint::from_xy(x + end.0 * w, y + end.1 * h);
+            LinearGradient::new(p0, p1, sk_stops, SpreadMode::Pad, Transform::identity())
+        }
+        Gradient::Radial { center, radius, .. } => {
+            let c = SkPoint::from_xy(x + center.0 * w, y + center.1 * h);
+            // 半径以短边为基准（保持圆形而非随宽高拉成椭圆）。
+            let r = (radius * w.min(h)).max(0.01);
+            RadialGradient::new(
+                c,
+                0.0,
+                c,
+                r,
+                sk_stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let p = pm.pixel(x, y).unwrap();
+        (p.red(), p.green(), p.blue())
+    }
+
+    /// 画一个纯色矩形：`fast=true` 走特化快路，`fast=false` 走通用路径（直接调
+    /// `fill_path_on_target`，绕开 `fill_round_rect` 里的快路分支，因此比的是两条
+    /// **真实**实现，不是测试里另写的复制品）。
+    #[allow(clippy::too_many_arguments)]
+    fn paint_rect(
+        scale: f32,
+        offset: Point,
+        clip: Option<Rect>,
+        bg: tiny_skia::Color,
+        color: Color,
+        radius: f32,
+        aa: bool,
+        fast: bool,
+    ) -> Pixmap {
+        let mut pm = Pixmap::new(48, 36).unwrap();
+        pm.fill(bg);
+        let mut eng = crate::text::NullTextEngine;
+        let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, offset);
+        let mut p = Paint::fill(color);
+        p.anti_alias = aa;
+        let (x, y, w, h) = (6.0, 4.0, 20.0, 14.0);
+        if let Some(r) = clip {
+            c.save();
+            c.clip_rect(r);
+        }
+        if fast {
+            c.fill_round_rect(x, y, w, h, radius, &p);
+        } else {
+            let (ax, ay, aw, ah) = crate::render::align_to_device(x, y, w, h, scale);
+            let path = rounded_rect_path(ax, ay, aw, ah, radius).expect("矩形路径");
+            let sp = SkiaCanvas::fill_paint(&p, ax, ay, aw, ah);
+            let tf = c.tf();
+            c.fill_path_on_target(&path, &sp, tf);
+        }
+        if clip.is_some() {
+            c.restore();
+        }
+        drop(c);
+        pm
+    }
+
+    /// 一个对照用例：名称、缩放、局部帧偏移、裁剪、背景色、填充色、圆角、抗锯齿。
+    type Case = (
+        &'static str,
+        f32,
+        Point,
+        Option<Rect>,
+        tiny_skia::Color,
+        Color,
+        f32,
+        bool,
+    );
+
+    /// 快路与通用路径必须画出同一张图。
+    ///
+    /// 快路绕开了 tiny-skia 的整条 raster pipeline，自己做预乘、合成与圆角覆盖率。
+    /// 两者一旦分歧，症状是"某些控件的底色深浅或圆角形状和以前不一样"——不报错、
+    /// 不 panic，截图粗看也正常，只有逐像素比对能抓住。
+    ///
+    /// **判据用覆盖度而非绝对色差**：把每个像素投影到「背景→实心」这根轴上，得到
+    /// 0..255 的覆盖度再比。否则判据强度会随 `color.a` 退化——淡底（alpha≈32，正是
+    /// 这条快路的头号服务对象）下实心色与背景色本身只差十几个色阶，任何绝对色差阈值
+    /// 在那里都变成恒真。
+    ///
+    /// 用例要覆盖的分支：不透明/半透明/淡底 × 直角/圆角/半径超限 × 有无裁剪 ×
+    /// **裁哪一边** × 全窗/局部偏移 × 1x/2x × 抗锯齿开关。其中"裁哪一边"尤其容易
+    /// 被写漏：裁剪矩形若一律从原点起，`x0.max(pc.x)` 与 `y0.max(pc.y)` 永远不生效，
+    /// 于是把圆角锚点写错在**左上**那一侧的缺陷会全绿通过——而滚动容器把卡片从顶部
+    /// 切掉半截，走的正是这条路径。
+    #[test]
+    fn fast_fill_rect_matches_general_path() {
+        let opaque_bg = tiny_skia::Color::from_rgba8(30, 40, 60, 255);
+        let alpha_bg = tiny_skia::Color::from_rgba8(30, 40, 60, 90);
+        let solid = Color::rgba(200, 60, 40, 255);
+        let half = Color::rgba(200, 60, 40, 128);
+        let wash = Color::rgba(200, 60, 40, 32); // RoleAlpha 淡底量级
+
+        // 切掉左上：交集起点由裁剪决定，x0.max / y0.max 才真正生效。
+        // （上面必须留空行，否则 rustfmt 把这段当成 `wash` 那行尾注的续行，推到第 50 列
+        //   去，读起来像是在说 `wash`。）
+        let clip_tl = Some(Rect::new(10, 8, 20, 14));
+        let clip_br = Some(Rect::new(0, 0, 16, 12));
+        let o = Point::new(0, 0);
+        // 一行一例的对照表：rustfmt 会把每个元组炸成 10 行，19 例共 190 行，
+        // 「哪一维在变」就再也看不出来了。这张表的价值全在纵向对齐上。
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            ("不透明・直角・无裁剪", 1.0, o, None, opaque_bg, solid, 0.0, true),
+            ("半透明・直角・无裁剪", 1.0, o, None, opaque_bg, half, 0.0, true),
+            ("半透明・直角・半透明背景（暴露 alpha 合成）", 1.0, o, None, alpha_bg, half, 0.0, true),
+            ("半透明・直角・裁右下", 1.0, o, clip_br, opaque_bg, half, 0.0, true),
+            ("半透明・直角・裁左上", 1.0, o, clip_tl, opaque_bg, half, 0.0, true),
+            ("半透明・直角・局部帧偏移", 1.0, Point::new(4, 3), None, opaque_bg, half, 0.0, true),
+            ("半透明・直角・2x", 2.0, o, None, opaque_bg, half, 0.0, true),
+            ("半透明・直角・2x + 偏移 + 裁右下", 2.0, Point::new(4, 2), Some(Rect::new(4, 2, 14, 10)), opaque_bg, Color::rgba(200, 60, 40, 200), 0.0, true),
+            ("圆角・不透明・无裁剪（最常见的卡片）", 1.0, o, None, opaque_bg, solid, 5.0, true),
+            ("圆角・半透明・裁右下", 1.0, o, clip_br, opaque_bg, Color::rgba(200, 60, 40, 160), 5.0, true),
+            ("圆角・不透明・裁左上（滚动容器切顶）", 1.0, o, clip_tl, opaque_bg, solid, 5.0, true),
+            ("圆角・半透明・裁左上", 1.0, o, clip_tl, opaque_bg, half, 5.0, true),
+            ("圆角・2x + 偏移", 2.0, Point::new(4, 2), None, opaque_bg, solid, 4.0, true),
+            ("圆角・2x + 偏移 + 裁左上", 2.0, Point::new(4, 2), Some(Rect::new(10, 8, 16, 10)), opaque_bg, solid, 4.0, true),
+            ("圆角半径超过半高（钳成胶囊）", 1.0, o, None, opaque_bg, solid, 40.0, true),
+            ("淡底・圆角・无裁剪（RoleAlpha 量级）", 1.0, o, None, opaque_bg, wash, 5.0, true),
+            ("淡底・圆角・裁左上", 1.0, o, clip_tl, opaque_bg, wash, 5.0, true),
+            ("淡底・直角・半透明背景", 1.0, o, None, alpha_bg, wash, 0.0, true),
+            ("圆角・关抗锯齿（须无过渡带）", 1.0, o, None, opaque_bg, solid, 5.0, false),
+            // 非整数缩放：pr 在物理坐标钳制、通用路径在逻辑坐标钳制，只有这里能验证
+            // 两者不分歧。1.5 下逻辑 (6,4,20,14) 的物理边界是 (9,6)-(39,27)，仍是整数。
+            ("圆角・1.5x（非整数缩放）", 1.5, o, None, opaque_bg, solid, 4.0, true),
+            ("圆角・1.5x + 裁左上", 1.5, o, clip_tl, opaque_bg, half, 4.0, true),
+            // 负坐标：局部重绘里"矩形左上角在子 pixmap 之外"是常态，验 x0.max(0)/y0.max(0)。
+            ("圆角・偏移到左上角外（负坐标）", 1.0, Point::new(20, 15), None, opaque_bg, solid, 5.0, true),
+            ("直角・偏移到左上角外（负坐标）", 1.0, Point::new(20, 15), None, opaque_bg, half, 0.0, true),
+        ];
+
+        for (name, scale, offset, clip, bg, color, radius, aa) in cases {
+            // 前提校验：用例必须**真的**走到快路。少了这一步，一旦快路因为某次改动
+            // 开始一律返回 false，本测试就退化成"通用路径 vs 通用路径"，永远绿着。
+            {
+                let mut probe = Pixmap::new(48, 36).unwrap();
+                let mut eng = crate::text::NullTextEngine;
+                let mut c = SkiaCanvas::with_text_offset(&mut probe, &mut eng, *scale, *offset);
+                let (ax, ay, aw, ah) = crate::render::align_to_device(6.0, 4.0, 20.0, 14.0, *scale);
+                assert!(
+                    c.fast_fill_rect(ax, ay, aw, ah, *radius, *aa, *color),
+                    "[{name}] 该用例没有走快路，本测试会失去意义"
+                );
+            }
+            let fast = paint_rect(*scale, *offset, *clip, *bg, *color, *radius, *aa, true);
+            let slow = paint_rect(*scale, *offset, *clip, *bg, *color, *radius, *aa, false);
+            let rgba = |pm: &Pixmap, x: u32, y: u32| {
+                let p = pm.pixel(x, y).unwrap();
+                [p.red(), p.green(), p.blue(), p.alpha()]
+            };
+            let maxdiff = |a: [u8; 4], b: [u8; 4]| {
+                (0..4)
+                    .map(|i| (a[i] as i32 - b[i] as i32).abs())
+                    .max()
+                    .unwrap()
+            };
+            // 背景色与实心色都**独立算出**，不从图上采样：矩形跨越原点时（负坐标用例）
+            // (0,0) 根本不是背景，靠采样会得出「背景与实心色相同」的荒谬前提。
+            let ba = bg.alpha();
+            let q = |v: f32| (v * ba * 255.0).round() as u8;
+            let bgpx = [
+                q(bg.red()),
+                q(bg.green()),
+                q(bg.blue()),
+                (ba * 255.0).round() as u8,
+            ];
+            let sa = color.a as f32 / 255.0;
+            let mix = |src: u8, dst: u8| (src as f32 * sa + dst as f32 * (1.0 - sa)).round() as u8;
+            let fullpx = [
+                mix(color.r, bgpx[0]),
+                mix(color.g, bgpx[1]),
+                mix(color.b, bgpx[2]),
+                (color.a as f32 + bgpx[3] as f32 * (1.0 - sa))
+                    .round()
+                    .min(255.0) as u8,
+            ];
+            // 投影轴取背景与实心差得最开的通道，量化噪声在它上面相对最小。
+            let ch = (0..4)
+                .max_by_key(|&i| (fullpx[i] as i32 - bgpx[i] as i32).abs())
+                .unwrap();
+            let span = fullpx[ch] as i32 - bgpx[ch] as i32;
+            assert!(
+                span.abs() >= 8,
+                "[{name}] 用例无效：背景与实心色只差 {span}，判据失去分辨力"
+            );
+            let cov = |p: [u8; 4]| ((p[ch] as i32 - bgpx[ch] as i32) * 255 / span).clamp(0, 255);
+            let mut edge = 0usize;
+            for y in 0..fast.height() {
+                for x in 0..fast.width() {
+                    let (f, sl) = (rgba(&fast, x, y), rgba(&slow, x, y));
+                    if *radius == 0.0 {
+                        // 直角矩形没有弧线，两条路径应当逐像素一致（±1 留给 f32 合成
+                        // 与整数合成的舍入差）。
+                        assert!(
+                            maxdiff(f, sl) <= 1,
+                            "[{name}] ({x}, {y}) 快路 {f:?} 与通用路径 {sl:?} 不一致"
+                        );
+                        continue;
+                    }
+                    let (cf, cs) = (cov(f), cov(sl));
+                    if cs >= 254 {
+                        // 满覆盖区没有抗锯齿，两条路径应当**精确**相同。放宽到覆盖度
+                        // 比较会漏掉一整类缺陷：圆角行的中段若与两侧重叠而被画了两次，
+                        // 半透明处颜色会变深，但覆盖度双方都钳在 255，看不出来。
+                        assert!(
+                            maxdiff(f, sl) <= 1,
+                            "[{name}] 满覆盖处不一致：({x}, {y}) 快路 {f:?} vs 通用路径 {sl:?}（重复绘制？）"
+                        );
+                    } else if cs <= 1 {
+                        // 空白区**不能**要求精确：两种 AA 对边界外沿一个像素的判定不同，
+                        // 快路可能给出极淡的覆盖（4×4 超采样里落进 1 个子样本 = 15/255）
+                        // 而通用路径给 0。那是 AA 边界游移，不是画错。
+                        assert!(
+                            cf <= 128,
+                            "[{name}] 形状分歧：({x}, {y}) 通用路径为空白，快路覆盖度已 {cf}"
+                        );
+                    } else {
+                        edge += 1;
+                    }
+                    // 两种 AA 的量化粒度分别是 255/4 与 255/16，叠加舍入后差一个 1/4
+                    // 色阶仍属正常；超过就不是量化能解释的了。
+                    assert!(
+                        (cf - cs).abs() <= 64,
+                        "[{name}] ({x}, {y}) 覆盖度分歧 {cf} vs {cs}（像素 {f:?} vs {sl:?}）"
+                    );
+                }
+            }
+            if *radius > 0.0 && *aa {
+                assert!(
+                    edge > 0,
+                    "[{name}] 圆角却没有抗锯齿过渡像素，圆角多半没画出来"
+                );
+            }
+            if !*aa {
+                assert_eq!(edge, 0, "[{name}] 关了抗锯齿却仍有 {edge} 个过渡像素");
+            }
+        }
+    }
+
+    /// 离屏层（子树 opacity）里走快路：像素必须落在**层**上，而不是主缓冲。
+    ///
+    /// `fast_fill_rect` 通过 `target_pixmap()` 做重定向，与通用路径的
+    /// `fill_path_on_target` 用的是同一个 `layers.last_mut()` 判据。一旦两者分岔，
+    /// 症状是子树 opacity 失效——内容以全不透明画进主缓冲，层合成时又叠一遍。
+    #[test]
+    fn fast_fill_rect_draws_into_offscreen_layer() {
+        let render = |fast: bool| {
+            let mut pm = Pixmap::new(48, 36).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(30, 40, 60, 255));
+            let mut eng = crate::text::NullTextEngine;
+            {
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
+                let p = Paint::fill(Color::rgba(200, 60, 40, 255));
+                c.push_layer(0.5);
+                if fast {
+                    c.fill_round_rect(6.0, 4.0, 20.0, 14.0, 5.0, &p);
+                } else {
+                    let path = rounded_rect_path(6.0, 4.0, 20.0, 14.0, 5.0).expect("路径");
+                    let sp = SkiaCanvas::fill_paint(&p, 6.0, 4.0, 20.0, 14.0);
+                    let tf = c.tf();
+                    c.fill_path_on_target(&path, &sp, tf);
+                }
+                c.pop_layer();
+            }
+            pm
+        };
+        let (fast, slow) = (render(true), render(false));
+        // 层内画的是不透明色，合成时乘 0.5：中心应当是背景与填充色的中点附近，
+        // 绝不能是纯填充色（那说明画进了主缓冲、绕过了层的 opacity）。
+        let mid = fast.pixel(16, 11).unwrap();
+        assert!(
+            mid.red() < 200 && mid.red() > 60,
+            "层 opacity 未生效：中心像素 red={}（画进主缓冲了？）",
+            mid.red()
+        );
+        for y in 0..fast.height() {
+            for x in 0..fast.width() {
+                let (a, b) = (fast.pixel(x, y).unwrap(), slow.pixel(x, y).unwrap());
+                let d = [
+                    a.red() as i32 - b.red() as i32,
+                    a.green() as i32 - b.green() as i32,
+                    a.blue() as i32 - b.blue() as i32,
+                    a.alpha() as i32 - b.alpha() as i32,
+                ]
+                .into_iter()
+                .map(|v| v.abs())
+                .max()
+                .unwrap();
+                assert!(d <= 64, "({x}, {y}) 层内快路与通用路径分歧 {d}");
+            }
+        }
+    }
+
+    /// 快路必须拒绝亚像素边界，把活交回通用路径。
+    ///
+    /// 快路整行写同一个值，前提是矩形边界压在整数物理像素上、没有抗锯齿边。若边界落在
+    /// 半个像素上还硬走快路，边缘就会从"半透明过渡"变成"硬切"——细微到截图不易察觉，
+    /// 却是实打实的渲染差异。1.25 倍缩放下 0.5 逻辑像素正好落在 0.625 物理像素处。
+    #[test]
+    fn fast_fill_rect_declines_subpixel_bounds() {
+        let mut pm = Pixmap::new(32, 24).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.25, Point::new(0, 0));
+        assert!(
+            !c.fast_fill_rect(2.5, 2.0, 9.4, 8.0, 0.0, true, Color::rgba(200, 60, 40, 255)),
+            "亚像素边界须落回通用路径"
+        );
+        assert!(
+            c.fast_fill_rect(4.0, 4.0, 8.0, 8.0, 0.0, true, Color::rgba(200, 60, 40, 255)),
+            "整数物理边界应走快路"
+        );
+    }
+
+    /// 快路必须拒绝非有限坐标，把活交回通用路径。
+    ///
+    /// 整数边界那道闸门对无穷是**失效**的：差值取整后得 NaN，而 NaN 与任何数比较都
+    /// 是 false，于是闸门放行；无穷取整转 i32 再饱和成 i32::MAX，被钳到缓冲宽度——
+    /// 结果是一路写到右边缘。通用路径这时什么都不画（tiny-skia 的 Rect 构造对非有限
+    /// 值返回 None）。两者**行为相反**：上游一个除零（weight 除零、measure 返回 inf）
+    /// 原本表现为"这块没画出来"，会翻成"大片被这个颜色刷掉"。守的就是这个翻转。
+    #[test]
+    fn fast_fill_rect_declines_non_finite_bounds() {
+        for (label, x, y, w, h, r) in [
+            ("w=inf", 5.0, 5.0, f32::INFINITY, 20.0, 0.0),
+            ("h=inf", 5.0, 5.0, 20.0, f32::INFINITY, 0.0),
+            ("x=inf", f32::INFINITY, 5.0, 20.0, 20.0, 0.0),
+            ("y=-inf", 5.0, f32::NEG_INFINITY, 20.0, 20.0, 0.0),
+            ("w=NaN", 5.0, 5.0, f32::NAN, 20.0, 0.0),
+            ("r=inf", 5.0, 5.0, 20.0, 20.0, f32::INFINITY),
+        ] {
+            let mut pm = Pixmap::new(40, 30).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+            let mut eng = crate::text::NullTextEngine;
+            {
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
+                assert!(
+                    !c.fast_fill_rect(x, y, w, h, r, true, Color::rgba(255, 0, 0, 255)),
+                    "[{label}] 非有限坐标须落回通用路径"
+                );
+            }
+            let painted = pm.pixels().iter().filter(|p| p.red() > 0).count();
+            assert_eq!(
+                painted, 0,
+                "[{label}] 快路拒绝后不应留下任何笔迹，却染了 {painted} 像素"
+            );
+        }
+    }
+
+    /// `mul255` 必须在**整个定义域**上等于四舍五入的真除——预乘与合成全靠它。
+    ///
+    /// 期望值用浮点独立算出，不从被测实现反推：这类"无除法近似"的经典错法是两端偏差
+    /// （`mul255(255,255)` 得 254，于是不透明白色被画成 254 灰），而那恰恰是抽查中段
+    /// 最不容易撞上的地方。全域 65536 组合一起验，省得挑样本。
+    #[test]
+    fn mul255_equals_rounded_true_division() {
+        for a in 0..=255u32 {
+            for x in 0..=255u32 {
+                let want = (f64::from(x * a) / 255.0).round() as u32;
+                assert_eq!(mul255(x, a), want, "mul255({x}, {a})");
+            }
+        }
+    }
+
+    /// `cull_rect` 报出本画布覆盖的世界范围，**不能是 `None`**。
+    ///
+    /// 三个后端（软件 / D2D / GPU）在这一点上必须同口径：调用方把 `None` 读作
+    /// "拿不到范围，那就整个画"，而内容远高于视口的节点会因此每帧整表绘制
+    /// （见 `core` 里的 `full_frame_culling_skips_rows_far_below_the_viewport`）。
+    /// 软件后端一直是对的，补这条是为了它别在将来被改坏——另两个都是这么坏掉的。
+    #[test]
+    fn cull_rect_reports_the_covered_world_rect() {
+        let mut pm = Pixmap::new(120, 80).unwrap();
+        // 全窗：整块 pixmap，逻辑坐标（scale=1）
+        {
+            let c = SkiaCanvas::new(&mut pm);
+            let cull = c.cull_rect().expect("软件后端必须报出可见范围");
+            assert!(
+                cull.x <= 0 && cull.y <= 0 && cull.right() >= 120 && cull.bottom() >= 80,
+                "应覆盖整块 pixmap: {cull:?}"
+            );
+            assert!(cull.h < 10_000, "范围要有界: {cull:?}");
+        }
+        // 局部帧：子 pixmap + 世界偏移，报的是那块脏区在世界里的位置
+        let mut sub = Pixmap::new(40, 24).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, 1.0, Point::new(8, 40));
+        let cull = c.cull_rect().expect("局部帧同样要报");
+        assert!(
+            cull.x <= 8 && cull.y <= 40 && cull.right() >= 48 && cull.bottom() >= 64,
+            "应覆盖世界坐标下的脏区 (8,40)+40x24: {cull:?}"
+        );
+    }
+
+    /// 带 alpha 采样：`Clear` 是否真的把 alpha 抹成 0，只有看第四个通道才知道。
+    fn pxa(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let p = pm.pixel(x, y).unwrap();
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    /// ★ 补丁 002：`Plus` 必须是**加色**，不是覆盖。
+    ///
+    /// 反例一起断言：不透明红上叠不透明蓝，SourceOver 得纯蓝（后画覆盖先画），
+    /// Plus 得品红（两通道都满）。两者若都返回蓝色，说明 blend 根本没传下去。
+    #[test]
+    fn blend_plus_is_additive_not_source_over() {
+        let draw = |blend: BlendMode| -> Pixmap {
+            let mut pm = Pixmap::new(40, 40).unwrap();
+            {
+                let mut c = SkiaCanvas::new(&mut pm);
+                c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+                c.fill_rect(
+                    0.0,
+                    0.0,
+                    40.0,
+                    40.0,
+                    &Paint::fill_blend(Color::hex(0x0000FF), blend),
+                );
+            }
+            pm
+        };
+        let (pr, _pg, pb) = px(&draw(BlendMode::Plus), 20, 20);
+        let (sr, _sg, sb) = px(&draw(BlendMode::SourceOver), 20, 20);
+        assert!(
+            pr > 200 && pb > 200,
+            "Plus 叠加红+蓝应得品红，实得 r={pr} b={pb}"
+        );
+        assert!(
+            sb > 200 && sr < 60,
+            "反例：SourceOver 应得纯蓝，实得 r={sr} b={sb}"
+        );
+    }
+
+    /// ★ 补丁 002：`Clear` 必须把 alpha 也抹掉。
+    ///
+    /// 这正是"用透明色 + SourceOver 擦除"骗得过肉眼、骗不过 alpha 的地方：
+    /// 透明源在 SourceOver 下对目标完全无贡献，红块会原封不动留着——分层窗上就是
+    /// 粒子永久留痕。
+    #[test]
+    fn blend_clear_zeroes_alpha_unlike_transparent_source_over() {
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.clear_rect(10.0, 10.0, 20.0, 20.0);
+        }
+        let (_r, _g, _b, a) = pxa(&pm, 20, 20);
+        assert_eq!(a, 0, "Clear 后 alpha 必须归零，实得 {a}");
+        // 区外不受影响：清脏区不能顺手把邻居擦了。
+        let (_r2, _g2, _b2, a2) = pxa(&pm, 5, 5);
+        assert_eq!(a2, 255, "脏区外应保持不透明，实得 {a2}");
+
+        // 反例：透明色 + SourceOver 什么也没擦掉（同样的位置仍是实心红）。
+        let mut noop = Pixmap::new(40, 40).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut noop);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.fill_rect(10.0, 10.0, 20.0, 20.0, &Paint::fill(Color::TRANSPARENT));
+        }
+        let (_r3, _g3, _b3, a3) = pxa(&noop, 20, 20);
+        assert_eq!(
+            a3, 255,
+            "反例失效：透明色 + SourceOver 本应擦不掉任何东西（实得 alpha={a3}）"
+        );
+    }
+
+    /// ★ 补丁 002：`fill_polygon` 对**凹**多边形也必须正确。
+    ///
+    /// L 形的凹口是三角扇（无论以哪个点为轴）都会误填的区域；走路径光栅（Winding）
+    /// 则不会。这条测试守的就是"别把多边形拆成三角形"。
+    #[test]
+    fn fill_polygon_respects_concave_notch() {
+        // L 形：竖条 (10..30, 10..90) ∪ 横条 (10..90, 10..30)，凹口在右下。
+        const L: [(f32, f32); 6] = [
+            (10.0, 10.0),
+            (30.0, 10.0),
+            (30.0, 30.0),
+            (90.0, 30.0),
+            (90.0, 50.0),
+            (10.0, 50.0),
+        ];
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.fill_polygon(&L, &Paint::fill(Color::hex(0x0000FF)));
+        }
+        // 竖条内 → 蓝。
+        let (r, _g, b) = px(&pm, 20, 40);
+        assert!(b > 200 && r < 80, "L 形竖条内应被填充，实得 r={r} b={b}");
+        // 横条内 → 蓝。
+        let (r2, _g2, b2) = px(&pm, 60, 40);
+        assert!(
+            b2 > 200 && r2 < 80,
+            "L 形横条内应被填充，实得 r2={r2} b2={b2}"
+        );
+        // 凹口（右下角）→ 保持白。三角扇会把它填掉。
+        let (r3, g3, b3) = px(&pm, 60, 80);
+        assert!(
+            r3 > 240 && g3 > 240 && b3 > 240,
+            "凹口不应被填充（三角扇的典型误填），实得 ({r3},{g3},{b3})"
+        );
+    }
+
+    /// ★ CurSeen「流光飘带」的契约：**自交多边形在 Winding 下等价于布尔并集**。
+    ///
+    /// 飘带用**一条**自交多边形同时表达"带体"与"头部整圆"：圆作为闭合子环嵌进带体
+    /// 路径（原版 Python 是 `path.united(cap)`，我们没有几何布尔运算，只能靠它）。
+    /// 这条技巧成立有两个前提，任一条破了头部都会出问题：
+    /// - 两个子环**同向** → 重叠区环绕数为 ±2（非零）→ 填一次；
+    ///   反向则抵消成 0，圆的后半会被**挖出一个洞**；
+    /// - 整条路径只提交**一次**填充 → 重叠区不会叠成 0.84 的深色圆斑。
+    ///
+    /// 形状取自 `ribbon.lua::build_path` 的真实输出：沿 +x 行进、head=(60,50)、
+    /// 半带宽 10、尾尖 (10,50)。
+    #[test]
+    fn self_intersecting_polygon_fills_like_a_union() {
+        const SEGMENTS: usize = 24;
+        let (hx, hy, half_w) = (60.0f32, 50.0f32, 10.0f32);
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        pts.push((10.0, 50.0)); // 尾尖
+        pts.push((30.0, 56.0)); // 左侧边界
+        pts.push((45.0, 58.5));
+        pts.push((hx, hy + half_w)); // L：θ=0，也是左侧最后一个点
+        for k in 1..SEGMENTS {
+            let th = std::f32::consts::TAU * (k as f32 / SEGMENTS as f32);
+            pts.push((hx + half_w * th.sin(), hy + half_w * th.cos())); // 整圆
+        }
+        pts.push((hx, hy + half_w)); // 回到 L，闭合圆这个子环
+        pts.push((hx, hy - half_w)); // 直径 L→R：带体的头部封口
+        pts.push((45.0, 41.5)); // 右侧边界（逆序）
+        pts.push((30.0, 44.0));
+
+        let mut pm = Pixmap::new(100, 100).unwrap(); // 透明底：直接读 alpha 最干净
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.fill_polygon(&pts, &Paint::fill(Color::rgba(0, 0, 255, 153)));
+        }
+
+        let (_r1, _g1, _b1, a_front) = pxa(&pm, 65, 50); // 圆的前半：只有圆覆盖
+        let (_r2, _g2, _b2, a_overlap) = pxa(&pm, 55, 50); // 圆的后半：与带体重叠
+        let (_r3, _g3, _b3, a_body) = pxa(&pm, 30, 50); // 纯带体段
+        for (name, a) in [
+            ("圆前半", a_front),
+            ("圆与带体的重叠处", a_overlap),
+            ("带体", a_body),
+        ] {
+            assert!(
+                (140..=166).contains(&a),
+                "{name} 应为一次填充的 alpha≈153，实得 {a}（0=环绕数抵消被挖空，204=叠了两次）"
+            );
+        }
+        let (_r4, _g4, _b4, a_out) = pxa(&pm, 60, 70); // 圆外（head 上方 20px）
+        let (_r5, _g5, _b5, a_out2) = pxa(&pm, 30, 70); // 带体外
+        assert_eq!(a_out, 0, "圆外不该被填充，实得 {a_out}");
+        assert_eq!(a_out2, 0, "带体外不该被填充，实得 {a_out2}");
+    }
+
+    /// ★ 补丁 002：`fill_ellipse` 的包围盒四角必须留空——
+    /// 退化成 `fill_rect`/`fill_circle(短轴)` 都过不了这条。
+    #[test]
+    fn fill_ellipse_leaves_bbox_corners_empty() {
+        let mut pm = Pixmap::new(100, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.fill_ellipse(50.0, 30.0, 40.0, 20.0, &Paint::fill(Color::hex(0x0000FF)));
+        }
+        // 中心 → 蓝。
+        let (r, _g, b) = px(&pm, 50, 30);
+        assert!(b > 200 && r < 80, "椭圆中心应被填充，实得 r={r} b={b}");
+        // 长轴端点 → 蓝（fill_circle 取短轴的退化实现会在这里留空）。
+        let (r2, _g2, b2) = px(&pm, 88, 30);
+        assert!(
+            b2 > 200 && r2 < 80,
+            "长轴端点应被填充，实得 r2={r2} b2={b2}"
+        );
+        // 包围盒左上角（椭圆外）→ 白。
+        let (r3, g3, b3) = px(&pm, 13, 13);
+        assert!(
+            r3 > 240 && g3 > 240 && b3 > 240,
+            "包围盒角落不属于椭圆，实得 ({r3},{g3},{b3})"
+        );
+    }
+
+    /// V 形折线的拐点必须实心：`draw_polyline` 要把夹角外侧那块楔形盖住。
+    ///
+    /// 这条守的是"高 DPI 下对勾裂开"那个缺陷。同一个 V，用两次 `draw_line` 画会在
+    /// 尖底留下缺口——测试里连这个**反例一起断言**，否则阈值一松，测试对两种画法
+    /// 都是绿的，也就守不住任何东西。
+    #[test]
+    fn polyline_joint_is_solid_where_two_lines_would_gap() {
+        // V 形：左上 → 底 → 右上。夹角约 90°，笔宽 6 —— 放大到能稳定采样的尺度。
+        const PTS: [(f32, f32); 3] = [(20.0, 20.0), (50.0, 70.0), (80.0, 20.0)];
+        const W: f32 = 6.0;
+        // 采样点取尖底正下方：两段线的 Butt 端面都够不到这里，正是缺口所在。
+        const SX: u32 = 50;
+        const SY: u32 = 72;
+
+        let paint = Paint::fill(Color::hex(0x000000));
+
+        let mut good = Pixmap::new(100, 100).unwrap();
+        good.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut good);
+            c.draw_polyline(&PTS, W, &paint);
+        }
+
+        let mut naive = Pixmap::new(100, 100).unwrap();
+        naive.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut naive);
+            c.draw_line(PTS[0].0, PTS[0].1, PTS[1].0, PTS[1].1, W, &paint);
+            c.draw_line(PTS[1].0, PTS[1].1, PTS[2].0, PTS[2].1, W, &paint);
+        }
+
+        let (gr, _, _) = px(&good, SX, SY);
+        let (nr, _, _) = px(&naive, SX, SY);
+        assert!(gr < 80, "draw_polyline 的拐点应是实心笔色，实得亮度 {gr}");
+        assert!(
+            nr > 200,
+            "反例失效：两次 draw_line 本应在此留白（实得亮度 {nr}）——             采样点或几何被改过，这条测试已不再能抓住拐点缺口"
+        );
+    }
+
+    /// 折线的两端保持平头（Butt），不因为修拐点而变成圆头——
+    /// 圆头会让既有图标（对勾、chevron）的观感整体变化。
+    #[test]
+    fn polyline_keeps_butt_caps_at_the_ends() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // 水平两段折线，端点在 x=20 / x=80，笔宽 8。
+            c.draw_polyline(
+                &[(20.0, 50.0), (50.0, 50.0), (80.0, 50.0)],
+                8.0,
+                &Paint::fill(Color::hex(0x000000)),
+            );
+        }
+        // Butt 端头在端点处齐平截断：端点外 2px 必须仍是白底。
+        // 若退化成 Round cap，这里会被半圆盖住。
+        let (r, _, _) = px(&pm, 17, 50);
+        assert!(r > 200, "折线端头应平齐截断（Butt），实得亮度 {r}");
+    }
+
+    /// 在一个薄裁剪矩形内填充，验证裁剪内的像素确实被绘制（复现进度条隐患）。
+    #[test]
+    fn thin_clip_rect_does_not_drop_fill() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.save();
+            c.clip_rect(Rect::new(10, 40, 80, 6)); // 薄裁剪带
+            c.fill_round_rect(
+                20.0,
+                40.0,
+                40.0,
+                6.0,
+                3.0,
+                &Paint::fill(Color::hex(0xFF0000)),
+            );
+            c.restore();
+        }
+        // 裁剪带中心应被红色填充。
+        let (r, g, b) = px(&pm, 35, 43);
+        assert!(
+            r > 200 && g < 80 && b < 80,
+            "薄裁剪带内应被填充，实得 ({r},{g},{b})"
+        );
+    }
+
+    /// draw_image：Fill 模式铺满 dst，框内被图片色填充、框外保持原样。
+    #[test]
+    fn draw_image_fills_dst_and_respects_bounds() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 4×4 纯红图（非预乘 RGBA）。
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0, 1.0);
+        }
+        // dst 中心应为红。
+        let (r, g, b) = px(&pm, 40, 40);
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "dst 内应被图片填充，实得 ({r},{g},{b})"
+        );
+        // dst 外应保持白。
+        let (r2, g2, b2) = px(&pm, 5, 5);
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "dst 外不应被绘制，实得 ({r2},{g2},{b2})"
+        );
+    }
+
+    /// 裁剪在**局部帧 + 高 DPI + dst 四边都越出缓冲**的组合下同样成立。
+    ///
+    /// `draw_image_respects_clip_rect_on_every_side` 全部跑在 `SkiaCanvas::new`
+    /// （scale=1、offset=0、dst 恒在缓冲内），三类真实缺陷能从它下面溜过去，而且
+    /// 都经故意破坏验证过确实溜得过去：
+    /// - `bx1.min(mw)` / `by1.min(mh)` 的上界钳制：dst 越出缓冲**右下**才会走到，
+    ///   删掉它的真实症状是切片索引越界 panic；
+    /// - `bx0.max(0)` / `by0.max(0)` 的下界钳制：dst 越出**左上**才会走到；
+    /// - `cr` 与 `pdst` 都要**先 `offset(-self.offset)` 再 `scaled`**。顺序写反会让
+    ///   裁剪矩形整体偏移（这里是 +10,+8 物理像素）、裁得更严，于是"裁剪区外没有
+    ///   笔迹"照样成立——只有一个**紧贴裁剪边界内侧**的探测点能抓住它。局部帧正是
+    ///   这个函数最热的路径。
+    ///
+    /// 故用例让 dst 四边全部越出子 pixmap，并把"应当有图"的探测点压在裁剪边界内缘。
+    #[test]
+    fn draw_image_clip_holds_under_offset_scale_and_out_of_bounds_dst() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        // 局部帧：子 pixmap 的 (0,0) 对应世界 (10,8)，2 倍 DPI，覆盖世界 x∈[10,34)、y∈[8,28)。
+        let offset = Point::new(10, 8);
+        let scale = 2.0f32;
+        // dst 世界 (4,2)-(44,32) → 物理 (-12,-12)-(68,48)：左上越界、右下也越界。
+        let dst = Rect::new(4, 2, 40, 30);
+        // 裁剪切掉世界 x<14 与 y<10（物理 x<8、y<4）。
+        let clip = Rect::new(14, 10, 40, 40);
+        let mut pm = Pixmap::new(48, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, offset);
+            c.save();
+            c.clip_rect(clip);
+            c.draw_image(&img, dst, Fit::Fill, 6.0, 1.0);
+            c.restore();
+        }
+        // 裁剪区之外不得有任何笔迹。物理 (px,py) 对应世界 (px/2+10, py/2+8)。
+        for y in 0..pm.height() {
+            for x in 0..pm.width() {
+                let (wx, wy) = (x as i32 / 2 + offset.x, y as i32 / 2 + offset.y);
+                if wx >= clip.x && wy >= clip.y {
+                    continue;
+                }
+                let (r, g, b) = px(&pm, x, y);
+                assert!(
+                    r > 250 && g > 250 && b > 250,
+                    "({x},{y})=世界({wx},{wy}) 在裁剪区外却有笔迹 ({r},{g},{b})"
+                );
+            }
+        }
+        // 紧贴裁剪边界内缘的探测点：物理 (10,6)，正确实现的裁剪矩形是 (8,4,80,80)、
+        // 包含它；若 offset/scale 顺序写反则变成 (18,12,80,80)、把它裁掉。
+        for (label, ix, iy) in [("裁剪边界内缘", 10u32, 6u32), ("右下远端", 40, 34)] {
+            let (r, g, b) = px(&pm, ix, iy);
+            assert!(
+                r > 200 && g < 80 && b < 80,
+                "[{label}] 物理({ix},{iy}) 在裁剪区内且被图片覆盖, 应有图, 实得 ({r},{g},{b})"
+            );
+        }
+    }
+
+    /// 图片的笔迹不得溢出 dst 哪怕一个像素——这是"裁剪只需处理 dst 区域"的前提。
+    ///
+    /// `draw_image` 的裁剪求交从 `Mask::intersect_path`（整幅 mask，2.19ms/次）改成了
+    /// 只清 dst 区域内、裁剪区外的像素，依据是：`fill_path` 之后 mask **只有 dst 那块
+    /// 非零**，而 0 与任何东西求交还是 0。若抗锯齿边会让非零像素外溢一圈，那一圈就
+    /// 再也不会被裁剪清零——滚动容器里表现为图片边缘越界一像素，盖在容器边框上。
+    ///
+    /// 成立的原因是 `pdst` 经 `Rect::scaled` 后恒为整数坐标，AA 边正好压在像素边界上。
+    /// 这是个不成文前提（依赖 `Rect::scaled` 的取整行为），故钉住：圆角与非整数缩放
+    /// 都要验，那是最可能把边缘推出整数格的两种情形。
+    #[test]
+    fn image_ink_never_escapes_dst() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        let dst = Rect::new(20, 20, 40, 40);
+        for (label, radius, scale) in [
+            ("直角・1x", 0.0f32, 1.0f32),
+            ("圆角・1x", 8.0, 1.0),
+            ("圆角・1.5x", 8.0, 1.5),
+            ("圆角・2x", 8.0, 2.0),
+        ] {
+            let mut pm = Pixmap::new(140, 140).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            {
+                let mut eng = crate::text::NullTextEngine;
+                let mut c =
+                    SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, Point::new(0, 0));
+                c.draw_image(&img, dst, Fit::Fill, radius, 1.0);
+            }
+            let pd = dst.scaled(scale);
+            for y in 0..pm.height() {
+                for x in 0..pm.width() {
+                    let inside = (x as i32) >= pd.x
+                        && (x as i32) < pd.x + pd.w
+                        && (y as i32) >= pd.y
+                        && (y as i32) < pd.y + pd.h;
+                    if inside {
+                        continue;
+                    }
+                    let (r, g, b) = px(&pm, x, y);
+                    assert!(
+                        r > 250 && g > 250 && b > 250,
+                        "[{label}] ({x},{y}) 在 dst {pd:?} 之外却有笔迹 ({r},{g},{b})——                         mask 非零区域溢出了 dst, 「裁剪只需处理 dst 区域」的前提不再成立"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 图片被裁剪矩形切掉的部分必须不落笔——**四条边分别验**。
+    ///
+    /// 裁剪求交原先用 `Mask::intersect_path`（整幅 mask 操作，1920×1080 下 2.2ms/次，
+    /// 占单张图片绘制的 83%）。现改为只在 dst 区域内把裁剪区外的像素清零，四条边是
+    /// 四段独立的边界算术。若某一侧算错，症状是图片溢出到裁剪区外——滚动容器里就是
+    /// 图片盖住了容器边框或相邻内容。
+    ///
+    /// 四条边分开写而不是用一个"切掉一角"的用例：裁剪矩形若总是从原点起，左边界与
+    /// 上边界的算术永远不生效，那两侧写错也照样全绿。
+    #[test]
+    fn draw_image_respects_clip_rect_on_every_side() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        // 图片铺在 (20,20)-(60,60)；每个用例用裁剪矩形切掉它的一侧。
+        let dst = Rect::new(20, 20, 40, 40);
+        let cases: &[(&str, Rect, Rect)] = &[
+            // (名称, 裁剪矩形, 应当保持空白的探测区域——落在图片内但裁剪外)
+            ("切左", Rect::new(40, 0, 60, 100), Rect::new(20, 20, 20, 40)),
+            ("切上", Rect::new(0, 40, 100, 60), Rect::new(20, 20, 40, 20)),
+            ("切右", Rect::new(0, 0, 40, 100), Rect::new(40, 20, 20, 40)),
+            ("切下", Rect::new(0, 0, 100, 40), Rect::new(20, 40, 40, 20)),
+        ];
+        for (name, clip, blank) in cases {
+            for &radius in &[0.0f32, 8.0] {
+                let mut pm = Pixmap::new(100, 100).unwrap();
+                pm.fill(tiny_skia::Color::WHITE);
+                {
+                    let mut c = SkiaCanvas::new(&mut pm);
+                    c.save();
+                    c.clip_rect(*clip);
+                    c.draw_image(&img, dst, Fit::Fill, radius, 1.0);
+                    c.restore();
+                }
+                // 裁剪区外、但在图片 dst 内的区域必须仍是白的。
+                for y in blank.y..blank.y + blank.h {
+                    for x in blank.x..blank.x + blank.w {
+                        let (r, g, b) = px(&pm, x as u32, y as u32);
+                        assert!(
+                            r > 240 && g > 240 && b > 240,
+                            "[{name} r={radius}] ({x},{y}) 在裁剪区外却被画上了 ({r},{g},{b})"
+                        );
+                    }
+                }
+                // 前提校验：裁剪区内确实画上了图，否则本用例什么都没验证。
+                let keep = clip.intersect(&dst);
+                assert!(
+                    !keep.is_empty(),
+                    "[{name}] 用例无效：裁剪后不剩任何图片区域"
+                );
+                let (cx, cy) = (keep.x + keep.w / 2, keep.y + keep.h / 2);
+                let (r, g, b) = px(&pm, cx as u32, cy as u32);
+                assert!(
+                    r > 200 && g < 80 && b < 80,
+                    "[{name} r={radius}] 裁剪区内 ({cx},{cy}) 应有图片, 实得 ({r},{g},{b})"
+                );
+            }
+        }
+    }
+
+    /// draw_image：物理尺寸与源图一致时须 1:1 blit——边缘不得出现插值灰边。
+    /// 这是 DPI 感知矢量图标的落地保证：光栅到物理尺寸后若仍被缩放/半像素平移，
+    /// 双线性会把细描边重新摊糊，前面的精确光栅就白做了。
+    #[test]
+    fn draw_image_unit_scale_is_pixel_exact() {
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 4×4 纯红源图，dst 恰为 4×4 逻辑（scale=1 → 物理 4×4）。
+        let img = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(5, 5, 4, 4), Fit::Contain, 0.0, 1.0);
+        }
+        for y in 5..9 {
+            for x in 5..9 {
+                let (r, g, b) = px(&pm, x, y);
+                assert_eq!(
+                    (r, g, b),
+                    (255, 0, 0),
+                    "({x},{y}) 应为纯红（1:1 无插值），实得 ({r},{g},{b})"
+                );
+            }
+        }
+        // 框外相邻像素不得被插值溢出污染。
+        let (r, g, b) = px(&pm, 9, 9);
+        assert_eq!((r, g, b), (255, 255, 255), "dst 外应保持背景白");
+    }
+
+    /// 尺寸差不足 1 物理像素时吸附 1:1：非整数 DPI 下 `scaled()` 四边各自 round，
+    /// 物理宽可能比理论值差 1，不吸附就会退化成 0.97 倍这种"几乎 1:1"的糊缩放。
+    #[test]
+    fn draw_image_snaps_near_unit_scale() {
+        let mut pm = Pixmap::new(30, 30).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 源 8×8，dst 逻辑 9×9（差 1 像素，落在吸附阈值内）→ 保持 8×8 不拉伸。
+        let img = Image::from_rgba(8, 8, &[255u8, 0, 0, 255].repeat(8 * 8)).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(5, 5, 9, 9), Fit::Contain, 0.0, 1.0);
+        }
+        // 吸附后图片 8×8 在 9×9 框内居中（tx 取整），像素应为纯红而非插值中间色。
+        let (r, g, b) = px(&pm, 9, 9);
+        assert_eq!(
+            (r, g, b),
+            (255, 0, 0),
+            "近 1:1 应吸附为纯 blit，实得 ({r},{g},{b})"
+        );
+    }
+
+    /// draw_image：大圆角半径把四角裁掉（角落像素保持背景白）。
+    #[test]
+    fn draw_image_rounded_clips_corners() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let red = [255u8, 0, 0, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // dst 40×40，圆角半径 20（=半边长，近圆）。
+            c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0, 1.0);
+        }
+        // 左上角（dst 角点）应被圆角裁掉 → 仍为白。
+        let (r, g, b) = px(&pm, 11, 11);
+        assert!(
+            r > 240 && g > 240 && b > 240,
+            "圆角应裁掉角落，实得 ({r},{g},{b})"
+        );
+        // 中心仍为红。
+        let (rc, gc, bc) = px(&pm, 30, 30);
+        assert!(
+            rc > 200 && gc < 60 && bc < 60,
+            "中心应为图片色，实得 ({rc},{gc},{bc})"
+        );
+    }
+
+    /// draw_image：低不透明度让红图与白底混出更浅的色（验证状态调制）。
+    #[test]
+    fn draw_image_opacity_blends_lighter() {
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let red = [255u8, 0, 0, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(5, 5, 30, 30), Fit::Fill, 0.0, 0.4);
+        }
+        // 0.4 不透明红 over 白：r 仍高、g/b 被白底抬升（不再接近 0）。
+        let (r, g, b) = px(&pm, 20, 20);
+        assert!(r > 240, "红通道应仍高，实得 {r}");
+        assert!(g > 120 && b > 120, "低不透明应混入白底（g={g}, b={b}）");
+    }
+
+    /// 局部重绘正确性：带 offset 的子 pixmap 渲染，应与全窗渲染的对应区域逐像素一致。
+    /// 验证图元偏移（图形变换 + 裁剪 mask）的几何正确，杜绝脏区合成错位/残影。
+    #[test]
+    fn offset_subpixmap_matches_full_region() {
+        // 全窗 100×100：白底 + 一个完全落在比较区内的蓝色圆角矩形 + 一层裁剪。
+        let draw = |c: &mut SkiaCanvas| {
+            c.save();
+            c.clip_rect(Rect::new(20, 20, 70, 70));
+            c.fill_round_rect(
+                40.0,
+                40.0,
+                22.0,
+                18.0,
+                5.0,
+                &Paint::fill(Color::hex(0x3366CC)),
+            );
+            c.fill_circle(70.0, 70.0, 8.0, &Paint::fill(Color::hex(0xCC3333)));
+            c.restore();
+        };
+        let mut full = Pixmap::new(100, 100).unwrap();
+        full.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut full);
+            draw(&mut c);
+        }
+        // 子 pixmap：脏区 (30,30,40,40)，offset=(30,30)，scale=1。
+        let mut sub = Pixmap::new(40, 40).unwrap();
+        sub.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, 1.0, Point::new(30, 30));
+            draw(&mut c);
+        }
+        // 逐像素比对 full[30..70, 30..70] 与 sub[0..40, 0..40]。
+        for y in 0..40u32 {
+            for x in 0..40u32 {
+                let f = full.pixel(30 + x, 30 + y).unwrap();
+                let s = sub.pixel(x, y).unwrap();
+                assert_eq!(
+                    (f.red(), f.green(), f.blue(), f.alpha()),
+                    (s.red(), s.green(), s.blue(), s.alpha()),
+                    "局部重绘像素 ({x},{y}) 应与全窗一致"
+                );
+            }
+        }
+    }
+
+    /// 局部重绘在分数缩放（1.5×）下的正确性：当 offset×scale 为整数（脏区对齐到 4px 网格保证）时，
+    /// 带 offset 的子 pixmap 渲染应与全窗对应区域逐像素一致（含抗锯齿边缘）。
+    #[test]
+    fn offset_subpixmap_exact_at_scale_1_5() {
+        let s = 1.5;
+        // 全窗 180×180 物理（= 120 逻辑 ×1.5）。
+        let draw = |c: &mut SkiaCanvas| {
+            c.fill_round_rect(
+                40.0,
+                41.0,
+                23.0,
+                17.0,
+                5.0,
+                &Paint::fill(Color::hex(0x3366CC)),
+            );
+        };
+        let mut full = Pixmap::new(180, 180).unwrap();
+        full.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut full, &mut eng, s);
+            draw(&mut c);
+        }
+        // 脏区逻辑原点 (12,12)（4 的倍数 → 12×1.5=18 整数），物理 (18,18)，大小 60×60。
+        let mut sub = Pixmap::new(60, 60).unwrap();
+        sub.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, s, Point::new(12, 12));
+            draw(&mut c);
+        }
+        for y in 0..60u32 {
+            for x in 0..60u32 {
+                let f = full.pixel(18 + x, 18 + y).unwrap();
+                let g = sub.pixel(x, y).unwrap();
+                assert_eq!(
+                    (f.red(), f.green(), f.blue(), f.alpha()),
+                    (g.red(), g.green(), g.blue(), g.alpha()),
+                    "1.5× 对齐 offset 下像素 ({x},{y}) 应逐像素一致"
+                );
+            }
+        }
+    }
+
+    /// 水平线性渐变：左缘偏蓝、右缘偏红，证属过渡而非纯色。
+    #[test]
+    fn fill_round_rect_linear_gradient_left_to_right() {
+        let mut pm = Pixmap::new(100, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            let g = crate::render::Gradient::linear(
+                (0.0, 0.5),
+                (1.0, 0.5),
+                vec![(0.0, Color::hex(0x0000FF)), (1.0, Color::hex(0xFF0000))],
+            );
+            c.fill_round_rect(
+                0.0,
+                0.0,
+                100.0,
+                40.0,
+                8.0,
+                &crate::render::Paint::gradient(g),
+            );
+        }
+        let (lr, _lg, lb) = px(&pm, 6, 20);
+        let (rr, _rg, rb) = px(&pm, 93, 20);
+        assert!(lb > lr, "左缘应偏蓝（b>r），实得 r={lr} b={lb}");
+        assert!(rr > rb, "右缘应偏红（r>b），实得 r={rr} b={rb}");
+    }
+
+    /// 径向渐变：中心亮、边缘暗（证圆心向外过渡）。
+    #[test]
+    fn fill_rect_radial_gradient_center_to_edge() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::BLACK);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            let g = crate::render::Gradient::radial(
+                (0.5, 0.5),
+                1.0,
+                vec![(0.0, Color::hex(0xFFFFFF)), (1.0, Color::hex(0x000000))],
+            );
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &crate::render::Paint::gradient(g));
+        }
+        let (cr, _, _) = px(&pm, 30, 30);
+        let (er, _, _) = px(&pm, 3, 3);
+        assert!(cr > er + 80, "圆心应明显比边角亮，实得 中心={cr} 边角={er}");
+    }
+
+    /// 离屏层 opacity：50% 红块合成到白底 → 粉色（r 高、g/b 被抬升）。
+    #[test]
+    fn push_pop_layer_composites_with_opacity() {
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+        }
+        let (r, g, b) = px(&pm, 20, 20);
+        assert!(r > 240, "红通道应高，实得 {r}");
+        assert!(
+            g > 100 && g < 200,
+            "绿应被白底抬到中段（50% 合成），实得 {g}"
+        );
+        assert!(b > 100 && b < 200, "蓝应被白底抬到中段，实得 {b}");
+    }
+
+    /// 投影：矩形外有柔化渐隐（紧邻边缘变暗、远处保持白）。
+    #[test]
+    fn draw_shadow_produces_soft_halo() {
+        let mut pm = Pixmap::new(120, 120).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_shadow(40.0, 40.0, 40.0, 40.0, 8.0, 10.0, Color::rgba(0, 0, 0, 180));
+        }
+        // 投影矩形中心应明显变暗。
+        let (cr, _, _) = px(&pm, 60, 60);
+        assert!(cr < 120, "投影中心应变暗，实得 {cr}");
+        // 紧邻矩形外缘（约 6px 外）应处于柔化过渡（介于暗与白之间）。
+        let (er, _, _) = px(&pm, 86, 60);
+        assert!(er > 130 && er < 252, "外缘应为柔化过渡，实得 {er}");
+        // 远角应保持纯白（未被投影波及）。
+        let (fr, _, _) = px(&pm, 4, 4);
+        assert!(fr > 250, "远角应保持白，实得 {fr}");
+    }
+
+    /// 投影外缘必须**渐隐到底**，不能在某一圈上突然截断。
+    ///
+    /// ★ 回归：阴影 pixmap 的 margin 曾按 `2×半径` 留（以为 3 趟 box-blur 的可见扩散只有
+    /// 1.5 倍），而每趟各扩散一个半径、总共 3 倍——尾部被 pixmap 边界切掉，阴影最外圈
+    /// 留下一道直角硬边。判据取尾部而非每一步：紧邻矩形处梯度本就陡（从实心到渐隐），
+    /// 而截断的特征很具体——渐隐还没走到 0 就没了，"最后一个可见暗度"仍是个大数。
+    #[test]
+    fn shadow_fades_out_without_a_hard_cutoff_ring() {
+        let mut pm = Pixmap::new(400, 400).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // 半径取得比默认大：截断随半径放大，小半径下未必看得出来。
+            c.draw_shadow(
+                150.0,
+                150.0,
+                100.0,
+                100.0,
+                10.0,
+                18.0,
+                Color::rgba(0, 0, 0, 180),
+            );
+        }
+        // 从矩形右缘向外逐像素取样，记录暗度（255-r，越大越暗）。
+        let dark: Vec<i32> = (250..399).map(|x| 255 - px(&pm, x, 200).0 as i32).collect();
+        for i in 1..dark.len() {
+            assert!(
+                dark[i] <= dark[i - 1] + 1,
+                "暗度应向外单调递减，第 {i} 步从 {} 跳到 {}",
+                dark[i - 1],
+                dark[i]
+            );
+        }
+        let last = dark.iter().rposition(|&d| d > 0).expect("阴影应有可见范围");
+        assert!(
+            dark[last] <= 2,
+            "渐隐尾部最后一个可见暗度为 {}（在第 {last} 像素处），说明模糊被 pixmap 边界切断——\
+             渐隐走完的话末端应几乎归零",
+            dark[last]
+        );
+        assert!(
+            dark[0] > 10,
+            "紧邻边缘应有可见暗度（否则这条测试没测到东西）"
+        );
+        assert_eq!(*dark.last().unwrap(), 0, "足够远处应回到纯白");
+    }
+
+    /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。
+    #[test]
+    fn thin_clip_rect_with_engine_and_offset() {
+        let mut pm = Pixmap::new(320, 280).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        {
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            c.save();
+            c.clip_rect(Rect::new(22, 42, 276, 6));
+            // 进度滑块：x=22+6.37, y=42, w=96.6, h=6, r=3
+            c.fill_round_rect(
+                28.37,
+                42.0,
+                96.6,
+                6.0,
+                3.0,
+                &Paint::fill(Color::hex(0x4C8BF5)),
+            );
+            c.restore();
+        }
+        let (r, g, b) = px(&pm, 60, 44);
+        assert!(
+            b > 180 && r < 140,
+            "进度滑块应在裁剪带内显现，实得 ({r},{g},{b})"
+        );
+    }
+    /// **实色快路门禁**：整数对齐矩形的快路必须与通用路径光栅器**逐像素**一致。
+    ///
+    /// 快路（上游 0.20.0 的 `fast_fill_rect`；原补丁 031 已被它取代）绕过了 tiny-skia
+    /// 的扫描线覆盖率计算，它成立的前提是"整数对齐的轴对齐矩形覆盖率恒为 1"。这条
+    /// 测试把这个前提**验出来**而不是断言它：同一块带内容的底图，一次走 `fill_rect`
+    /// （快路），一次手搓路径走 `fill_path`（慢路），逐像素比对。
+    ///
+    /// 覆盖面刻意包含：不透明源（退化为整行拷贝）、半透明源（真混合）、alpha 很小的
+    /// 源（低位取整最敏感）、以及**压在整数边界上**的矩形。
+    #[test]
+    fn solid_rect_fast_path_matches_the_rasterizer() {
+        const W: u32 = 64;
+        const H: u32 = 48;
+
+        // 底图刻意做成彩色渐变 + 不同 alpha：全 0 的底图会让两种走法都恒等，测不出差别。
+        let mut base = Pixmap::new(W, H).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut base);
+            for yy in 0..H {
+                for xx in 0..W {
+                    c.fill_rect(
+                        xx as f32,
+                        yy as f32,
+                        1.0,
+                        1.0,
+                        &Paint::fill(Color::rgba(
+                            (xx * 4) as u8,
+                            (yy * 5) as u8,
+                            ((xx + yy) * 3) as u8,
+                            (60 + (xx * 3) % 180) as u8,
+                        )),
+                    );
+                }
+            }
+        }
+
+        // (矩形, 源色) —— 矩形都落在整数物理像素上（快路的必要条件）。
+        let cases: [((f32, f32, f32, f32), Color); 5] = [
+            ((8.0, 6.0, 30.0, 20.0), Color::rgba(0, 0, 0, 255)), // 不透明
+            ((10.0, 8.0, 24.0, 24.0), Color::rgba(0, 0, 0, 170)), // 半透明（聚光灯那种）
+            ((12.0, 4.0, 40.0, 40.0), Color::rgba(255, 0, 0, 1)), // 极低 alpha
+            ((0.0, 0.0, W as f32, H as f32), Color::rgba(30, 60, 90, 128)), // 整屏
+            ((2.0, 2.0, 60.0, 44.0), Color::rgba(255, 255, 255, 254)), // a=254：差一档就该走混合路
+        ];
+
+        let mut worst = 0i32;
+        for (rect, color) in cases {
+            let (x, y, w, h) = rect;
+            // 快路：公开 API，守卫全部成立。
+            let mut fast = base.clone();
+            {
+                let mut c = SkiaCanvas::new(&mut fast);
+                c.fill_rect(x, y, w, h, &Paint::fill(color));
+            }
+            // 慢路：手搓同一条路径直接喂光栅器（跳过守卫）。
+            let mut slow = base.clone();
+            {
+                let mut c = SkiaCanvas::new(&mut slow);
+                let (ax, ay, aw, ah) = crate::render::align_to_device(x, y, w, h, 1.0);
+                let path = rounded_rect_path(ax, ay, aw, ah, 0.0).expect("矩形路径");
+                let sp = SkiaCanvas::fill_paint(&Paint::fill(color), ax, ay, aw, ah);
+                let tf = c.tf();
+                c.fill_path_on_target(&path, &sp, tf);
+            }
+
+            for i in 0..(W * H) as usize {
+                for ch in 0..4 {
+                    let d = (fast.data()[i * 4 + ch] as i32 - slow.data()[i * 4 + ch] as i32).abs();
+                    worst = worst.max(d);
+                    assert!(
+                        d <= 1,
+                        "rect={rect:?} color={color:?} 像素 #{i} 通道 {ch} 差 {d}（快路 {} vs 光栅器 {}）",
+                        fast.data()[i * 4 + ch],
+                        slow.data()[i * 4 + ch]
+                    );
+                }
+            }
+        }
+        eprintln!("实色快路 vs 光栅器：全缓冲最大通道差 = {worst}/255");
+    }
+}

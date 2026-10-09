@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CurSeen 隐藏快捷键与技巧手册</title>
+<style>
+body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;max-width:900px;margin:0 auto;
+     padding:32px 34px 64px;color:#1f2329;background:#fdfdfc;line-height:1.7;font-size:15px}
+h1{font-size:25px;border-bottom:2px solid #d8d5cf;padding-bottom:10px;margin-top:4px}
+h2{font-size:19px;border-bottom:1px solid #e3e0da;padding-bottom:6px;margin-top:34px}
+h3{font-size:16px;margin-top:22px}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid #d9d6d0;padding:7px 11px;text-align:left;vertical-align:top}
+th{background:#f0eee9;font-weight:600}
+tr:nth-child(even) td{background:#faf9f6}
+code{background:#f2f0ec;border:1px solid #e6e3dd;border-radius:3px;padding:1px 5px;
+     font-family:Consolas,monospace;font-size:13px;color:#8a3b12}
+pre{background:#f6f5f1;border:1px solid #e3e0da;border-radius:6px;padding:12px 14px;overflow-x:auto}
+pre code{background:none;border:none;padding:0;color:#1f2328}
+blockquote{border-left:4px solid #d9b13b;background:#fdf8ea;margin:14px 0;padding:10px 16px;color:#5c5648}
+hr{border:none;border-top:1px solid #e3e0da;margin:28px 0}
+a{color:#0b62c4;text-decoration:none}
+</style>
+<style>
+html{scroll-behavior:smooth}
+body{padding-left:280px}
+.toc{position:fixed;top:0;left:0;width:248px;height:100vh;overflow-y:auto;
+     padding:24px 12px 24px 18px;background:#fbfbfa;border-right:1px solid #e7e4de;
+     font-size:13px;line-height:1.5;z-index:50}
+.toc-title{font-weight:700;color:#827c72;font-size:11.5px;letter-spacing:1.5px;
+     text-transform:uppercase;margin:2px 0 12px 6px}
+.toc ul{list-style:none;margin:0;padding:0}
+.toc li{margin:0}
+.toc a{display:block;padding:5px 9px;border-radius:6px;color:#3b3a37;text-decoration:none;
+     border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.toc a:hover{background:#eef0f3;color:#1f2328}
+.toc a.active{background:#eaf1ff;color:#0b62c4;border-left-color:#0b62c4;font-weight:600}
+.toc .toc-l2 a{padding-left:20px}
+.toc .toc-l3 a{padding-left:34px;font-size:12.5px;color:#6b6760}
+@media (max-width:1080px){.toc{display:none}body{padding-left:0}}
+</style>
+</head>
+<body>
+<h1 id="CurSeen-隐藏快捷键与技巧手册">CurSeen 隐藏快捷键与技巧手册</h1>
+<blockquote>
+<p>本手册收录<strong>界面里没有写出来</strong>的快捷键与操作。为了让控制面板保持干净，<br />
+这些键不占用任何 UI 空间——它们<strong>是固定的、不可修改的</strong>（与「设置 → 快捷键」卡里<br />
+那些可以在面板里查看、重绑的全局热键不同）。</p>
+<p>适用版本：随本手册同包的 CurSeen（AGPL-3.0）。不同版本若调整了快捷键，以程序实际行为为准。</p>
+</blockquote>
+<hr />
+<h2 id="一-贴图-截图-粘贴到桌面的图像">一、贴图（截图 / 粘贴到桌面的图像）</h2>
+<p>贴图 = 截图后钉在桌面的图，或把剪贴板里的图片「贴图」到桌面。</p>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ctrl + S</code></td>
+<td>把<strong>当前选中的那张</strong>贴图另存为 PNG</td>
+<td>仅当存在「被选中的贴图」时生效；没有选中则忽略，按键照常透传。</td>
+</tr>
+<tr>
+<td><code>Esc</code></td>
+<td>关闭当前选中的贴图</td>
+<td>仅当处于「贴图选中」状态。</td>
+</tr>
+<tr>
+<td>截图时按住 <code>Ctrl</code></td>
+<td>进入截图编辑态</td>
+<td>在按截图键或拖选区的<strong>同时</strong>按住 Ctrl：可框选调整、可标注；确认后是否贴图取决于用的是哪把键。这是从基础截图键派生出来的 Ctrl 变体。</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>提示：贴图选中后，用鼠标拖拽可移动，滚轮可缩放（若已开启对应开关）</p>
+</blockquote>
+<h2 id="二-屏幕标注-画笔-白板">二、屏幕标注（画笔 / 白板）</h2>
+<p>屏幕标注模块内部的工具切换键（画笔 1–3、橡皮、直线、箭头、矩形、椭圆、文字、马赛克、<br />
+开/关屏幕标注、开/关白板）是<strong>配置驱动</strong>的，在「设置 → 屏幕」卡里可见、可改，这里不重复。<br />
+下面这些是<strong>固定、不写在 UI 里</strong>的编辑键：</p>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ctrl + Z</code></td>
+<td>撤销一步</td>
+</tr>
+<tr>
+<td><code>Ctrl + Shift + Z</code></td>
+<td>重做</td>
+</tr>
+<tr>
+<td><code>Ctrl + Y</code></td>
+<td>重做（与上等价）</td>
+</tr>
+<tr>
+<td><code>Backspace</code></td>
+<td>撤销一步（与 <code>Ctrl+Z</code> 相同）</td>
+</tr>
+<tr>
+<td><code>Delete</code></td>
+<td>清空整块画布</td>
+</tr>
+<tr>
+<td><code>Esc</code></td>
+<td>退出 / 收掉标注（并保留标注内容）</td>
+</tr>
+<tr>
+<td><code>Esc</code>（截图编辑态）</td>
+<td>放弃本次截图编辑（仅当文字输入窗未打开时）；编辑态下 <code>Enter</code> 被设为「无反应」，完成只走工具栏「保存」，放弃走 <code>Esc</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>这些固定键仅在「画笔」开关开启、且非挂起态下生效。</p>
+</blockquote>
+<hr />
+<h2 id="三-放大镜">三、放大镜</h2>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ctrl + Win + 滚轮</code></td>
+<td>调整倍率（上滚放大 / 下滚缩小，步进 ±1，范围 1–5）</td>
+<td>内置手势，刻意避开 <code>Ctrl+滚轮</code>、<code>Ctrl+Alt+滚轮</code> 等常见绑定；仅在放大镜在屏上（武装态）才拦截滚轮，否则滚轮完全不受干预。</td>
+</tr>
+<tr>
+<td><code>Esc</code>（全屏放大镜）</td>
+<td>退出全屏放大镜</td>
+<td>全屏窗盖住一切时的逃生键，裸 <code>Esc</code> 不带修饰键。</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="四-剪贴板历史面板">四、剪贴板历史面板</h2>
+<p>打开剪贴板历史面板后，面板获得键盘焦点时的导航键（这些在任何 UI 文本里都没有提示）：</p>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>↑</code> / <code>↓</code></td>
+<td>上移 / 下移选中项</td>
+</tr>
+<tr>
+<td><code>Enter</code></td>
+<td>粘贴选中项</td>
+</tr>
+<tr>
+<td><code>Esc</code></td>
+<td>收起面板</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>打开面板本身的快捷键是<strong>配置驱动</strong>的（「设置 → 工具」里的「剪贴板历史」热键，出厂留空）。</p>
+</blockquote>
+<hr />
+<h2 id="五-便签">五、便签</h2>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Esc</code> / <code>Enter</code></td>
+<td>关闭便签的「透明度」小弹窗</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>呼出便签本身的快捷键是<strong>配置驱动</strong>的（「设置 → 工具」里的「便签」热键，出厂留空）。</p>
+</blockquote>
+<hr />
+<h2 id="六-与-可配置热键-的区别">六、与「可配置热键」的区别</h2>
+<p>上面所有键都是<strong>固定、不可修改</strong>的。与之相对，「设置 → 快捷键」卡里列出的那些是<br />
+<strong>可配置</strong>的全局热键（例如呼出/收起控制面板、截图、录屏、放大镜、便签、剪贴板历史等），<br />
+它们的出厂默认<strong>大多留空（= 停用）</strong>，需要你在面板里自行绑定后才生效，并且可以随时重绑。</p>
+<p>如果你想要的是「怎么改那些能改的键」，请打开 <strong>控制面板 → 设置 → 快捷键</strong>，<br />
+点击任意一行进入捕获态、按下想要的键即可。</p>
+<hr />
+<h2 id="七-小提示">七、小提示</h2>
+<ul>
+<li>所有隐藏键都不依赖控制面板是否打开（除了剪贴板历史面板的 <code>↑↓/Enter/Esc</code> 需要面板开着）。</li>
+<li>若某个隐藏键「没反应」，先确认对应功能开关已开启（如「画笔」「放大镜」）。</li>
+<li>贴图 <code>Ctrl+S</code> 只在有贴图被选中时拦截按键；没有选中贴图时，<code>Ctrl+S</code> 会原样透传，<br />
+  不会误吞前台程序的保存。</li>
+</ul>
+<nav class="toc" aria-label="目录">
+<div class="toc-title">目录</div>
+<ul>
+<li class="toc-l1"><a href="#CurSeen-隐藏快捷键与技巧手册">CurSeen 隐藏快捷键与技巧手册</a></li>
+<li class="toc-l2"><a href="#一-贴图-截图-粘贴到桌面的图像">一、贴图（截图 / 粘贴到桌面的图像）</a></li>
+<li class="toc-l2"><a href="#二-屏幕标注-画笔-白板">二、屏幕标注（画笔 / 白板）</a></li>
+<li class="toc-l2"><a href="#三-放大镜">三、放大镜</a></li>
+<li class="toc-l2"><a href="#四-剪贴板历史面板">四、剪贴板历史面板</a></li>
+<li class="toc-l2"><a href="#五-便签">五、便签</a></li>
+<li class="toc-l2"><a href="#六-与-可配置热键-的区别">六、与「可配置热键」的区别</a></li>
+<li class="toc-l2"><a href="#七-小提示">七、小提示</a></li>
+</ul>
+</nav>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var map = {}; links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h1[id],h2[id],h3[id]'));
+  function onScroll(){
+    var cur = heads.length ? heads[0].id : null;
+    for (var i=0;i<heads.length;i++){
+      if (heads[i].getBoundingClientRect().top <= 90) cur = heads[i].id; else break;
+    }
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if (cur && map[cur]) map[cur].classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+
+</body>
+</html>

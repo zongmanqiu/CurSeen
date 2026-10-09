@@ -1,0 +1,43 @@
+# CurSeen third-party dependency list
+# Read by 2_download.bat: each active line is downloaded and extracted to
+# .3rdParty/<name>/.
+#
+# Format: name=url
+#         name=url|marker-file
+# The extracted top-level dir is renamed to "name" automatically.
+# The optional "marker-file" (a path RELATIVE to .3rdParty/<name>/) is the
+# integrity probe: the library counts as "already present" only if that file
+# exists. This guards against a half-extracted directory left behind by an
+# interrupted download, which would otherwise be mistaken for a complete one.
+#
+# IMPORTANT: keep this file ASCII-only. cmd's "for /f" parses it in the OEM
+# code page; non-ASCII bytes (e.g. CJK comments) get mangled and can swallow
+# the following "name=url" lines, silently skipping dependencies.
+# (Chinese notes for these libraries live in build_readme.md.)
+#
+# Line endings: LF is fine here (verified - "for /f" splits on LF just as well
+# as CRLF, and .gitattributes pins *.txt to LF so diffs stay readable). Only
+# .bat files need CRLF.
+#
+# IMPORTANT: GitHub-hosted libraries use
+#   https://codeload.github.com/<owner>/<repo>/tar.gz/refs/tags/<tag>
+# instead of
+#   https://github.com/<owner>/<repo>/archive/refs/tags/<tag>.tar.gz
+# Both serve the same archive (codeload is GitHub's archive host and is what
+# the archive/ URL redirects to). We link codeload directly because the
+# github.com/archive and github.com/releases paths return HTTP 502 behind
+# restrictive HTTP proxies, while codeload works through both direct and
+# proxied connections.
+#
+# Set CURSEEN_FORCE_DOWNLOAD=1 to ignore the cache/presence checks and re-fetch
+# every library from scratch (useful when .3rdParty/ is suspected corrupt).
+
+# ---- Rust PATH dependencies (downloaded by 2_download.bat) -----------------
+# Both are path dependencies modified IN PLACE (windui carries the CurSeen
+# patch series, including the layered overlay window). After downloading,
+# 3_patch.bat must copy main/patches/ over .3rdParty/ - otherwise the fork
+# changes are silently missing and the build either fails or loses features.
+
+# windui 0.20.0 - UI framework. Upstream zip (for reference):
+#   https://github.com/huanfeng/wind-ui-rust/archive/refs/tags/v0.20.0.zip
+wind-ui-rust-0.20.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.20.0|src/core.rs

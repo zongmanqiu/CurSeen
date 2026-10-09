@@ -1,0 +1,74 @@
+{
+  "trail": {
+    "cursor_mode": 0,
+    "cursor_outer": 60,
+    "cursor_arc": 5,
+    "cursor_color": "#ff000080",
+    "sound_volume": 50,
+    "ripple_size": 100,
+    "ripple_duration": 300,
+    "trail_effect": "pixie_dust",
+    "trail_enabled": false,
+    "trail_settings": {
+      "fade_duration": 1.0,
+      "density": 5,
+      "opacity": 0.5,
+      "spawn_interval_ms": 100,
+      "particle_size": 5,
+      "color_mode": "rainbow",
+      "fixed_color": "#FFFF00"
+    },
+    "ripple_left_enabled": false,
+    "ripple_left_color": "#FFFF00FF",
+    "ripple_right_enabled": false,
+    "ripple_right_color": "#0000FFFF",
+    "sound_left_enabled": false,
+    "sound_right_enabled": false
+  },
+  "key_display": {
+    "placement": "bottom_right",
+    "top_offset": 0,
+    "bottom_offset": 10,
+    "left_offset": 0,
+    "right_offset": 0,
+    "popup_width": 15,
+    "opacity": 1.0,
+    "fade_delay": 10,
+    "font_size": 16,
+    "font_color": [255, 255, 0, 255],
+    "fun_color": [255, 0, 0, 255],
+    "symbol_color": [255, 255, 255, 255],
+    "bg_color": [0, 0, 0, 255],
+    "merge_interval": 1.5,
+    "display_mode": "all"
+  },
+  "drawing": {
+    "hotkeys": {
+      "draw_hk_screen": "Alt+G",
+      "draw_hk_white": "Alt+W",
+      "draw_hk_pen1": "1",
+      "draw_hk_pen2": "2",
+      "draw_hk_pen3": "3",
+      "draw_hk_eraser": "4",
+      "draw_hk_line": "5",
+      "draw_hk_arrow": "6",
+      "draw_hk_rect": "7",
+      "draw_hk_ellipse": "8",
+      "draw_hk_text": "9"
+    },
+    "pens": [
+      { "color": "#000000FF", "width": 4, "style": "solid" },
+      { "color": "#FF000040", "width": 30, "style": "solid" },
+      { "color": "#00FF00FF", "width": 4, "style": "dashed" }
+    ]
+  },
+  "general": { "auto_start": false, "overlay_opacity": 1.0 },
+  "ui": { "font_size": 16 },
+  "global": {
+    "panel_hotkey": "",
+    "enabled_trail": false,
+    "enabled_key": false,
+    "enabled_draw": false
+  },
+  "hotkeys": { "toggle_drawing": "Ctrl+Shift+D" }
+}

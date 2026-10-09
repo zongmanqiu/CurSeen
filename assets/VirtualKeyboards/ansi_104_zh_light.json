@@ -1,0 +1,344 @@
+{
+  "name": "ANSI 104 轻立体",
+  "base_layout": "ansi_104",
+  "_说明": "白底细边框键帽 + 2px 底部微影（侧壁），按下变灰并下压 2px。设计变量：键帽 #FFFFFF / 边框 #D1D5DA / 功能键 #E4E7EA / 按下 #EBEBEB。适合白天浅色桌面，反馈轻但清楚。",
+  "defaults": {
+    "font_size": 15,
+    "corner_radius": 6,
+    "opacity": 1.0
+  },
+  "styles": {
+    "input": {
+      "label": "输入键",
+      "fill": "#FFFFFF",
+      "text": "#333333",
+      "border": "#D1D5DA",
+      "side": "#00000018",
+      "depth": 2,
+      "press": "#D5DBE2"
+    },
+    "func": {
+      "label": "功能键",
+      "fill": "#E4E7EA",
+      "text": "#555555",
+      "border": "#D1D5DA",
+      "side": "#00000015",
+      "depth": 2,
+      "press": "#C9CFD7"
+    }
+  },
+  "keys": {
+    "Esc": {
+      "style": "func"
+    },
+    "F1": {
+      "style": "func"
+    },
+    "F2": {
+      "style": "func"
+    },
+    "F3": {
+      "style": "func"
+    },
+    "F4": {
+      "style": "func"
+    },
+    "F5": {
+      "style": "func"
+    },
+    "F6": {
+      "style": "func"
+    },
+    "F7": {
+      "style": "func"
+    },
+    "F8": {
+      "style": "func"
+    },
+    "F9": {
+      "style": "func"
+    },
+    "F10": {
+      "style": "func"
+    },
+    "F11": {
+      "style": "func"
+    },
+    "F12": {
+      "style": "func"
+    },
+    "PrtSc": {
+      "style": "func"
+    },
+    "ScrollLock": {
+      "style": "func"
+    },
+    "Pause": {
+      "style": "func"
+    },
+    "SymBacktick": {
+      "style": "input"
+    },
+    "Char1": {
+      "style": "input"
+    },
+    "Char2": {
+      "style": "input"
+    },
+    "Char3": {
+      "style": "input"
+    },
+    "Char4": {
+      "style": "input"
+    },
+    "Char5": {
+      "style": "input"
+    },
+    "Char6": {
+      "style": "input"
+    },
+    "Char7": {
+      "style": "input"
+    },
+    "Char8": {
+      "style": "input"
+    },
+    "Char9": {
+      "style": "input"
+    },
+    "Char0": {
+      "style": "input"
+    },
+    "SymMinus": {
+      "style": "input"
+    },
+    "SymEquals": {
+      "style": "input"
+    },
+    "Backspace": {
+      "style": "func"
+    },
+    "Insert": {
+      "style": "func"
+    },
+    "Home": {
+      "style": "func"
+    },
+    "PageUp": {
+      "style": "func"
+    },
+    "NumLock": {
+      "style": "func"
+    },
+    "NumDiv": {
+      "style": "input"
+    },
+    "NumMul": {
+      "style": "input"
+    },
+    "NumSub": {
+      "style": "input"
+    },
+    "Tab": {
+      "style": "func"
+    },
+    "CharQ": {
+      "style": "input"
+    },
+    "CharW": {
+      "style": "input"
+    },
+    "CharE": {
+      "style": "input"
+    },
+    "CharR": {
+      "style": "input"
+    },
+    "CharT": {
+      "style": "input"
+    },
+    "CharY": {
+      "style": "input"
+    },
+    "CharU": {
+      "style": "input"
+    },
+    "CharI": {
+      "style": "input"
+    },
+    "CharO": {
+      "style": "input"
+    },
+    "CharP": {
+      "style": "input"
+    },
+    "SymLBracket": {
+      "style": "input"
+    },
+    "SymRBracket": {
+      "style": "input"
+    },
+    "SymBackslash": {
+      "style": "input"
+    },
+    "Delete": {
+      "style": "func"
+    },
+    "End": {
+      "style": "func"
+    },
+    "PageDown": {
+      "style": "func"
+    },
+    "Num7": {
+      "style": "input"
+    },
+    "Num8": {
+      "style": "input"
+    },
+    "Num9": {
+      "style": "input"
+    },
+    "NumAdd": {
+      "style": "input"
+    },
+    "CapsLock": {
+      "style": "func"
+    },
+    "CharA": {
+      "style": "input"
+    },
+    "CharS": {
+      "style": "input"
+    },
+    "CharD": {
+      "style": "input"
+    },
+    "CharF": {
+      "style": "input"
+    },
+    "CharG": {
+      "style": "input"
+    },
+    "CharH": {
+      "style": "input"
+    },
+    "CharJ": {
+      "style": "input"
+    },
+    "CharK": {
+      "style": "input"
+    },
+    "CharL": {
+      "style": "input"
+    },
+    "SymSemicolon": {
+      "style": "input"
+    },
+    "SymQuote": {
+      "style": "input"
+    },
+    "Enter": {
+      "style": "func"
+    },
+    "Num4": {
+      "style": "input"
+    },
+    "Num5": {
+      "style": "input"
+    },
+    "Num6": {
+      "style": "input"
+    },
+    "LShift": {
+      "style": "func"
+    },
+    "CharZ": {
+      "style": "input"
+    },
+    "CharX": {
+      "style": "input"
+    },
+    "CharC": {
+      "style": "input"
+    },
+    "CharV": {
+      "style": "input"
+    },
+    "CharB": {
+      "style": "input"
+    },
+    "CharN": {
+      "style": "input"
+    },
+    "CharM": {
+      "style": "input"
+    },
+    "SymComma": {
+      "style": "input"
+    },
+    "SymPeriod": {
+      "style": "input"
+    },
+    "SymSlash": {
+      "style": "input"
+    },
+    "RShift": {
+      "style": "func"
+    },
+    "Up": {
+      "style": "func"
+    },
+    "Num1": {
+      "style": "input"
+    },
+    "Num2": {
+      "style": "input"
+    },
+    "Num3": {
+      "style": "input"
+    },
+    "NumEnter": {
+      "style": "func"
+    },
+    "LCtrl": {
+      "style": "func"
+    },
+    "LWin": {
+      "style": "func"
+    },
+    "LAlt": {
+      "style": "func"
+    },
+    "Space": {
+      "style": "func"
+    },
+    "RAlt": {
+      "style": "func"
+    },
+    "RWin": {
+      "style": "func"
+    },
+    "Menu": {
+      "style": "func"
+    },
+    "RCtrl": {
+      "style": "func"
+    },
+    "Left": {
+      "style": "func"
+    },
+    "Down": {
+      "style": "func"
+    },
+    "Right": {
+      "style": "func"
+    },
+    "Num0": {
+      "style": "input"
+    },
+    "NumDot": {
+      "style": "input"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# CurSeen .gitattributes
+#
+# Why this file exists:
+#   cmd.exe requires CRLF line endings in .bat files. LF-only endings make cmd
+#   mis-parse block/continuation handling and emit nonsense errors that point
+#   nowhere near the real problem. Pin the ending in the repo so it cannot
+#   regress when a tool writes straight to disk.
+#
+#   *.md / *.rs / *.toml / *.py keep LF so diffs stay readable.
+# ---------------------------------------------------------------------------
+
+# Windows batch scripts MUST be CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Rust / python / config: LF.
+*.rs    text eol=lf
+*.toml  text eol=lf
+Cargo.lock text eol=lf
+*.py    text eol=lf
+*.lua   text eol=lf
+
+# Docs: LF.
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.ini  text eol=lf
+
+# 许可全文：无扩展名，git 认不出来，必须显式声明为文本。
+# 且必须是 **UTF-8 / LF** —— 存成 UTF-16（PowerShell 重定向默认产物）会让 git 把它
+# 当二进制，diff 失效、工具链读不出来。门禁见
+# tests/docs_consistency.rs::test_license_is_verbatim_agpl3_and_utf8。
+LICENSE text eol=lf
+
+# Binary assets: never touch.
+*.png  binary
+*.bmp  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
+*.wav  binary
+*.mp3  binary
+*.pdf  binary
+*.exe  binary
+*.dll  binary
+*.lib  binary
+*.zip  binary
+*.gz   binary

@@ -1,0 +1,12 @@
+# 构建产物与本地杂物
+temp/
+gate_*.log
+*.log
+
+# 本地介绍稿（不随源码分发）
+docs/intro.pptx
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db

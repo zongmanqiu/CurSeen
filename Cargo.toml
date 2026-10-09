@@ -1,0 +1,314 @@
+[package]
+name = "curseen-ui"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.94"
+# ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。
+#   发版改版本号时记得同步这里；见 docs/RELEASE_CHECKLIST.md §一。
+description = "CurSeen：键鼠所至 · 屏幕所书 · 不止所见"
+authors = ["邱宗满 <qiuzongman@foxmail.com>"]
+license = "AGPL-3.0"
+readme = "README.md"
+repository = "https://gitee.com/qiuzongman/curseen"
+
+# Windows GUI 子系统：不弹控制台窗口
+# 注：编译产物目录由 `.cargo/config.toml` 的 `[build] target-dir` 指定（→ ../temp/target）。
+# 写在 `[package]` 下的 `target-dir` 是无效键，cargo 会警告并回落到默认 `./target`。
+[[bin]]
+name = "curseen"
+path = "src/main.rs"
+
+# ── 离屏验收探针（开发期诊断，不进发布产物） ──
+# 绕过窗口/输入链路，直接驱动真实控制器产出 DrawList 做像素级判据。
+# 运行：`cargo run --example shape_probe` / `render_probe` / `gen_update_bat`
+[[example]]
+name = "render_probe"
+path = "examples/render_probe.rs"
+[[example]]
+name = "shape_probe"
+path = "examples/shape_probe.rs"
+[[example]]
+name = "text_in_box_probe"
+path = "examples/text_in_box_probe.rs"
+[[example]]
+name = "gen_update_bat"
+path = "examples/gen_update_bat.rs"
+# 录制资源占用基准（与 wcap / windows-capture 同条件对比用；不进发布产物）。
+[[example]]
+name = "crash_probe"
+path = "examples/crash_probe.rs"
+# 帧成本探针：把覆盖层一帧的 CPU 成本拆成 清屏/推进/光栅/换序 四段（1920×1080，release）。
+# 只读、不开窗、不改系统状态。
+[[example]]
+name = "frame_cost_probe"
+path = "examples/frame_cost_probe.rs"
+# MP4 裁剪链路探针：对真实 MP4 逐环节跑 时长/解码预览/流拷贝裁剪，产物再自检。
+# 用法：`cargo run --release --example mp4_probe -- <mp4路径>`
+# 设 `MP4_PROBE_TRIM_OUT=<输出路径>` 时附带跑一次裁剪 + 产物解码（诊断用，不进门禁）。
+[[example]]
+name = "mp4_probe"
+path = "examples/mp4_probe.rs"
+# 动态标题栏探针：子窗标题走 `Signal<String>`，用 `FindWindowW` 验证系统标题栏真的改了。
+# 用法：`cargo run --release --example window_title_probe`（命中退 0，落空退 1）。
+[[example]]
+name = "window_title_probe"
+path = "examples/window_title_probe.rs"
+# 聚光灯增量帧探针（补丁 032）：整窗 vs 增量路径的一帧成本对比，多分辨率。
+[[example]]
+name = "spotlight_partial_probe"
+path = "examples/spotlight_partial_probe.rs"
+# 系统常驻内存归因探针：把「原生对话框 / COM / MF / D3D11」各自的永久抬升量测成实数，
+# 并验证"过了约一分钟才回落"是不是 UMD 空闲卸载。用法见文件头。
+# ⚠ 会真的弹出一个「另存为」对话框（3 秒后自动取消），跑之前别开着重要窗口。
+[[example]]
+name = "mem_attrib"
+path = "examples/mem_attrib.rs"
+# 图标 / 二维码产物生成器：SVG 源 → 位图产物（托盘五档 + app.ico + 二维码 PNG）。
+# ★ `required-features` 是必须的：它依赖 optional 的 `resvg`，而 `cargo test` 会
+#   构建所有 examples——不加这条，默认构建就会去编 resvg（拖慢日常门禁），
+#   加了则只在 `--features icon-gen` 时才编。用法见文件头。
+[[example]]
+name = "gen_icon"
+path = "examples/gen_icon.rs"
+required-features = ["icon-gen"]
+
+# ── 真机探针（tests/probes/，需硬件或真实窗口，**不是门禁**） ──
+#
+# ★★★ 这些探针**默认不在 `Cargo.toml` 里登记**，这是刻意的（2026-10-05 实测）：
+#
+#   cargo 只自动发现 `tests/*.rs`（**不递归子目录**），所以 `tests/probes/` 里的
+#   十一条只要不显式登记，就**完全不参与** `cargo build` / `cargo test`。
+#   而一旦用 `[[test]]` 登记，每次改动它们都会被重新编译成独立测试二进制
+#   （本机实测：带探针编16 个、1 分 55 秒；不登记编 5 个、1 分 29 秒），
+#   差的**26 秒**里**一个断言都没跑** —— 十一条全是 `#[ignore]`，要真实声卡 /
+#   DXGI 采集 / 真实窗口，CI 与普通开发机多半根本跑不了。
+#
+#   日常编译是为了快速验证改动，这 26 秒是纯浪费，故默认不登记。
+#
+# ★★ 需要跑探针时用脚本开（它会临时写入登记、跑完再还原）：
+#
+#     python build/probe.py list                # 列出十一条探针
+#     python build/probe.py run capture_smoke   # 跑某一个（自动带 --test-threads=1）
+#     python build/probe.py run all              # 全跑（很慢，逐个真录）
+#
+#   该脚本会保证"跑完即还原"，不会把探针留在默认编译路径上。
+#
+# ★ 其中 `soak_link` 是**综合联动**那条（最重要）：真起 `Recorder` + 真加载三个
+#   `FxCore`（拖尾 / 悬浮标 / 点击波纹，真 Lua 引擎 + 每帧 render 写 DrawList），
+#   一起跑固定时长。它锁的是 2026-10-05 那个死锁的**真正触发条件**
+#   —— 多条 GPU 管线并发（纯录制下复现不出来）。
+#   时长用 `SOAK_LINK_SECS` 调（默认 300 秒）：python build/probe.py run soak_link
+#
+# ★ 曾经试过 `[[example]]` + `required-features`（本仓已有该先例，见 `gen_icon`）——
+#   **行不通**：`[[example]]` 必须有 `fn main`，而探针是 `#[test]` 集合；改完
+#   `cargo test --test capture_smoke` 就**不再存在**（探针失去可执行性）。
+#   "不省编译时间"换"跑不了"，不划算。`required-features` 对 `[[test]]` 也无效。
+
+# ── 临时探针登记（由 build/probe.py 写入，跑完自动还原）──
+# 平时不登记是有意的：它们全是 #[ignore]、要真实硬件，每次改动白编 26 秒。
+
+[dependencies]
+# ── UI 框架（本地 path 依赖；含 CurSeen 补丁 001：分层覆盖窗） ──
+windui = { path = "../.3rdParty/wind-ui-rust-0.20.0", version = "0.20.0", default-features = false, features = ["layered"] }
+
+# ── 序列化：配置持久化 ──
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── 日志 ──
+log = "0.4"
+# `#[implement]` 宏生成的代码引用绝对路径 `::windows_core::*`，
+# 故需把它作为直接依赖（`windows` 只是 re-export，不算）。
+windows-core = "0.62"
+env_logger = "0.11"
+
+# ── 图片解码：托盘图标 / 关于页二维码（PNG）/ 悬浮标图片 ──
+png = "0.18"
+
+# ── SVG 光栅化：仅 `icon-gen` 特性下用（examples/gen_icon.rs，图标/二维码源 → 位图产物）。
+#    依赖是 optional 的：默认构建/测试完全不编译它，换图标时才随 feature 拉进来。
+#    linebender 接管后 0.45+ 许可为 Apache-2.0 OR MIT；纯 Rust，无 C 依赖。
+resvg = { version = "0.48", optional = true, default-features = false }
+
+# ── GIF 动图：悬浮标「图片」类型的动画帧解码 ──
+gif = "0.13"
+
+# ── 平台（仅 Windows 目标） ──
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_Graphics_Gdi",
+    # 单文件图片补列表缩略图（platform/clipboard_history.rs）：WIC 解 jpg/png/gif/bmp，
+    # 系统自带解码器、无第三方 crate（实测加进来只 +34KB，且格式覆盖远超 png+gif 两个 crate）。
+    "Win32_Graphics_Imaging",
+    # 智能窗口检测（platform/window_probe.rs）：窗口的**可见外框**只能问 DWM ——
+    # `DWMWA_EXTENDED_FRAME_BOUNDS` 是"贴边"的唯一权威，`GetWindowRect` 会带上
+    # 不可见的缩放边框（胖出一圈桌面）。`DWMWA_CLOAKED` 用来滤掉 UWP 幽灵窗。
+    "Win32_Graphics_Dwm",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    # 端点音量/静音（IAudioEndpointVolume）：只给 `tests/monitor_probe.rs` 用 ——
+    # "听不到自己说话"要先排除"扬声器/麦克风在系统里被静音"，那是用户能自己核对的事实。
+    "Win32_Media_Audio_Endpoints",
+    # MCI（mciSendStringW）：非 WAV 声音的播放后端（MP3/WMA/… 靠系统解码器）
+    "Win32_Media_Multimedia",
+    "Win32_System_Registry",
+    # 工作集瘦身（platform/working_set.rs）：EmptyWorkingSet（windows 0.62 里 Psapi
+    # 已改名 ProcessStatus）。
+    "Win32_System_ProcessStatus",
+    # 空载 CPU 归因探针（examples/idle_cpu_probe.rs）：Thread32 枚举按线程拆 CPU 时间，
+    # 回答"空载那 1% 花在哪个线程"。纯系统绑定，不进 exe。
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    # 崩溃兜底（platform/crash.rs）：SetUnhandledExceptionFilter + EXCEPTION_POINTERS。
+    # 注：这两个 API 在 windows crate 里要**两个 feature 同时开** ——
+    # Win32_System_Diagnostics_Debug 让 `System::Diagnostics::Debug` 模块存在，
+    # Win32_System_Kernel 才把这两个 API 放出来（item 自己的 cfg 挂在 Kernel 上）。
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls_Dialogs",
+    # AI 对话窗（platform/ai_chat.rs）按钮自绘（DRAWITEMSTRUCT/ODS_SELECTED）与
+    # EDIT 滚动条按需显隐（ShowScrollBar/EM_GETLINECOUNT/EM_SETREADONLY）。
+    # 曾用 Win32_UI_Controls_RichEdit 按段上色，2026-09-30 全黑正文后回归 EDIT，
+    # 该特性连同 riched20.dll 一并去掉（少拉一条系统 DLL 依赖链）。
+    "Win32_UI_Controls",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    # ── 录屏：DXGI Desktop Duplication 采集 + Media Foundation H264 硬编 ──
+    # 二者都由系统自带（无外部 dll / 无 ffmpeg），只是打开 windows crate 的绑定。
+    "Win32_Graphics_Direct3D",
+    # `D3DCompile`（BGRA→NV12 的 compute shader 运行时编译，platform/yuv_convert.rs）。
+    # 它在 windows 0.62 里挂在 Direct3D_Fxc 下，链接 `d3dcompiler_47.dll`（Win8+ 系统自带）。
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    # QQ/TIM 粘贴探针（tests/probes/qq_paste.rs）：UIA 读输入框内容验证端到端粘贴。
+    # 只被探针消费，不进发布产物热路径。
+    "Win32_UI_Accessibility",
+    # WGC 采集（Windows.Graphics.Capture，见 tests/probes/wgc_proto.rs）：
+    # 帧池/捕获项走 WinRT，设备包装走 CreateDirect3D11DeviceFromDXGIDevice。
+    # ★ 全是系统自带（不引 windows-capture 那个 crate），故仍满足"零外部 dll"。
+    # 这三项只被探针消费，不进发布产物的热路径。
+    "Foundation",
+    "Foundation_Metadata",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_System_WinRT",
+    # ★ `CreateDispatcherQueueController` 挂在 `System` feature 上（不是
+    #   `Win32_System_WinRT`）—— 没它WGC 的 FrameArrived 回调永不触发。
+    "System",
+    "Win32_System_WinRT_Graphics",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT_Direct3D11",
+    # 数位板低延迟直通（platform/input/stylus.rs）：RealTimeStylus（RTS）直接从
+    # 数位板驱动取包，绕开"指针→传统鼠标消息"翻译层的手势消歧缓冲（起笔 ~0.5s
+    # 延迟的根因）。
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    # 剪贴板（截图后直接可粘贴）：CF_DIB 是 Paint / 微信 / Word 都认的通用格式
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    # 剪贴板条目 meta 行：unix 秒 → 本地时间（FileTimeToLocalFileTime 链路，
+    # ★ 同组 API 分属两个 feature：Local 挂 Storage::FileSystem、SystemTime 挂 System::Time）
+    "Win32_Storage_FileSystem",
+    "Win32_System_Time",
+    # 录屏音频设备枚举：IPropertyStore（读友好名）+ PKEY_Device_FriendlyName
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_FunctionDiscovery",
+] }
+
+# ── 网络：更新检查与下载 ──
+# ★ TLS 后端用 **native-tls**（Windows 上直连系统 **Schannel**），2026-10-08 实测：
+#   把 `rustls` + `ring` 整套密码学实现从 exe 里摘掉 ⇒ 7.51 MB → **6.61 MB
+#   （−921.5 KB，−12.0%）**，是本仓拿到的单项最大体积收益。
+#
+# ★★★ 两个必须同时满足的条件，缺一个就出事（详见《踩坑记录-4》§十九）：
+#   ① feature 只能写 `native-tls`，**不能**写 `native-tls-no-default`——
+#      ureq 用 `cfg!(feature = "native-tls")` 判 provider，而 `-no-default` 变体写成
+#      `dep:native-tls`（不生成同名 cfg feature）⇒ HTTPS 请求**运行期 panic**。
+#   ② Agent 必须显式指定 `root_certs(RootCerts::PlatformVerifier)`（见
+#      `platform::http::agent`）。不指定会落到默认的 `RootCerts::WebPki` 分支，
+#      该分支 `disable_built_in_roots(true)` 丢掉系统根、改用 ureq 打包的根，
+#      实测 **6 个站点里 2 个握手失败**（错误消息：`unable to find any user-specified
+#      roots in the final cert chain`）。改用 PlatformVerifier 后 6/6 全 200。
+#   ⇒ 附带好处：信任链交给系统 ⇒ 自动跟随 Windows 更新，
+#     也天然兼容企业代理 / 私有根等只在系统库里配过证书的环境。
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+
+# ── 其他工具 ──
+chrono = "0.4"
+mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
+rand = "0.8"
+
+# 麦克风降噪：使用 `nnnoiseless`（RNNoise 神经网络降噪算法的纯 Rust 移植，BSD-3-Clause）
+# 替换原先自写的谱减实现——谱减在「强」档会出电子音（musical noise），神经网络降噪没有
+# 这个缺陷。仅引入 `nnnoiseless` 一个 crate（其依赖 easyfft/once_cell，纯 Rust、无 C 绑定），
+# 契合「小而美」。默认 features 含 bin/dasp，这里关掉，只留 lib 核心。
+nnnoiseless = { version = "0.5.2", default-features = false }
+
+# ── 构建期/开发期工具特性（2026-09-28 新增，与上面大扫除删除的死 feature 不同：
+#    这里有真实的 `dep:` 消费，且只影响 examples/gen_icon.rs，不进发布产物） ──
+[features]
+# 打开它才能跑 `cargo run --example gen_icon --features icon-gen`：
+# 由 assets/icons/icon*.svg 与 assets/images/*.svg 光栅化出全部位图产物。
+icon-gen = ["dep:resvg"]
+
+[build-dependencies]
+# ★ 无构建依赖（`[build-dependencies]` 整段为空，故不列）。exe 图标是 `build.rs` 自己
+#   调 Windows SDK 的 `rc.exe` 编 `build/app.rc`（→ `assets/icons/app.ico`）后链进去的，
+#   不需要 `embed-resource`：机器上没有 SDK 时只是"没图标"，不该因此装不上依赖、编不过。
+
+# ★ 2026-09-25 大扫除：原 [features] 段（layered-overlay/dev-overlay-grid/screenshot-mode）
+#   删除——三个 feature 在全部源码里 0 处 `cfg(feature)` 消费，纯死配置
+#   （历史上的 overlay 实现切换早已收编进 windui 的 `layered` feature）。
+
+# ── 体积优先的发布配置 ──
+# 策略全貌（基线构成 / 实测证据 / 再优化判据）：docs/DESIGN.md §10。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# ★ 2026-09-29：移除 `panic = "abort"`，改回默认 `unwind`。
+#   原因：扩展脚本在后台线程跑，任何 Rust panic 在 `abort` 下会直接 `__fastfail` 杀掉
+#   整个进程（用户报「脚本热键秒退」）。改 `unwind` 后，`ext_runner`/`api_ext` 里的
+#   `catch_unwind` 能把脚本 panic 转成错误框，应用不再陪葬。内存类崩溃（0xC0000005 等）
+#   仍由 `platform::crash` 的 SEH 兜底捕获，不受影响；主线程未捕获的 panic 依旧终止进程。
+overflow-checks = false
+
+# ★ 例外：光栅化内核按速度优化。
+#
+# `opt-level = "z"` 是按**体积**优化的，代价对 tiny-skia 这种"整屏逐像素浮点混合"的
+# 内核格外大。同一段 `draw_image`（整屏冻结帧 blit，1080p）本机实测（5 批 × 20 帧取最小，
+# 可重复到 ±0.1 ms）：
+#   全局 3（对照）                    → 11.8 ms/帧，exe 4.57 MB
+#   本项目 z + 内核 3（本配置，补丁 023 前）→ 18.7 ms/帧，exe 3.28 MB
+#   本项目 z + 内核 3（本配置，补丁 023 后）→ 16.0 ms/帧，exe 3.56 MB
+# 全局提速的体积代价是**台阶式**的，没有中间档（全局 2 → 4.55 MB，与 3 相差无几），
+# 而本项目"体积优先"是有意为之：+1.0 MB 只为一条路径不值。折中就是下面这两行——
+# 只把**渲染内核**提到 3，我们自己的代码仍按体积优化，exe 只涨 0.28 MB 就拿回大部分收益。
+#
+# 为什么 windui 也要：tiny-skia 的绘制入口是**泛型**的（`PixmapMut::draw_pixmap` /
+# `Mask` 那几条），实际光栅化的循环会**单态化进调用方 crate**。只提速 tiny-skia 实测
+# 只到 19.7 ms，把渲染器一并提速才到 16.0 ms——两边都得开。
+#
+# 数字来源：`tests/probes/freeze_overlay_poc.rs::frozen_backdrop_per_frame_raster_cost_is_measured`。
+[profile.release.package.tiny-skia]
+opt-level = 3
+
+[profile.release.package.windui]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+debug = true

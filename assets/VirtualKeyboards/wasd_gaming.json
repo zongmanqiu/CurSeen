@@ -1,0 +1,59 @@
+{
+  "name": "WASD",
+  "_说明": "直播/游戏用的迷你覆盖层：WASD 四键 + 空格在左，鼠标左/右键**并排一行**在右，且与 W 同一行（键盘区与鼠标区一左一右，鼠标两键彼此平行）。只高亮不挡操作（出厂鼠标穿透开）。排版：W 在 S 正上方，A/S/D 一行、空格收尾；左键、右键各 1u 贴右缘（左键在左、右键在右，与物理鼠标同向），两行右缘都收在 5.5u。★ 鼠标键帽上的文字用 **LMB / RMB**，与「击键回显」同一套缩写（见 `core::events::KeyCode::display_name` 的 MouseLeft/MouseRight 分支），别改回中文。颜色一概不写 —— 直接继承内置兜底色（与 ANSI 104 原版同源），想改色去面板的「键帽色/按下色/描边色/文字色」。中键/侧键/滚轮的键码与缩写同款（MouseMiddle=MMB / MouseX1=X1 / MouseX2=X2 / WheelUp / WheelDown），按需往 rows 里加键帽即可。★ 方案里只要有鼠标键帽，即便勾着「鼠标穿透」，鼠标的按下/抬起照样送到键盘来点亮键帽（穿透只决定「点键帽要不要注入按键」，与高亮无关）。",
+  "defaults": {
+    "font_size": 14,
+    "corner_radius": 8,
+    "click_through": true,
+    "always_on_top": true,
+    "fullscreen_avoid": true
+  },
+  "rows": [
+    {
+      "keys": [
+        {
+          "code": "w",
+          "text": "W",
+          "caps": true,
+          "pad": 1.0
+        },
+        {
+          "code": "MouseLeft",
+          "text": "LMB",
+          "w": 1,
+          "pad": 1.5
+        },
+        {
+          "code": "MouseRight",
+          "text": "RMB",
+          "w": 1
+        }
+      ]
+    },
+    {
+      "keys": [
+        {
+          "code": "a",
+          "text": "A",
+          "caps": true
+        },
+        {
+          "code": "s",
+          "text": "S",
+          "caps": true
+        },
+        {
+          "code": "d",
+          "text": "D",
+          "caps": true
+        },
+        {
+          "code": "Space",
+          "text": "Space",
+          "w": 2,
+          "pad": 0.5
+        }
+      ]
+    }
+  ]
+}
