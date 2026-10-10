@@ -73,3 +73,101 @@ pub(crate) fn mouse_up(x: i32, y: i32) -> InputEvent {
         time_ms: 0,
     }
 }
+
+/// 记账用 mock Canvas（**跨测试模块共享**）：`dpi_scale()` 可指定（用来扮演"窗口实际
+/// DPI"），并记录所有 `fill_circle` 收到的**逻辑**坐标。
+///
+/// 存在的理由：DPI 判据必须在**没有真实窗口 / 没有双屏**的前提下注入"两套 DPI 分歧"
+/// （见 `runtime::render::dpi_offset_tests` 与 `runtime::overlay::tests`），而 `Canvas`
+/// 正是 `dpi_scale()` 的宿主。类型一律写全限定路径，避免与 `super::*` 的导入撞名。
+pub(crate) struct RecordingCanvas {
+    pub actual_dpi: f32,
+    pub fill_circles: Vec<(f32, f32, f32)>, // (cx, cy, r)，逻辑像素
+}
+
+impl RecordingCanvas {
+    pub(crate) fn new(actual_dpi: f32) -> Self {
+        Self {
+            actual_dpi,
+            fill_circles: Vec::new(),
+        }
+    }
+}
+
+impl windui::render::Canvas for RecordingCanvas {
+    fn dpi_scale(&self) -> f32 {
+        self.actual_dpi
+    }
+    fn fill_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _p: &windui::render::Paint) {}
+    fn fill_round_rect(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _w: f32,
+        _h: f32,
+        _r: f32,
+        _p: &windui::render::Paint,
+    ) {
+    }
+    fn stroke_round_rect(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _w: f32,
+        _h: f32,
+        _r: f32,
+        _wd: f32,
+        _p: &windui::render::Paint,
+    ) {
+    }
+    fn draw_line(
+        &mut self,
+        _x0: f32,
+        _y0: f32,
+        _x1: f32,
+        _y1: f32,
+        _w: f32,
+        _p: &windui::render::Paint,
+    ) {
+    }
+    fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, _p: &windui::render::Paint) {
+        self.fill_circles.push((cx, cy, r));
+    }
+    fn draw_shadow(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _w: f32,
+        _h: f32,
+        _r: f32,
+        _b: f32,
+        _c: windui::geometry::Color,
+    ) {
+    }
+    fn draw_image(
+        &mut self,
+        _img: &windui::render::image::Image,
+        _dst: windui::geometry::Rect,
+        _fit: windui::render::image::Fit,
+        _r: f32,
+        _o: f32,
+    ) {
+    }
+    fn draw_text(
+        &mut self,
+        _t: &str,
+        _rect: windui::geometry::Rect,
+        _c: windui::geometry::Color,
+        _a: windui::spec::Align,
+        _ts: &windui::text::TextStyle,
+    ) {
+    }
+    fn measure_text(&mut self, _t: &str, _ts: &windui::text::TextStyle) -> windui::geometry::Size {
+        windui::geometry::Size::ZERO
+    }
+    fn push_layer(&mut self, _o: f32) {}
+    fn pop_layer(&mut self) {}
+    fn save(&mut self) {}
+    fn restore(&mut self) {}
+    fn clip_rect(&mut self, _r: windui::geometry::Rect) {}
+}

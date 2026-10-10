@@ -88,8 +88,9 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
     let map = WorldMap::new(vs);
     let dpi = map.dpi();
     let scale = 1.0 / dpi;
-    let dx = -(vs.x as f32) * scale;
-    let dy = -(vs.y as f32) * scale;
+    // ★ `scale` / `dx` / `dy`（dx/dy = 负的虚拟屏原点 × scale）**不再是启动期常量**：
+    //   `OverlayCanvas` 每帧用 canvas 自己的 `dpi_scale()` 反推（见其 `sync_view`），
+    //   与光栅用的是同一个数。这里只留 `scale` 给下面的启动日志用。
     // ★ `App::new(title, w, h)` 收的是**逻辑 dp**，不是物理像素。旧实现把虚拟桌面
     //   的物理尺寸直接传进去，非 100% 缩放下窗口会大出 dpi 倍、整屏缓冲多占 dpi² 倍
     //   （150% → 2.25×，200% → 4×）。尺寸只在 `WorldMap::logical_size()` 里算。
@@ -687,7 +688,7 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
     let app = app
         .content(
             Element::leaf()
-                .widget(OverlayCanvas::new(runtime.clone(), scale, dx, dy))
+                .widget(OverlayCanvas::new(runtime.clone(), vs, dpi))
                 .fill(),
         )
         .tray(tray);
@@ -1664,9 +1665,23 @@ fn draw_gif_frame(
 
 struct OverlayCanvas {
     runtime: Rc<RefCell<Runtime>>,
-    scale: f32,
-    dx: f32,
-    dy: f32,
+    /// 世界（**物理**像素）→ 窗口本地（**逻辑**像素）的缩放。
+    ///
+    /// ★★ 不再在启动时冻结（2026-10-10 修复"特效不落在鼠标上"）。真正光栅的是
+    /// `Canvas::dpi_scale()`（windui = `GetDpiForWindow`，`WM_DPICHANGED` 实时更新），
+    /// 所以这里必须取**同一个数**：每帧在 [`Self::sync_view`] 里由 canvas 自己反推。
+    /// 旧实现用 `GetDpiForSystem()`（本进程是 **PMv2**，MS 文档明确不适用）**且只读一次**：
+    /// 运行期任何 DPI / 显示变化都让两套 DPI 分家，上屏位置 = 光标 × (窗口DPI / 系统DPI)，
+    /// 表现为特效整体偏离光标；重启后两条重新读取又一致，正是用户反馈的"重启之后就好了"。
+    scale: Cell<f32>,
+    /// 世界 → 窗口的平移量（= 负的虚拟屏原点 × scale）。与 [`Self::scale`] 同源同步。
+    dx: Cell<f32>,
+    dy: Cell<f32>,
+    /// 当前虚拟桌面矩形（物理像素，原点可为负）。插拔显示器 / 切分辨率都会改它，
+    /// 每帧对账（4 次 `GetSystemMetrics`，微秒级，不进帧预算）。
+    vs: Cell<ScreenRect>,
+    /// 上一次见到的 DPI。只在真的变了时才把 UI 缩放推给模块（免去每帧写 Runtime）。
+    dpi: Cell<f32>,
     /// 上次见到的 windui 后备缓冲代数（**补丁 032**）。代数变了 = 缓冲被重建/释放
     /// （休眠、resize），上一帧内容不复存在 → 聚光灯增量缓存作废，整窗重画。
     buf_gen: std::cell::Cell<u32>,
@@ -1699,25 +1714,70 @@ enum DragTarget {
     Scroll,
 }
 
+/// DPI 缩放下限保护：`GetDpiForWindow` 失败返 0，除零会让 `scale` 变 inf、整屏坐标
+/// 算成 NaN，特效会彻底消失。兜到 1.0（= 100%），宁可错位也别消失。
+fn safe_dpi(dpi: f32) -> f32 {
+    if dpi.is_finite() && dpi > 0.01 {
+        dpi
+    } else {
+        1.0
+    }
+}
+
 impl OverlayCanvas {
-    fn new(runtime: Rc<RefCell<Runtime>>, scale: f32, dx: f32, dy: f32) -> Self {
+    fn new(runtime: Rc<RefCell<Runtime>>, vs: ScreenRect, dpi: f32) -> Self {
+        let dpi = safe_dpi(dpi);
+        let scale = 1.0 / dpi;
         Self {
             runtime,
-            scale,
-            dx,
-            dy,
+            scale: Cell::new(scale),
+            dx: Cell::new(-(vs.x as f32) * scale),
+            dy: Cell::new(-(vs.y as f32) * scale),
+            vs: Cell::new(vs),
+            dpi: Cell::new(dpi),
             buf_gen: std::cell::Cell::new(windui::platform::overlay_buffer_generation()),
             gif_drag: std::cell::Cell::new(None),
+        }
+    }
+
+    /// ★★ 每帧把「世界 → 逻辑」的换算对齐到 **canvas 自己的 DPI**。
+    ///
+    /// 这是"特效落在鼠标上"的唯一保障：[`render::translate_offset`] 用的 `scale` 与
+    /// canvas 光栅用的 `dpi_scale()` 必须是**同一个数**。canvas 的 DPI 由 windui 在
+    /// `WM_DPICHANGED` 里更新（`GetDpiForWindow`），我们跟着它走，就再也不会出现
+    /// "画布重缩放了、换算还停在旧值"的错配——**两者由构造保证恒等**，不依赖任何通知。
+    ///
+    /// 顺带对账虚拟屏几何：插拔显示器 / 切分辨率会改原点，副屏在主屏左侧时 x 为负，
+    /// 不刷新 `dx/dy` 副屏上的特效会整体错位。
+    fn sync_view(&self, canvas: &dyn Canvas) {
+        let dpi = safe_dpi(canvas.dpi_scale());
+        let scale = 1.0 / dpi;
+        self.scale.set(scale);
+
+        let vs = crate::platform::display::virtual_screen();
+        if vs != self.vs.get() {
+            self.vs.set(vs);
+            // 模块侧（拖尾边界、放大镜取样）用的是 Runtime 里那份，一并刷新。
+            self.runtime.borrow_mut().set_screen(vs);
+        }
+        self.dx.set(-(self.vs.get().x as f32) * scale);
+        self.dy.set(-(self.vs.get().y as f32) * scale);
+
+        if (dpi - self.dpi.get()).abs() > f32::EPSILON {
+            self.dpi.set(dpi);
+            // 面板 / 标注按逻辑像素设计，DPI 变了要按新比例换算成世界单位。
+            self.runtime.borrow_mut().drawing.set_ui_scale(dpi);
         }
     }
 
     /// 世界坐标矩形 → 覆盖层设备像素矩形（与 `render::View` 同一套映射），
     /// 并向四周扩 1px 吸收取整误差（抗锯齿的 2px 外扩已在 Runtime 侧做掉）。
     fn to_device(&self, r: crate::core::geometry::Rect) -> (i32, i32, i32, i32) {
-        let x0 = (r.x * self.scale + self.dx).floor() as i32 - 1;
-        let y0 = (r.y * self.scale + self.dy).floor() as i32 - 1;
-        let x1 = ((r.x + r.w) * self.scale + self.dx).ceil() as i32 + 1;
-        let y1 = ((r.y + r.h) * self.scale + self.dy).ceil() as i32 + 1;
+        let (scale, dx, dy) = (self.scale.get(), self.dx.get(), self.dy.get());
+        let x0 = (r.x * scale + dx).floor() as i32 - 1;
+        let y0 = (r.y * scale + dy).floor() as i32 - 1;
+        let x1 = ((r.x + r.w) * scale + dx).ceil() as i32 + 1;
+        let y1 = ((r.y + r.h) * scale + dy).ceil() as i32 + 1;
         (x0, y0, x1 - x0, y1 - y0)
     }
 
@@ -1957,6 +2017,11 @@ impl Widget for OverlayCanvas {
         canvas: &mut dyn Canvas,
         _style: &Style,
     ) {
+        // ★★ DPI / 虚拟屏对账，**必须在建帧之前**：换算用的 scale 取 canvas 自己的
+        // DPI，与它光栅时用的是同一个数（详见 `sync_view`）。放最前面，本帧的
+        // DrawList 就按新比例生成，不会有一帧的错配残留。
+        self.sync_view(canvas);
+
         // ★ 补丁 032 修订：这里**不能**无条件清屏——增量帧（聚光灯挪洞）依赖
         // "缓冲里保留着上一帧内容"，整屏清掉再只画脏区＝整屏透明，特效全消失。
         // 清屏移到下方 match 的非增量分支里，与"整窗重画"配对。
@@ -1997,7 +2062,16 @@ impl Widget for OverlayCanvas {
                 canvas.clear_rect(0.0, 0.0, bounds.w as f32, bounds.h as f32);
             }
         }
-        render::translate_offset(&rt.draw_list, canvas, self.scale, self.dx, self.dy);
+        // ★ `self.scale/dx/dy` 已由本帧开头的 `sync_view` 对齐到 canvas 自己的 DPI，
+        // 与 canvas 光栅用的是同一个数 → 世界物理坐标经这一来一回恒等还原，特效必然
+        // 落在鼠标上（详见 `sync_view` 的说明）。
+        render::translate_offset(
+            &rt.draw_list,
+            canvas,
+            self.scale.get(),
+            self.dx.get(),
+            self.dy.get(),
+        );
 
         // ★ 选框边框。共用同一个 `draw_gif_frame`（几何、手柄数、命中判定全同源），
         //   只有语义色不同：长截图就绪=蓝/采集中（紫）、GIF 选框（蓝 / 录中红）、截图编辑态
@@ -2281,9 +2355,75 @@ impl Widget for OverlayCanvas {
 mod tests {
     use super::*;
     use crate::core::events::Modifiers;
+    use crate::runtime::testkit::{drawing_only, RecordingCanvas};
 
     fn screen(x: i32, y: i32, w: i32, h: i32) -> ScreenRect {
         ScreenRect { x, y, w, h }
+    }
+
+    /// ★★ 修复回归锁（2026-10-10「特效不落在鼠标上」）：`sync_view` 必须把 `scale`
+    /// 对齐到 **canvas 自己的 DPI**，而不是启动时冻结的那个。
+    ///
+    /// 场景：启动时拿到 1.5（`OverlayCanvas::new` 的参数），运行期窗口实际 DPI 被改成
+    /// 1.0（切分辨率 / 插拔显示器 / 远程桌面触发）。旧实现就此永远停在 `1/1.5`，与
+    /// canvas 光栅用的 1.0 分家 → 上屏位置 = 光标 × (1.0/1.5)，特效整体偏向左上，
+    /// **只有重启才能恢复**（用户原话"电脑重启之后就好了"）。这条断言把"跟着 canvas 走"钉死。
+    #[test]
+    fn sync_view_aligns_scale_to_canvas_dpi_not_startup_value() {
+        let rt = Rc::new(RefCell::new(drawing_only()));
+        let oc = OverlayCanvas::new(rt, screen(0, 0, 1920, 1080), 1.5);
+        assert!(
+            (oc.scale.get() - 1.0 / 1.5).abs() < 1e-6,
+            "构造时按给定 dpi 初始化，实得 {:.6}",
+            oc.scale.get()
+        );
+        // 扮演"画布已重缩放"：canvas 自己的 DPI 变成 1.0。
+        let canvas = RecordingCanvas::new(1.0);
+        oc.sync_view(&canvas);
+        assert!(
+            (oc.scale.get() - 1.0).abs() < 1e-6,
+            "sync_view 后 scale 应 = 1/窗口实际DPI（1.0），实得 {:.6}",
+            oc.scale.get()
+        );
+        assert!(
+            (oc.dpi.get() - 1.0).abs() < 1e-6,
+            "dpi 应同步为窗口实际 DPI，实得 {:.6}",
+            oc.dpi.get()
+        );
+    }
+
+    /// 反向同样要跟上：窗口 DPI 升高（1.0 → 2.0）时 scale 必须变成 0.5。
+    #[test]
+    fn sync_view_follows_dpi_increase() {
+        let rt = Rc::new(RefCell::new(drawing_only()));
+        let oc = OverlayCanvas::new(rt, screen(0, 0, 1920, 1080), 1.0);
+        let canvas = RecordingCanvas::new(2.0);
+        oc.sync_view(&canvas);
+        assert!(
+            (oc.scale.get() - 0.5).abs() < 1e-6,
+            "DPI 升到 2.0 后 scale 应 = 0.5，实得 {:.6}",
+            oc.scale.get()
+        );
+    }
+
+    /// `GetDpiForWindow` 失败返 0：不得让坐标变 inf/NaN（特效会整个消失），必须兜到 1.0。
+    #[test]
+    fn sync_view_survives_zero_dpi() {
+        let rt = Rc::new(RefCell::new(drawing_only()));
+        let oc = OverlayCanvas::new(rt, screen(0, 0, 1920, 1080), 1.5);
+        let canvas = RecordingCanvas::new(0.0);
+        oc.sync_view(&canvas);
+        assert!(
+            oc.scale.get().is_finite() && (oc.scale.get() - 1.0).abs() < 1e-6,
+            "DPI=0 应兜到 100%，实得 {:.6}",
+            oc.scale.get()
+        );
+        assert!(
+            oc.dx.get().is_finite() && oc.dy.get().is_finite(),
+            "dx/dy 必须有限，实得 dx={} dy={}",
+            oc.dx.get(),
+            oc.dy.get()
+        );
     }
 
     /// 数位板起笔延迟的回归锁：屏幕标注一开，`drawing_owns_pointer()` 必须立刻为真

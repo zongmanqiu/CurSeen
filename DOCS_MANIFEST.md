@@ -28,7 +28,7 @@
 | 13b | `docs/踩坑记录-2.md` | 同上，本册 §六–§十。**分册规则：册数不限，每册 ≤ 500 行，写满就再开一册**（章节编号跨册唯一，源码注释的 `《踩坑记录》§N` 按编号查） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise`（发现式扫 `踩坑记录*.md`） |
 | 13c | `docs/踩坑记录-3.md` | 同上，本册 §十一–§十五（录屏 MF/DXGI、编译成本与测试分层、SinkWriter 节流、被否定的槽位池、moov 单点）。**分册规则：每册 ≤ 500 行，写满再开一册** | 同上 |
 | 13d | `docs/踩坑记录-4.md` | 同上，本册 §十六起：录制内核（单文件方案）的失败根因链、音频内容驱动时间线、看门狗与限时收尾；**§十七 录制的结构性隔离**（采集/编码解耦 + 出进程隔离 `curseen-rec.exe`） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise` |
-| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.13–17.15** | 同上 |
+| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.15–17.19**；**§二十 覆盖层两套 DPI 换算源分家（特效不落鼠标）** | 同上 |
 | 14 | `docs/UI_COMPONENTS.md` | 面板行组件库（`card.rs` 正本）变化；脚本参数类型→控件映射变化；Lua 脚本契约 / 绘图指令 / 宿主 API 变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 15 | `assets/README.md` | 资源目录版图（归谁 / 放什么）变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 16 | `assets/Sounds/README.md` | 音频格式白名单 / 配置键 / 版权归属变化 | （凡动 `SUPPORTED_EXT` 必读） |

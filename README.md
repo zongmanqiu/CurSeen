@@ -2,7 +2,7 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载最新版 2.0.0](https://gitee.com/qiuzongman/curseen/releases/download/2.0.0/CurSeen_2.0.0.zip)** ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen) ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen) | [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
+**[⬇️ 下载最新版 2.0.1](https://gitee.com/qiuzongman/curseen/releases/download/2.0.1/CurSeen_2.0.1.zip)** ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen) ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen) ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
 
 ## 功能一览
 - **鼠标轨迹**：鼠标拖尾、悬浮标（跟随光标，含聚光灯 / 激光笔等脚本）、点击波纹与特效。

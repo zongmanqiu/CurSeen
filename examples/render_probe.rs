@@ -529,37 +529,6 @@ fn bar_run_down_from(frame: &[u8], x_col: f32, y_start: f32, max_len: u32) -> u3
     n
 }
 
-fn bbox_in(buf: &[u8], region: Rect, pred: impl Fn((u8, u8, u8)) -> bool) -> Option<Rect> {
-    let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
-    let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let (rx, ry, rw, rh) = (
-        region.x.max(0.0) as u32,
-        region.y.max(0.0) as u32,
-        region.w as u32,
-        region.h as u32,
-    );
-    for y in ry..(ry + rh).min(H) {
-        for x in rx..(rx + rw).min(W) {
-            if pred(px(buf, W, x, y)) {
-                x0 = x0.min(x as f32);
-                y0 = y0.min(y as f32);
-                x1 = x1.max(x as f32);
-                y1 = y1.max(y as f32);
-            }
-        }
-    }
-    if x0 > x1 {
-        None
-    } else {
-        Some(Rect {
-            x: x0,
-            y: y0,
-            w: x1 - x0 + 1.0,
-            h: y1 - y0 + 1.0,
-        })
-    }
-}
-
 fn count_in(buf: &[u8], region: Rect, pred: impl Fn((u8, u8, u8)) -> bool) -> u32 {
     let (rx, ry, rw, rh) = (
         region.x.max(0.0) as u32,
@@ -643,7 +612,8 @@ fn verify_geometry(report: &mut Report, frame: &[u8]) {
                         //   白板底色是纯白，用 `is_bar_paint`（排除纯白）就能唯一地框出工具栏。
                         // ★★★ 这条判据 2026-10-03 之前**一直红着**，是既有假红，不是回归。两个独立成因：
                         //   ① `is_bar_paint` 上界 252 而底板合成后是 lum=254 ⇒ 底板压根没被认出来；
-                        //   ② 即便认出来，`bbox_in` 在整条底带上框"所有浅色像素"，会把白板场景里
+                        //   ② 即便认出来，"在整条底带上框所有浅色像素"这种整体包围盒做法（原 `bbox_in`，
+                        //      因本条判据改用逐列下行而成为死代码，2026-10-10 删除），会把白板场景里
                         //      **页面上方的浅色内容**一起框进去（实测框成 y 959 / h 121，真值 999 / 52）。
                         //
                         //   修法：**只验工具栏自己的上边界**——从预测位置 `want.y` 往下数连续底板色像素，

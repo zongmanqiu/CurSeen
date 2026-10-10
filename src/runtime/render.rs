@@ -1651,3 +1651,104 @@ mod tests {
         );
     }
 }
+
+/// ─────────────────────────────────────────────────────────────────────────
+/// DPI 错配回归锁（用户反馈「鼠标特效没落在鼠标上，实心圆离鼠标一段距离」）。
+///
+/// 根因：覆盖层有两套未对齐的 DPI 源——
+///   1. `WorldMap` / 覆盖层 `scale` 用的是 `dpi_scale() = GetDpiForSystem()`（**系统 DPI**，
+///      进程启动时定一次，跨屏不变）；
+///   2. 真正上屏的 `SkiaCanvas` 用 `GetDpiForWindow` / `WM_DPICHANGED` 的**窗口实际 DPI**。
+///
+/// `translate_offset` 用「系统 DPI 的倒数」把物理光标坐标翻译成逻辑像素交给 canvas，
+/// 而 canvas 又按「自己的实际 DPI」把逻辑像素放大回物理像素上屏。两者不等时：
+///
+///     上屏物理位置 = 物理光标 × (实际DPI / 系统DPI)
+///
+/// 即特效整体朝虚拟桌面原点（左上）收缩（actual<system）或外扩（actual>system），
+/// 与「应精确落在光标上」偏移。单屏时系统 DPI == 窗口 DPI，故本机无法复现——
+/// 必须**人工注入 DPI 分歧**才能用单测锁住。本模块 `RecordingCanvas` 的
+/// `dpi_scale()` 即模拟「窗口实际 DPI」，与传入 `translate_offset` 的 `scale=1/系统DPI`
+/// 故意设成不同值。
+#[cfg(test)]
+mod dpi_offset_tests {
+    use super::*;
+    use crate::core::geometry::Point;
+    use crate::runtime::testkit::RecordingCanvas;
+
+    /// 模拟 `run_overlay` 的坐标链，返回特效**相对光标的物理偏移**（x, y 各一）。
+    ///
+    /// `system_dpi` → 覆盖层 `scale = 1/系统DPI`（即 `WorldMap` 那套）；
+    /// `actual_dpi`  → `RecordingCanvas::dpi_scale()`（即窗口实际 DPI 那套）。
+    /// 单屏 `vs=(0,0)` 隔离出**纯 DPI 错配**（vs 平移项在「偏移比」里恒抵消，不影响定责）。
+    fn painted_offset_px(
+        world_x: f32,
+        world_y: f32,
+        system_dpi: f32,
+        actual_dpi: f32,
+    ) -> (f32, f32) {
+        let scale = 1.0 / system_dpi;
+        let (dx, dy) = (0.0_f32, 0.0_f32); // 单屏：虚拟屏原点在 (0,0)
+        let mut dl = DrawList::new();
+        // 物理光标坐标（GetCursorPos 返回的就是物理像素）。
+        dl.fill_circle(
+            Point::new(world_x, world_y),
+            12.0,
+            Argb::new(255, 255, 0, 0),
+        );
+        let mut canvas = RecordingCanvas::new(actual_dpi);
+        translate_offset(&dl, &mut canvas, scale, dx, dy);
+        let (cx, cy, _) = canvas.fill_circles[0];
+        // canvas 实际按自身实际 DPI 把逻辑像素放大成物理像素上屏。
+        let px = cx * canvas.dpi_scale();
+        let py = cy * canvas.dpi_scale();
+        (px - world_x, py - world_y)
+    }
+
+    /// 守门员（修复后的期望行为）：系统 DPI == 窗口 DPI 时偏移必须为零。
+    #[test]
+    fn cursor_effect_lands_on_cursor_when_dpi_matches() {
+        for &dpi in &[1.0_f32, 1.25, 1.5, 2.0] {
+            let (ox, oy) = painted_offset_px(900.0, 540.0, dpi, dpi);
+            assert!(
+                ox.abs() < 1e-3 && oy.abs() < 1e-3,
+                "DPI 一致({dpi})时偏移应为 0，实得 ({ox:.4}, {oy:.4})"
+            );
+        }
+    }
+
+    /// 复现反馈：系统 DPI=1.5（主屏 150%）而窗口跑在 100% 副屏 → actual<system。
+    /// 上屏位置 = 物理光标 × (1.0/1.5)，整体朝原点（左上）收缩，正是「实心圆离鼠标一段距离」。
+    #[test]
+    fn cursor_effect_offsets_when_system_and_window_dpi_differ() {
+        let (ox, oy) = painted_offset_px(900.0, 540.0, 1.5, 1.0);
+        let expected = 900.0 * (1.0 / 1.5 - 1.0); // ≈ -300px
+        assert!(
+            (ox - expected).abs() < 1e-2,
+            "x 偏移应≈{expected:.1}，实得 {ox:.2}"
+        );
+        // y 受**同一个** (actual/system) 比例支配，不是"y 特殊"：偏移比与 x 完全一致。
+        let expected_y = 540.0 * (1.0 / 1.5 - 1.0); // ≈ -180px
+        assert!(
+            (oy - expected_y).abs() < 1e-2,
+            "y 偏移应≈{expected_y:.1}，实得 {oy:.2}"
+        );
+        assert!(ox.abs() > 50.0, "应复现明显偏移（>50px），实得 {ox:.2}");
+        // 与「鼠标离屏原点越远偏移越大」的反馈一致：更远的点偏移更大。
+        let (ox_far, _) = painted_offset_px(1800.0, 540.0, 1.5, 1.0);
+        assert!(
+            ox_far.abs() > ox.abs(),
+            "离原点更远应偏移更大：{ox_far:.2} vs {ox:.2}"
+        );
+    }
+
+    /// 反向情形：窗口在 200% 屏、系统 DPI=1.0 → actual>system，特效朝「远离原点」方向偏。
+    #[test]
+    fn cursor_effect_offsets_other_direction_when_window_dpi_higher() {
+        let (ox, _) = painted_offset_px(900.0, 540.0, 1.0, 2.0);
+        assert!(
+            ox > 50.0,
+            "actual>system 时应向右下偏（正偏移），实得 {ox:.2}"
+        );
+    }
+}
