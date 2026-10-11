@@ -61,7 +61,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEINPUT, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY,
 };
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+// 注：CF_HDROP 的解析**不再**走 `DragQueryFileW`（2026-10-11 崩溃实测：它会按数据里
+// 不可信的 `pFiles` 解引用，在系统 DLL 内触发 0xC0000005）。见 `parse_dropfiles`。
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::core::paths::{from_app_relative, module_temp_dir, to_app_relative};
@@ -3697,25 +3698,80 @@ unsafe fn read_files_opened() -> Option<Vec<String>> {
     }
     let h = GetClipboardData(CF_HDROP_U).ok()?;
     let hg = HGLOBAL(h.0);
+    // ★ 先看分配大小：拿到 0 说明句柄已经不可信，比头还小说明装不下 DROPFILES。
+    let total = GlobalSize(hg) as usize;
+    if total < DROPFILES_HEADER + 2 {
+        return None;
+    }
     let ptr = GlobalLock(hg);
     if ptr.is_null() {
         return None;
     }
     let _unlock = MemoryUnlocker(ptr as *mut u8);
-    let hd = HDROP(h.0);
-    let n = DragQueryFileW(hd, 0xFFFF_FFFF, None);
-    if n == 0 {
+    parse_dropfiles(std::slice::from_raw_parts(ptr as *const u8, total))
+}
+
+/// DROPFILES 头大小：`pFiles(4) + pt(8) + fNC(4) + fWide(4)`。
+const DROPFILES_HEADER: usize = 20;
+/// 一次 CF_HDROP 最多认这么多条：畸形数据可能让列表"永远不到头"。
+const MAX_DROP_FILES: usize = 512;
+
+/// 在**已锁定的剪贴板缓冲**里解析 DROPFILES 的文件列表；`None` = 结构不可信，跳过。
+///
+/// ★ 为什么不再用 `DragQueryFileW`（2026-10-11 崩溃实测）：剪贴板里的 CF_HDROP 是
+///   **别的进程**放的，头里的 `pFiles`（字符串区起点）完全可能是乱写的；shell32 的
+///   `DragQueryFileW` 直接拿它去解引用，实测在一次启动扫描上读到无效堆地址 →
+///   0xC0000005，故障点在 `Windows.Storage.dll!DragQueryFileAorW`（系统 DLL 内部，
+///   我们既拦不住也救不回来）。数据本来就已经锁在我们手里，自己按界解析就够了，
+///   顺带不再依赖 shell32 这条链。
+fn parse_dropfiles(buf: &[u8]) -> Option<Vec<String>> {
+    if buf.len() < DROPFILES_HEADER + 2 {
         return None;
     }
-    let mut files = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let len = DragQueryFileW(hd, i, None);
-        if len == 0 {
-            continue;
+    let p_files = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let wide = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]) != 0;
+    // 字符串区必须落在缓冲内，且至少放得下"空列表"的双 NUL 结尾。
+    if !(DROPFILES_HEADER..=buf.len() - 2).contains(&p_files) {
+        return None;
+    }
+    let unit = if wide { 2 } else { 1 };
+    let mut files: Vec<String> = Vec::new();
+    let mut i = p_files;
+    loop {
+        let start = i;
+        // 找这一条的结尾 NUL
+        loop {
+            if i + unit > buf.len() {
+                return None; // 一直到缓冲末尾都没有收尾的 NUL —— 畸形，不认
+            }
+            let zero = if wide {
+                buf[i] == 0 && buf[i + 1] == 0
+            } else {
+                buf[i] == 0
+            };
+            if zero {
+                break;
+            }
+            i += unit;
         }
-        let mut buf = vec![0u16; len as usize + 1];
-        DragQueryFileW(hd, i, Some(buf.as_mut_slice()));
-        files.push(String::from_utf16_lossy(&buf[..len as usize]));
+        if i == start {
+            break; // 空串 = 列表结束
+        }
+        files.push(if wide {
+            let units: Vec<u16> = buf[start..i]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            // ANSI 的 CF_HDROP 是老格式（现代程序都置 fWide=TRUE）；非 ASCII 字节
+            // 会降级成替换字符，这里不为此引入额外的代码页转换。
+            String::from_utf8_lossy(&buf[start..i]).into_owned()
+        });
+        i += unit;
+        if files.len() >= MAX_DROP_FILES {
+            break;
+        }
     }
     Some(files)
 }
@@ -4799,6 +4855,78 @@ mod tests {
 
     /// ★ 超限大文本预览截断必须按**字符边界**（多字节中文不能被拦腰切成半个字，
     ///   更不能像旧实现 `&text[..n]` 那样直接 panic）。
+    // ── DROPFILES 自解析（2026-10-11 崩溃后加：不再交给 shell32 解引用）──
+    fn dropfiles(wide: bool, paths: &[&str]) -> Vec<u8> {
+        let mut v = vec![0u8; DROPFILES_HEADER];
+        v[0..4].copy_from_slice(&(DROPFILES_HEADER as u32).to_le_bytes());
+        v[16..20].copy_from_slice(&(u32::from(wide)).to_le_bytes());
+        for p in paths {
+            if wide {
+                for u in p.encode_utf16() {
+                    v.extend_from_slice(&u.to_le_bytes());
+                }
+                v.extend_from_slice(&0u16.to_le_bytes());
+            } else {
+                v.extend_from_slice(p.as_bytes());
+                v.push(0);
+            }
+        }
+        if wide {
+            v.extend_from_slice(&0u16.to_le_bytes());
+        } else {
+            v.push(0);
+        }
+        v
+    }
+
+    #[test]
+    fn dropfiles_parses_wide_and_ansi_lists() {
+        let w = dropfiles(true, &["C:\\a.txt", "D:\\b b.docx"]);
+        assert_eq!(
+            parse_dropfiles(&w),
+            Some(vec!["C:\\a.txt".to_string(), "D:\\b b.docx".to_string()])
+        );
+        let a = dropfiles(false, &["C:\\x", "C:\\y"]);
+        assert_eq!(
+            parse_dropfiles(&a),
+            Some(vec!["C:\\x".to_string(), "C:\\y".to_string()])
+        );
+        // 空列表（只有双 NUL 结尾）
+        let empty = dropfiles(true, &[]);
+        assert_eq!(parse_dropfiles(&empty), Some(vec![]));
+    }
+
+    #[test]
+    fn dropfiles_rejects_untrusted_headers() {
+        // 1) 头都装不下
+        assert_eq!(parse_dropfiles(&[0u8; 8]), None);
+        // 2) pFiles 指到缓冲外（就是崩溃那次的形状：shell32 会照着它去解引用）
+        let mut bad = dropfiles(true, &["C:\\a.txt"]);
+        bad[0..4].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+        assert_eq!(parse_dropfiles(&bad), None);
+        // 3) pFiles 落在头之前
+        let mut bad2 = dropfiles(true, &["C:\\a.txt"]);
+        bad2[0..4].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(parse_dropfiles(&bad2), None);
+        // 4) 最后一条没有收尾的 NUL（宽字符且截断到奇数长度也算）
+        let mut bad3 = dropfiles(true, &["C:\\a.txt"]);
+        bad3.pop();
+        assert_eq!(parse_dropfiles(&bad3), None);
+    }
+
+    #[test]
+    fn dropfiles_caps_runaway_list() {
+        // 缓冲全是 'A'（没有 NUL 收尾）：要么判畸形，要么按上限收住，绝不能死循环
+        let mut v = vec![0u8; DROPFILES_HEADER];
+        v[0..4].copy_from_slice(&(DROPFILES_HEADER as u32).to_le_bytes());
+        v[16..20].copy_from_slice(&1u32.to_le_bytes());
+        v.extend(std::iter::repeat_n(b'A', 4096));
+        match parse_dropfiles(&v) {
+            None => {}
+            Some(list) => assert!(list.len() <= MAX_DROP_FILES, "列表条数未被上限收住"),
+        }
+    }
+
     #[test]
     fn safe_prefix_cuts_on_char_boundaries_only() {
         // "红色" 每个 3 字节：max=4 落在第二字中间 → 回退到 3。

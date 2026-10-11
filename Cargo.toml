@@ -279,6 +279,12 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+# ★ 2026-10-11：`debug = 1`（行表）是**崩溃定位链的一环**，不能删。
+#   实测：`strip = true` 单用时，生成的 PDB 里**没有本 crate 的任何符号**
+#   （21:48 那次崩溃的 dump 只能解到 std 的函数，解不到我们自己写的）。
+#   MSVC 下调试信息**只进 PDB、不进 exe**，所以开启它对产物体积无影响
+#   （实测见当日工作日志）；保留 strip（剥离 COFF 符号表）以维持体积下限。
+debug = 1
 # ★ 2026-09-29：移除 `panic = "abort"`，改回默认 `unwind`。
 #   原因：扩展脚本在后台线程跑，任何 Rust panic 在 `abort` 下会直接 `__fastfail` 杀掉
 #   整个进程（用户报「脚本热键秒退」）。改 `unwind` 后，`ext_runner`/`api_ext` 里的
