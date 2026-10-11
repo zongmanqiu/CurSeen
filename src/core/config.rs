@@ -2606,7 +2606,10 @@ impl Config {
             Some(c) => {
                 let op = (c.a() as f32 / 255.0 * 100.0).round() / 100.0;
                 // 8 位 #RRGGBBAA：透明度随颜色一起走，这是现行脚本的唯一透明度来源。
-                (op, format!("#{:02X}{:02X}{:02X}{:02X}", c.r(), c.g(), c.b(), c.a()))
+                (
+                    op,
+                    format!("#{:02X}{:02X}{:02X}{:02X}", c.r(), c.g(), c.b(), c.a()),
+                )
             }
             None => (0.5, "#FF000080".to_string()),
         };
@@ -4517,7 +4520,10 @@ mod tests {
             serde_json::from_str(r#"{ "trail": { "cursor_mode": 0, "hover_enabled": true } }"#)
                 .unwrap();
         cfg2.migrate_hover_settings();
-        assert!(cfg2.trail.hover_enabled, "cursor_mode=0 是遗留快照，不该关掉悬浮标");
+        assert!(
+            cfg2.trail.hover_enabled,
+            "cursor_mode=0 是遗留快照，不该关掉悬浮标"
+        );
         // 迁移是幂等的：再跑一遍不覆盖
         cfg.migrate_hover_settings();
         assert_eq!(

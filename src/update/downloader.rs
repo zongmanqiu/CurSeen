@@ -66,7 +66,9 @@ where
     let mut received = 0u64;
     loop {
         // 无全局超时：慢网络下这里的读取会一直进行到下载完成，不做任何时限。
-        let n = reader.read(&mut buf).map_err(|e| format!("读取响应失败: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("读取响应失败: {e}"))?;
         if n == 0 {
             break;
         }

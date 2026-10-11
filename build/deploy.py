@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TOOLS))
@@ -101,6 +102,34 @@ else:
         errors="replace",
     ).stdout.strip()
     lines.append(f"BUILD_TIME={_bt}")
+
+    # PDB 归档：用户侧崩溃的 .dmp 要配**同一次构建**的 PDB 才能精确到行。
+    # `temp/target/release/curseen.pdb` 每次重编都被覆盖，若不在这里钉一份，
+    # 下次构建后旧 dump 就永远解不开了（Pecia 用 /MAP+固定基址解决同一问题，
+    # 本仓保留 ASLR，改用按构建归档 PDB）。放 temp/symbols/（开发侧），不进
+    # 分发目录；留最近 KEEP_SYMBOLS 份。
+    KEEP_SYMBOLS = 10
+    PDB_SRC = _find_built("curseen.pdb")
+    SYM_DIR = os.path.join(ROOT, "temp", "symbols")
+    if os.path.exists(PDB_SRC):
+        os.makedirs(SYM_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(PDB_SRC)))
+        sym_dst = os.path.join(SYM_DIR, f"curseen-{stamp}.pdb")
+        if not os.path.exists(sym_dst):
+            shutil.copy2(PDB_SRC, sym_dst)
+        olds = sorted(
+            (f for f in os.listdir(SYM_DIR) if f.endswith(".pdb")),
+            key=lambda f: os.path.getmtime(os.path.join(SYM_DIR, f)),
+            reverse=True,
+        )
+        for f in olds[KEEP_SYMBOLS:]:
+            try:
+                os.remove(os.path.join(SYM_DIR, f))
+            except OSError:
+                pass
+        lines.append(f"SYMBOL_ARCHIVED {sym_dst}")
+    else:
+        lines.append(f"SYMBOL_MISSING {PDB_SRC}")
 
 # 旧录制子进程已废（2026-10-07 收回进程内）：分发目录里不该再出现它。
 stale_rec = os.path.join(ROOT, "build", "curseen-rec.exe")

@@ -1845,8 +1845,8 @@ mod tests {
                 rgb.extend_from_slice(&[248, 248, 248]); // 背景
             }
         }
-        let pal = Palette::from_rgb_with_accents(&rgb, MAX_COLORS, &accent_colors())
-            .expect("调色板");
+        let pal =
+            Palette::from_rgb_with_accents(&rgb, MAX_COLORS, &accent_colors()).expect("调色板");
         assert!(
             pal.colors().contains(&[248, 248, 248]),
             "精确色路径应把背景原色收进色表（否则是另一档问题）"
@@ -1874,8 +1874,8 @@ mod tests {
                 rgb.extend_from_slice(&[251, 246, 236]); // 米白
             }
         }
-        let pal = Palette::from_rgb_with_accents(&rgb, MAX_COLORS, &accent_colors())
-            .expect("调色板");
+        let pal =
+            Palette::from_rgb_with_accents(&rgb, MAX_COLORS, &accent_colors()).expect("调色板");
         assert!(pal.colors().contains(&[251, 246, 236]));
         let mut q = Quantizer::new(pal);
         let mut idx = Vec::new();

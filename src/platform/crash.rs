@@ -26,11 +26,16 @@
 //! 链接器 GUID 每次构建都不同）。
 
 use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // 注：这两个 API 在 windows crate 里挂在 `Win32_System_Kernel` feature 下（不是
 // `Win32_System_Diagnostics_Debug`），见 Cargo.toml 的注释。
-use windows::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Diagnostics::Debug::{
+    MiniDumpWriteDump, SetUnhandledExceptionFilter, EXCEPTION_POINTERS,
+    MINIDUMP_EXCEPTION_INFORMATION, MINIDUMP_TYPE,
+};
 
 /// 崩溃文本缓冲容量（静态，崩溃时不再向堆要内存）。
 const CAP: usize = 32 * 1024;
@@ -41,6 +46,20 @@ const TAIL_LINES: usize = 40;
 
 /// 提示框只弹一次：钩子线程反复崩时不刷屏。
 static NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+// ── 出错线程的身份 ────────────────────────────────────────────────────────
+//
+// 发布版栈全是 <unknown>，"崩在哪条线程"只能看到裸 ID（如 19064）——而 ID 谁也
+// 对不上号（2026-10-11 崩溃实测：用户只开了截图贴图+剪贴板，仍要在五六条候选
+// 线程里猜）。SEH filter 就跑在**出错线程上**，`std::thread::current().name()`
+// 直接就是它的 Builder 名字——所有后台线程都已用 `Builder::new().name(...)` 命名
+// （无名裸线程已清零），所以这里免费拿到身份，无需登记表。
+fn current_thread_label() -> String {
+    match std::thread::current().name() {
+        Some(n) => format!("（{}）", n),
+        None => String::new(),
+    }
+}
 
 /// 崩溃文本缓冲。
 ///
@@ -135,12 +154,13 @@ unsafe extern "system" fn handler(info: *const EXCEPTION_POINTERS) -> i32 {
              时间        {}\n\
              异常码      0x{:08X}{}\n\
              异常地址    {:p}\n\
-             出错线程    {}\n",
+             出错线程    {}{}\n",
             now.format("%Y-%m-%d %H:%M:%S%.3f"),
             code as u32,
             describe(code),
             addr,
-            thread_id
+            thread_id,
+            current_thread_label()
         ),
     );
 
@@ -168,6 +188,26 @@ unsafe extern "system" fn handler(info: *const EXCEPTION_POINTERS) -> i32 {
             );
         }
     }
+
+    // ── 模块基址（exe 的加载地址）──
+    //
+    // 异常地址是含 ASLR 基址的绝对地址；没有基址它就无法换算成 exe 内的 RVA，
+    // 事后拿着同版本 exe/PDB 也对不上号（2026-10-11 崩溃实测教训：报告里只有
+    // `异常地址 0x7ff6…`，基址没记，那次崩溃就永远停在"知道地址、对不了行"）。
+    // 有了基址：`RVA = 异常地址 − 基址`，配同一次构建的 PDB 即可精确定位。
+    let base = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+        .ok()
+        .map(|h| h.0 as usize);
+    let _ = core::fmt::Write::write_fmt(
+        &mut sink,
+        format_args!(
+            "exe 基址    {}\n",
+            match base {
+                Some(b) => format!("0x{b:016X}"),
+                None => "（未知）".to_string(),
+            }
+        ),
+    );
 
     // ── 栈回溯 ──
     //
@@ -197,12 +237,22 @@ unsafe extern "system" fn handler(info: *const EXCEPTION_POINTERS) -> i32 {
     // ── 当天日志尾部：崩溃现场"之前发生了什么" ──
     append_log_tail(&mut sink);
 
+    // ── Minidump 落盘 ──
+    //
+    // 文本报告 + 无符号栈只能看"链条形状"；要**精确到行**必须拿 dump 配同一次构建的
+    // PDB（`temp/target/release/curseen.pdb`，勿删）。dump 里带着异常上下文（rip/rsp、
+    // 出错线程全栈），WinDbg/cdb 一发就能符号化。堆分配在这里可接受（同 backtrace 的
+    // 取舍：反正要退出）。
+    let dump_note = write_minidump(&now, info, thread_id);
+    let _ = core::fmt::Write::write_fmt(&mut sink, format_args!("{dump_note}\n"));
+    prune_old_dumps();
+
     let _ = core::fmt::Write::write_fmt(
         &mut sink,
         format_args!(
             "\n（提示）把本文件与同目录 log/curseen-*.log 一起提交即可定位。\n\
              栈帧名取自「离该地址最近的导出符号」，可能张冠李戴（发布版 `strip = true` 无符号）；\n\
-             优先看异常码与链条形状，要精确到行需配同版本提交。\n"
+             优先看异常码与链条形状；**同名 .dmp + 同次构建的 curseen.pdb** 可精确到行。\n"
         ),
     );
 
@@ -298,6 +348,83 @@ fn append_log_tail(sink: &mut Sink) {
     );
     for l in &lines[start..] {
         let _ = core::fmt::Write::write_fmt(sink, format_args!("{}\n", l));
+    }
+}
+
+/// 把崩溃现场写成 Minidump（`<程序目录>/log/curseen-crash-<时间戳>.dmp`）。
+///
+/// 返回写进文本报告的一行说明（成功=路径，失败=原因）。尽力而为：任何一步失败都不
+/// 影响文本报告落盘。`ClientPointers = FALSE`：异常上下文就在本进程地址空间里。
+fn write_minidump(
+    now: &chrono::DateTime<chrono::Local>,
+    info: *const EXCEPTION_POINTERS,
+    thread_id: u32,
+) -> String {
+    let path = crate::core::paths::log_dir()
+        .join(format!("curseen-crash-{}.dmp", now.format("%Y%m%d-%H%M%S")));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let Ok(file) = std::fs::File::create(&path) else {
+        return "minidump   （创建 .dmp 文件失败，只有文本报告）".to_string();
+    };
+    // dump 文件句柄借 `File` 的 RAII：MiniDumpWriteDump 同步写完才返回，之后 drop 无妨。
+    let handle = HANDLE(file.as_raw_handle());
+    // info 非空才有异常上下文可带；`Option<结构体>` 不是 FSI 安全布局，故用裸指针表达缺席。
+    let exc = MINIDUMP_EXCEPTION_INFORMATION {
+        ThreadId: thread_id,
+        ExceptionPointers: info as *mut EXCEPTION_POINTERS,
+        ClientPointers: windows::core::BOOL(0),
+    };
+    let exc_param = if info.is_null() {
+        None
+    } else {
+        Some(std::ptr::from_ref(&exc))
+    };
+    // SAFETY: 句柄有效、参数结构存活到调用结束；dbghelp 内部分配堆，崩溃路径上可接受。
+    // windows 0.62 的包装把 BOOL 成功翻成 Result；失败在报告里降级为一行说明。
+    let ok = unsafe {
+        MiniDumpWriteDump(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            std::process::id(),
+            handle,
+            MINIDUMP_TYPE(0), // MiniDumpNormal：线程栈足够符号化，体积小
+            exc_param,
+            None,
+            None,
+        )
+    };
+    if ok.is_ok() {
+        format!(
+            "minidump   {}（配同次构建的 curseen.pdb 可精确到行）",
+            path.display()
+        )
+    } else {
+        "minidump   （MiniDumpWriteDump 失败，只有文本报告）".to_string()
+    }
+}
+
+/// 保留最近 [`KEEP_DUMPS`] 份 `.dmp`，删更旧的。对齐 Pecia 的 `pruneOldDumps`：
+/// dump 一份几十 KB~几 MB，无上限堆积会在便携目录里悄悄长个。当前这份刚写出、
+/// mtime 最新，必在保留之列。尽力而为，失败不响。
+const KEEP_DUMPS: usize = 3;
+
+fn prune_old_dumps() {
+    let dir = crate::core::paths::log_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "dmp"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.modified().ok()?))
+        })
+        .collect();
+    files.sort_by_key(|&(_, t)| std::cmp::Reverse(t)); // 新的在前
+    for (p, _) in files.into_iter().skip(KEEP_DUMPS) {
+        let _ = std::fs::remove_file(p);
     }
 }
 

@@ -1150,15 +1150,13 @@ pub fn sync_gif_bar_geometry(
     {
         let (target, vs) = {
             let r = rt.borrow();
-            let t = r
-                .scroll_bar_selection()
-                .map(|(sel, _)| {
-                    crate::runtime::layer::gif_bar::bar_rect_for(
-                        sel,
-                        r.screen,
-                        crate::runtime::layer::gif_bar::BarMode::Scroll,
-                    )
-                });
+            let t = r.scroll_bar_selection().map(|(sel, _)| {
+                crate::runtime::layer::gif_bar::bar_rect_for(
+                    sel,
+                    r.screen,
+                    crate::runtime::layer::gif_bar::BarMode::Scroll,
+                )
+            });
             (t, r.screen)
         };
         sync_bar_geometry(target, vs, last_scroll, layer::gif_bar::SCROLL_BAR_TITLE);
@@ -1504,51 +1502,61 @@ fn toggle_panel(ctx: &mut EventCtx, rt: &Rc<RefCell<Runtime>>) {
 fn spawn_input_bridge(
     input_rx: Receiver<InputEvent>,
     ui_tx: Sender<UiMsg>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        while let Ok(ev) = input_rx.recv() {
-            // ★ 滚轮走自己的门：放大镜开着时（`wheel_swallow` 与钩子的吞事件开关在
-            //   `sync_input_gate` 里同步维护）Ctrl+滚轮要送到 UI 线程做快捷调倍率，
-            //   不受"是否需要鼠标"门管辖——否则只开放大镜时滚轮事件全被丢在这里。
-            let gate = match ev {
-                // 与钩子同源：钩子只在「放大镜在屏 + Ctrl+Win+滚轮」时才转发滚轮，
-                // `zoom_wheel_armed` 就是这个判断；回显武装时普通/倾斜滚轮的镜像也放行
-                // （击键回显显示「滚轮上/下/左/右」）。其余滚轮不需要进 UI，照常丢弃。
-                InputEvent::MouseWheel { .. } => {
-                    crate::platform::input::mouse::zoom_wheel_armed()
-                        || crate::platform::input::mouse::mouse_echo_armed()
+) -> Option<std::thread::JoinHandle<()>> {
+    // ★ 命名：崩溃报告按线程名标注出错线程（platform::crash），无名线程对不上号。
+    let spawned = std::thread::Builder::new()
+        .name("overlay-input".into())
+        .spawn(move || {
+            while let Ok(ev) = input_rx.recv() {
+                // ★ 滚轮走自己的门：放大镜开着时（`wheel_swallow` 与钩子的吞事件开关在
+                //   `sync_input_gate` 里同步维护）Ctrl+滚轮要送到 UI 线程做快捷调倍率，
+                //   不受"是否需要鼠标"门管辖——否则只开放大镜时滚轮事件全被丢在这里。
+                let gate = match ev {
+                    // 与钩子同源：钩子只在「放大镜在屏 + Ctrl+Win+滚轮」时才转发滚轮，
+                    // `zoom_wheel_armed` 就是这个判断；回显武装时普通/倾斜滚轮的镜像也放行
+                    // （击键回显显示「滚轮上/下/左/右」）。其余滚轮不需要进 UI，照常丢弃。
+                    InputEvent::MouseWheel { .. } => {
+                        crate::platform::input::mouse::zoom_wheel_armed()
+                            || crate::platform::input::mouse::mouse_echo_armed()
+                    }
+                    // ★ 按下/抬起是**低频**事件（一次点击最多两条），"放行"的代价可以忽略，
+                    //   所以这里比 `_` 分支多认两道门：
+                    //   · 鼠标回显武装时放行（2026-09-22 补）：只开「击键回显」不开拖尾/绘制
+                    //     等其它鼠标功能时 MOUSE_INPUT_NEEDED 是 false —— 不放行的话点击
+                    //     永远进不了回显。
+                    //   · ★ 虚拟键盘的鼠标门（2026-09-26 补）：方案里含鼠标键帽时也要放行，
+                    //     且**不看「鼠标穿透」** —— 穿透只决定"点键帽注不注入按键"，
+                    //     而"点亮键帽"唯一的输入就是这两条事件。WASD 游戏板出厂勾着穿透，
+                    //     旧判据把它的鼠标事件整条丢了，表现是"鼠标键点了没反应"。
+                    InputEvent::MouseDown { .. } | InputEvent::MouseUp { .. } => {
+                        MOUSE_INPUT_NEEDED.load(Ordering::Relaxed)
+                            || crate::platform::input::mouse::mouse_echo_armed()
+                            || VK_MOUSE_ARMED.load(Ordering::Relaxed)
+                    }
+                    _ => MOUSE_INPUT_NEEDED.load(Ordering::Relaxed),
+                };
+                if is_mouse(&ev) && !gate {
+                    if matches!(ev, InputEvent::MouseDown { .. }) {
+                        // ★ `debug` 而不是 `info`：覆盖层常态下就不收鼠标（此时鼠标属于
+                        //   下面的窗口），这条每点一次记一行，实测占全天日志的 1/3
+                        //   （930/2562 行）——它只在排查"点击没反应"时才有意义。
+                        //   需要时用 `CURSEEN_LOG_LEVEL=debug` 打开（见 `core::logger`）。
+                        log::debug!("桥接线程：丢弃 MouseDown（MOUSE_INPUT_NEEDED=false）");
+                    }
+                    continue;
                 }
-                // ★ 按下/抬起是**低频**事件（一次点击最多两条），"放行"的代价可以忽略，
-                //   所以这里比 `_` 分支多认两道门：
-                //   · 鼠标回显武装时放行（2026-09-22 补）：只开「击键回显」不开拖尾/绘制
-                //     等其它鼠标功能时 MOUSE_INPUT_NEEDED 是 false —— 不放行的话点击
-                //     永远进不了回显。
-                //   · ★ 虚拟键盘的鼠标门（2026-09-26 补）：方案里含鼠标键帽时也要放行，
-                //     且**不看「鼠标穿透」** —— 穿透只决定"点键帽注不注入按键"，
-                //     而"点亮键帽"唯一的输入就是这两条事件。WASD 游戏板出厂勾着穿透，
-                //     旧判据把它的鼠标事件整条丢了，表现是"鼠标键点了没反应"。
-                InputEvent::MouseDown { .. } | InputEvent::MouseUp { .. } => {
-                    MOUSE_INPUT_NEEDED.load(Ordering::Relaxed)
-                        || crate::platform::input::mouse::mouse_echo_armed()
-                        || VK_MOUSE_ARMED.load(Ordering::Relaxed)
+                if ui_tx.send(UiMsg::Input(ev)).is_err() {
+                    break;
                 }
-                _ => MOUSE_INPUT_NEEDED.load(Ordering::Relaxed),
-            };
-            if is_mouse(&ev) && !gate {
-                if matches!(ev, InputEvent::MouseDown { .. }) {
-                    // ★ `debug` 而不是 `info`：覆盖层常态下就不收鼠标（此时鼠标属于
-                    //   下面的窗口），这条每点一次记一行，实测占全天日志的 1/3
-                    //   （930/2562 行）——它只在排查"点击没反应"时才有意义。
-                    //   需要时用 `CURSEEN_LOG_LEVEL=debug` 打开（见 `core::logger`）。
-                    log::debug!("桥接线程：丢弃 MouseDown（MOUSE_INPUT_NEEDED=false）");
-                }
-                continue;
             }
-            if ui_tx.send(UiMsg::Input(ev)).is_err() {
-                break;
-            }
-        }
-    })
+        });
+    // 与 working_set 等处同款：启动失败记日志不 panic（原 std::thread::spawn 失败会
+    // panic，这里降级——桥接断了特效不刷新，但进程不至于整个崩掉）。
+    if let Err(e) = spawned {
+        log::warn!("overlay-input 桥接线程启动失败: {e}");
+        return None;
+    }
+    spawned.ok()
 }
 
 /// 该事件是否来自鼠标（见 [`spawn_input_bridge`] 的输入门）。
@@ -2861,10 +2869,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            hit, 0,
-            "不带手柄时选区内部必须全干净——采集裁的就是这块"
-        );
+        assert_eq!(hit, 0, "不带手柄时选区内部必须全干净——采集裁的就是这块");
 
         let dirty = render(true);
         // 角与边中点的手柄内半截（hp/2 − t = 3.5px）应伸进内部：

@@ -70,10 +70,15 @@ pub fn get_text() -> Option<String> {
             return None;
         }
         let _guard_mem = Unlocker(ptr.cast());
-        // 到双零结尾的 UTF-16 长度
+        // 到双零结尾的 UTF-16 长度。★ 以 GlobalSize 为上界：剪贴板数据的结尾**由
+        // 来源进程负责放 NUL**，畸形来源（或不规范的自定义写入方）不给终止符时，
+        // 无界扫描会一路读出分配区之外——正好就是 0xC0000005 读越界（2026-10-11
+        // 崩溃排查时定的防御项）。越界就按"到此为止"截断，交给 lossy 转换兜底。
+        let total = GlobalSize(HGLOBAL(h.0)) as usize;
+        let max_chars = total / 2;
         let mut len = 0_usize;
         let u16_ptr = ptr.cast::<u16>();
-        while *u16_ptr.add(len) != 0 {
+        while len < max_chars && *u16_ptr.add(len) != 0 {
             len += 1;
         }
         let slice = std::slice::from_raw_parts(u16_ptr, len);
@@ -106,6 +111,12 @@ pub fn get_image() -> Option<Shot> {
         }
         let _guard_mem = Unlocker(ptr.cast());
         // BITMAPINFOHEADER：biSize(4) biWidth(4) biHeight(4, 有符号) planes+bpp(4) compression(4)
+        // ★ 先取分配大小并保证装得下 20 字节的头字段，再解头——畸形 DIB（分配区比头还小）
+        //   直接拒绝，否则下面 5 个 u32 的读取本身就是越界（2026-10-11 崩溃排查防御项）。
+        let total = GlobalSize(HGLOBAL(hmem.0)) as usize;
+        if total < 20 {
+            return None;
+        }
         let base = ptr.cast::<u32>();
         let bi_size = *base as usize;
         let w = *base.add(1) as i32;
@@ -134,7 +145,6 @@ pub fn get_image() -> Option<Shot> {
             bi_size
         };
         // 像素区不可超出分配大小，畸形头会越界读（UB）。
-        let total = GlobalSize(HGLOBAL(hmem.0)) as usize;
         if pixel_offset + (h as usize) * ((w as usize) * 4) > total {
             return None;
         }

@@ -265,7 +265,8 @@ impl AudioCapture {
                 } else {
                     spk.drain(..(s - m));
                 }
-                self.aligned.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.aligned
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             } else if m.max(s) > 0 {
                 // ★ 另一路还没到齐：**直接按有的那一路输出，绝不等待**。
                 //   两路设备的初始化有先后（实测差到 170ms）。若这里等待，时间线
@@ -1381,7 +1382,11 @@ mod tests {
     fn mix_aligns_lane_starts_exactly_once() {
         // mic 先启动（多出 3 个前置样本）。
         let ac = stub_capture(vec![1, 1, 1, 1, 1], vec![2, 2], true, false);
-        assert_eq!(ac.take_samples(), vec![3, 3], "丢掉 mic 的 3 个前置后取重叠");
+        assert_eq!(
+            ac.take_samples(),
+            vec![3, 3],
+            "丢掉 mic 的 3 个前置后取重叠"
+        );
         // 第二次起不再对齐（即便两路又不等长，也不该再丢）。
         *ac.mic_buffer.lock().expect("锁") = vec![5, 5, 5];
         *ac.spk_buffer.lock().expect("锁") = vec![1];

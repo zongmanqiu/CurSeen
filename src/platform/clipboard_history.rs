@@ -561,7 +561,14 @@ struct ClipEntry {
 /// 启动后台管理器线程（幂等）。线程就绪后 `CMD_HWND` 才可用。
 pub fn ensure_started() {
     START_ONCE.call_once(|| {
-        std::thread::spawn(run);
+        // ★ 线程必须命名：崩溃报告按 `std::thread::current().name()` 标注出错线程
+        //   （见 `platform::crash::current_thread_label`），无名线程在报告里对不上号。
+        let spawned = std::thread::Builder::new()
+            .name("clip-cmd".into())
+            .spawn(run);
+        if let Err(e) = spawned {
+            log::error!("剪贴板: 命令线程启动失败: {e}");
+        }
     });
     while CMD_HWND.get().is_none() {
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1546,52 +1553,63 @@ impl ClipboardMgr {
         let (job_tx, job_rx) = mpsc::channel::<CapJob>();
         let (thumb_tx, thumb_rx) = mpsc::channel::<CapMsg>();
         let worker_dir = images_dir.clone();
-        std::thread::spawn(move || {
-            // 上一次捕获缓存：同一张图反复捕获（每次开面板 / 每次复制都投任务）时，
-            // get_image 的解码与哈希判定仍要做，但缩略 + PNG 编码 + 写盘只在哈希
-            // 变化时重跑——重复开面板不再反复编码同一张大图（后台线程，不挡消息泵）。
-            let mut last_cap: Option<(u64, CapturedImg)> = None;
-            // 原件目录占用账：起手先数一次，覆盖"上次运行就已经很大"的情况。
-            let mut budget = ImgBudget::new(&worker_dir);
-            // ★ COM 与 WIC 工厂都先于循环建好：`CoCreateInstance` 每 decode 一次都重做是纯浪费，
-            //   而 WIC 工厂本身线程内复用是安全的。**先声明的后 drop**，所以 `_com` 写在最前
-            //   —— 保证 WIC 工厂在 `CoUninitialize` 之前先析构。
-            let _com = ComGuard::new();
-            let wic: Option<IWICImagingFactory> = unsafe {
-                CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()
-            };
-            while let Ok(job) = job_rx.recv() {
-                let msg = match job {
-                    CapJob::Thumb(id, path) => {
-                        // 解码失败（文件丢了）也回传空 `Shot` 占位，避免面板对这条反复重试。
-                        CapMsg::Thumb(id, shot_from_png(&path).unwrap_or_default())
-                    }
-                    CapJob::Capture {
-                        self_fmt,
-                        dir,
-                        full_dir,
-                    } => {
-                        let (cap, n) =
-                            capture_image_bg(self_fmt, &dir, full_dir.as_deref(), &mut last_cap);
-                        // 只在真的写入了原件时才过账（重复捕获同一张图 n=0，不必重数目录）。
-                        if n > 0 && budget.add(n, &worker_dir) {
-                            let total = budget.known + budget.pending;
-                            let _ = thumb_tx.send(CapMsg::StorageWarn(total));
-                        }
-                        CapMsg::Captured(cap)
-                    }
-                    CapJob::FileThumb { id, path, dir } => {
-                        CapMsg::FileThumb(id, capture_file_thumb_bg(wic.as_ref(), &path, &dir))
-                    }
+        // ★ 命名理由同上（崩溃报告标注出错线程）。
+        let spawned = std::thread::Builder::new()
+            .name("clip-thumb".into())
+            .spawn(move || {
+                // 上一次捕获缓存：同一张图反复捕获（每次开面板 / 每次复制都投任务）时，
+                // get_image 的解码与哈希判定仍要做，但缩略 + PNG 编码 + 写盘只在哈希
+                // 变化时重跑——重复开面板不再反复编码同一张大图（后台线程，不挡消息泵）。
+                let mut last_cap: Option<(u64, CapturedImg)> = None;
+                // 原件目录占用账：起手先数一次，覆盖"上次运行就已经很大"的情况。
+                let mut budget = ImgBudget::new(&worker_dir);
+                // ★ COM 与 WIC 工厂都先于循环建好：`CoCreateInstance` 每 decode 一次都重做是纯浪费，
+                //   而 WIC 工厂本身线程内复用是安全的。**先声明的后 drop**，所以 `_com` 写在最前
+                //   —— 保证 WIC 工厂在 `CoUninitialize` 之前先析构。
+                let _com = ComGuard::new();
+                let wic: Option<IWICImagingFactory> = unsafe {
+                    CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()
                 };
-                let _ = thumb_tx.send(msg);
-                if let Some(a) = CMD_HWND.get() {
-                    let h = HWND(a.load(Ordering::Relaxed) as *mut c_void);
-                    let _ =
-                        unsafe { PostMessageW(Some(h), WM_APP_THUMB_WAKE, WPARAM(0), LPARAM(0)) };
+                while let Ok(job) = job_rx.recv() {
+                    let msg = match job {
+                        CapJob::Thumb(id, path) => {
+                            // 解码失败（文件丢了）也回传空 `Shot` 占位，避免面板对这条反复重试。
+                            CapMsg::Thumb(id, shot_from_png(&path).unwrap_or_default())
+                        }
+                        CapJob::Capture {
+                            self_fmt,
+                            dir,
+                            full_dir,
+                        } => {
+                            let (cap, n) = capture_image_bg(
+                                self_fmt,
+                                &dir,
+                                full_dir.as_deref(),
+                                &mut last_cap,
+                            );
+                            // 只在真的写入了原件时才过账（重复捕获同一张图 n=0，不必重数目录）。
+                            if n > 0 && budget.add(n, &worker_dir) {
+                                let total = budget.known + budget.pending;
+                                let _ = thumb_tx.send(CapMsg::StorageWarn(total));
+                            }
+                            CapMsg::Captured(cap)
+                        }
+                        CapJob::FileThumb { id, path, dir } => {
+                            CapMsg::FileThumb(id, capture_file_thumb_bg(wic.as_ref(), &path, &dir))
+                        }
+                    };
+                    let _ = thumb_tx.send(msg);
+                    if let Some(a) = CMD_HWND.get() {
+                        let h = HWND(a.load(Ordering::Relaxed) as *mut c_void);
+                        let _ = unsafe {
+                            PostMessageW(Some(h), WM_APP_THUMB_WAKE, WPARAM(0), LPARAM(0))
+                        };
+                    }
                 }
-            }
-        });
+            });
+        if let Err(e) = spawned {
+            log::error!("剪贴板: 缩略图 worker 启动失败: {e}");
+        }
         ClipboardMgr {
             cfg: ClipCfg {
                 enabled: false,
@@ -2530,59 +2548,67 @@ impl ClipboardMgr {
             );
             // ★ HWND 是裸指针包装不带 Send，跨线程只传 isize，线程内再还原。
             let target_raw = target.0 as isize;
-            std::thread::spawn(move || {
-                // ★ 发键前等「前台==目标且连续稳定」：写回剪贴板后 TIM 的剪贴板助手
-                //   气泡会弹出抢前台/焦点（2026-10-07 驱动实验实证），固定 60ms 是赌
-                //   运气。轮询至 fg==target 连续稳定 PASTE_STABLE_HOLD_MS 且总等待≥
-                //   PASTE_STABLE_MIN_MS 再发；期间被抢就切回（80ms 节流）；
-                //   PASTE_SEND_DEADLINE_MS 兜底，超时按现状直接发。
-                let target = HWND(target_raw as *mut core::ffi::c_void);
-                let start = std::time::Instant::now();
-                let deadline =
-                    start + std::time::Duration::from_millis(PASTE_SEND_DEADLINE_MS as u64);
-                let min_wait = std::time::Duration::from_millis(PASTE_STABLE_MIN_MS as u64);
-                let hold_need = std::time::Duration::from_millis(PASTE_STABLE_HOLD_MS as u64);
-                let mut hold_since: Option<std::time::Instant> = None;
-                let mut last_switch = start - std::time::Duration::from_secs(1);
-                let mut switches = 0usize;
-                loop {
-                    let fg = GetForegroundWindow();
-                    if !target.is_invalid() && fg == target {
-                        match hold_since {
-                            Some(t) if t.elapsed() >= hold_need && start.elapsed() >= min_wait => {
+            // ★ 命名理由同上（崩溃报告标注出错线程）。
+            let spawned = std::thread::Builder::new()
+                .name("clip-paste-send".into())
+                .spawn(move || {
+                    // ★ 发键前等「前台==目标且连续稳定」：写回剪贴板后 TIM 的剪贴板助手
+                    //   气泡会弹出抢前台/焦点（2026-10-07 驱动实验实证），固定 60ms 是赌
+                    //   运气。轮询至 fg==target 连续稳定 PASTE_STABLE_HOLD_MS 且总等待≥
+                    //   PASTE_STABLE_MIN_MS 再发；期间被抢就切回（80ms 节流）；
+                    //   PASTE_SEND_DEADLINE_MS 兜底，超时按现状直接发。
+                    let target = HWND(target_raw as *mut core::ffi::c_void);
+                    let start = std::time::Instant::now();
+                    let deadline =
+                        start + std::time::Duration::from_millis(PASTE_SEND_DEADLINE_MS as u64);
+                    let min_wait = std::time::Duration::from_millis(PASTE_STABLE_MIN_MS as u64);
+                    let hold_need = std::time::Duration::from_millis(PASTE_STABLE_HOLD_MS as u64);
+                    let mut hold_since: Option<std::time::Instant> = None;
+                    let mut last_switch = start - std::time::Duration::from_secs(1);
+                    let mut switches = 0usize;
+                    loop {
+                        let fg = GetForegroundWindow();
+                        if !target.is_invalid() && fg == target {
+                            match hold_since {
+                                Some(t)
+                                    if t.elapsed() >= hold_need && start.elapsed() >= min_wait =>
+                                {
+                                    break;
+                                }
+                                Some(_) => {}
+                                None => hold_since = Some(std::time::Instant::now()),
+                            }
+                        } else {
+                            hold_since = None;
+                            if std::time::Instant::now() >= deadline {
                                 break;
                             }
-                            Some(_) => {}
-                            None => hold_since = Some(std::time::Instant::now()),
-                        }
-                    } else {
-                        hold_since = None;
-                        if std::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        if std::time::Instant::now().duration_since(last_switch)
-                            >= std::time::Duration::from_millis(80)
-                        {
-                            last_switch = std::time::Instant::now();
-                            switches += 1;
-                            if IsWindow(Some(target)).as_bool() {
-                                let _ = SetForegroundWindow(target);
-                                if GetForegroundWindow() != target {
-                                    send_alt_tap();
+                            if std::time::Instant::now().duration_since(last_switch)
+                                >= std::time::Duration::from_millis(80)
+                            {
+                                last_switch = std::time::Instant::now();
+                                switches += 1;
+                                if IsWindow(Some(target)).as_bool() {
                                     let _ = SetForegroundWindow(target);
+                                    if GetForegroundWindow() != target {
+                                        send_alt_tap();
+                                        let _ = SetForegroundWindow(target);
+                                    }
                                 }
                             }
                         }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                log::info!(
-                    "剪贴板: 粘贴发键：等前台稳定 {}ms（重切 {} 次）",
-                    start.elapsed().as_millis(),
-                    switches
-                );
-                send_paste_keys_textus();
-            });
+                    log::info!(
+                        "剪贴板: 粘贴发键：等前台稳定 {}ms（重切 {} 次）",
+                        start.elapsed().as_millis(),
+                        switches
+                    );
+                    send_paste_keys_textus();
+                });
+            if let Err(e) = spawned {
+                log::error!("剪贴板: 发键线程启动失败: {e}");
+            }
         }
     }
 

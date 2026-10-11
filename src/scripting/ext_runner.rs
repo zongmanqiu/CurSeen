@@ -91,12 +91,15 @@ pub fn run_ext_detached(
         image: c.image,
         hwnd: c.hwnd,
     });
-    std::thread::spawn(move || {
-        let _guard = guard; // 搬到工作线程：线程结束（含 panic）即归还登记。
-                            // RgbaBitmap 是 Vec，天然 Send；影像克隆交给工作线程。
-        let r = run_ext_sync(&dir, &id, &params, ctx);
-        show_result(hwnd, &id, r);
-    });
+    // ★ 命名：崩溃报告按线程名标注出错线程（platform::crash），无名线程对不上号。
+    let _ = std::thread::Builder::new()
+        .name("fx-script".into())
+        .spawn(move || {
+            let _guard = guard; // 搬到工作线程：线程结束（含 panic）即归还登记。
+                                // RgbaBitmap 是 Vec，天然 Send；影像克隆交给工作线程。
+            let r = run_ext_sync(&dir, &id, &params, ctx);
+            show_result(hwnd, &id, r);
+        });
 }
 
 /// 在**当前线程**执行脚本并返回结果（`run_ext_detached` 的工作线程用它；单测也可直接调）。
