@@ -25,7 +25,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -484,6 +484,16 @@ fn RGB(r: u8, g: u8, b: u8) -> COLORREF {
 static CMD_HWND: OnceLock<AtomicUsize> = OnceLock::new();
 static START_ONCE: Once = Once::new();
 static ORIG_EDIT: AtomicUsize = AtomicUsize::new(0);
+/// 后台线程是否已"了结启动"（**成功建好窗、或明确失败，都置位**）。
+///
+/// ★★ 主线程只能等这个，绝不能死等 [`CMD_HWND`]：建窗失败时后者永远不会被设置，
+///    死等的结果就是——进程在任务管理器里活着，但没有托盘图标、点不开任何界面，
+///    用户只能强杀（2026-10-12 实测）。失败也必须让启动继续走完。
+static START_DONE: AtomicBool = AtomicBool::new(false);
+
+fn mark_start_done() {
+    START_DONE.store(true, Ordering::SeqCst);
+}
 
 /// 模块配置镜像（命令载荷）。
 #[derive(Clone, Copy)]
@@ -571,7 +581,16 @@ pub fn ensure_started() {
             log::error!("剪贴板: 命令线程启动失败: {e}");
         }
     });
-    while CMD_HWND.get().is_none() {
+    // ★★ 等"有没有了结"，且**有上限**。以前是 `while CMD_HWND.get().is_none()` 死等：
+    //    后台线程一旦在建窗那步失败（老代码是 `.expect` → 线程 panic），CMD_HWND 永远
+    //    不会被设置，主线程就在这儿转一辈子 —— 托盘/覆盖层都没机会建出来，进程却活着
+    //    （2026-10-12 僵尸进程）。现在失败也只是让本模块本次不可用。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !START_DONE.load(Ordering::SeqCst) {
+        if std::time::Instant::now() >= deadline {
+            log::error!("剪贴板: 后台线程 5s 未了结启动，放弃等待（本模块本次不可用）");
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
@@ -3603,12 +3622,16 @@ unsafe fn write_text(s: &str) {
     }
     std::ptr::copy_nonoverlapping(utf16.as_ptr(), p as *mut u16, utf16.len());
     GlobalUnlock(hg);
-    if OpenClipboard(None).is_ok() {
+    // ★ 走进程级门禁（2026-10-13）：`EmptyClipboard()` 会把 `clip-thumb` 正在读的
+    //   那块内存抽走 —— 它是 use-after-free，不是"读失败"。
+    let opened = crate::platform::clipboard::with_clipboard(|| unsafe {
         let _ = EmptyClipboard();
         SetClipboardData(CF_TEXT_U, Some(HANDLE(hg.0)));
         set_self_shield();
-        let _ = CloseClipboard();
-    } else {
+        Some(())
+    })
+    .is_some();
+    if !opened {
         let _ = GlobalFree(Some(hg));
     }
 }
@@ -3645,12 +3668,15 @@ unsafe fn write_files(files: &[String]) {
     }
     bytes[off..off + 2].copy_from_slice(&0u16.to_le_bytes());
     GlobalUnlock(hg);
-    if OpenClipboard(None).is_ok() {
+    // ★ 同上：走进程级门禁。
+    let opened = crate::platform::clipboard::with_clipboard(|| unsafe {
         let _ = EmptyClipboard();
         SetClipboardData(CF_HDROP_U, Some(HANDLE(hg.0)));
         set_self_shield();
-        let _ = CloseClipboard();
-    } else {
+        Some(())
+    })
+    .is_some();
+    if !opened {
         let _ = GlobalFree(Some(hg));
     }
 }
@@ -3682,33 +3708,32 @@ unsafe fn set_self_shield() {
 /// 目的：让监听端跳过"我们自己刚写回的内容"，不去做一次无谓的回读（回读要
 /// `GlobalLock` + 逐行拷贝 + PNG 重编码）。
 unsafe fn shield_after_write() {
-    if OpenClipboard(None).is_ok() {
+    let _ = crate::platform::clipboard::with_clipboard(|| {
         set_self_shield();
-        let _ = CloseClipboard();
-    }
+        Some(())
+    });
 }
 
 unsafe fn read_files_opened() -> Option<Vec<String>> {
-    if OpenClipboard(None).is_err() {
-        return None;
-    }
-    let _guard = ClipboardCloser;
-    if IsClipboardFormatAvailable(CF_HDROP_U).is_err() {
-        return None;
-    }
-    let h = GetClipboardData(CF_HDROP_U).ok()?;
-    let hg = HGLOBAL(h.0);
-    // ★ 先看分配大小：拿到 0 说明句柄已经不可信，比头还小说明装不下 DROPFILES。
-    let total = GlobalSize(hg) as usize;
-    if total < DROPFILES_HEADER + 2 {
-        return None;
-    }
-    let ptr = GlobalLock(hg);
-    if ptr.is_null() {
-        return None;
-    }
-    let _unlock = MemoryUnlocker(ptr as *mut u8);
-    parse_dropfiles(std::slice::from_raw_parts(ptr as *const u8, total))
+    // ★ 走进程级门禁（2026-10-13）：读 CF_HDROP 期间不许有写者 `EmptyClipboard()`。
+    crate::platform::clipboard::with_clipboard(|| unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP_U).is_err() {
+            return None;
+        }
+        let h = GetClipboardData(CF_HDROP_U).ok()?;
+        let hg = HGLOBAL(h.0);
+        // ★ 先看分配大小：拿到 0 说明句柄已经不可信，比头还小说明装不下 DROPFILES。
+        let total = GlobalSize(hg) as usize;
+        if total < DROPFILES_HEADER + 2 {
+            return None;
+        }
+        let ptr = GlobalLock(hg);
+        if ptr.is_null() {
+            return None;
+        }
+        let _unlock = MemoryUnlocker(ptr as *mut u8);
+        parse_dropfiles(std::slice::from_raw_parts(ptr as *const u8, total))
+    })
 }
 
 /// DROPFILES 头大小：`pFiles(4) + pt(8) + fNC(4) + fWide(4)`。
@@ -4123,14 +4148,6 @@ fn lparam_y(l: LPARAM) -> i32 {
     ((l.0 as u32) >> 16) as i16 as i32
 }
 
-struct ClipboardCloser;
-impl Drop for ClipboardCloser {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseClipboard();
-        }
-    }
-}
 struct MemoryUnlocker(*mut u8);
 impl Drop for MemoryUnlocker {
     fn drop(&mut self) {
@@ -4563,6 +4580,46 @@ unsafe extern "system" fn edit_subclass(
     )
 }
 
+/// 建窗：失败只记日志并返回 `None`，**绝不 panic**。
+///
+/// ★★ 这条线程一 panic，`CMD_HWND` 就永远不会被设置，主线程会一直等下去：进程在任务
+///   管理器里活着，但没有托盘图标、点不开任何界面，用户只能强杀（2026-10-12 实测）。
+///   所以建窗失败改成**降级**——本模块本次不可用，其余功能照常起来。
+#[allow(clippy::too_many_arguments)]
+unsafe fn create_clip_window(
+    ex: WINDOW_EX_STYLE,
+    class: &str,
+    title: &str,
+    style: WINDOW_STYLE,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    parent: Option<HWND>,
+    hinst: HINSTANCE,
+) -> Option<HWND> {
+    match CreateWindowExW(
+        ex,
+        PCWSTR(wide(class).as_ptr()),
+        PCWSTR(wide(title).as_ptr()),
+        style,
+        x,
+        y,
+        w,
+        h,
+        parent,
+        None,
+        Some(hinst),
+        None,
+    ) {
+        Ok(hwnd) => Some(hwnd),
+        Err(e) => {
+            log::error!("剪贴板: 建窗失败 class={class}: {e}");
+            None
+        }
+    }
+}
+
 // ── 线程入口 ───────────────────────────────────────────────────────────
 fn run() {
     unsafe {
@@ -4572,65 +4629,71 @@ fn run() {
         //   在主线程上忙等这个句柄，load 放在前面等于让主线程替后台线程的启动买单。
         let mgr_ptr = &mut mgr as *mut ClipboardMgr;
 
-        // 注册类
-        let _ = register_class("CurSeenClipCmd", cmd_proc, hinst);
-        let _ = register_class("CurSeenClipListener", listener_proc, hinst);
-        let _ = register_class("CurSeenClipPanel", panel_proc, hinst);
-        let _ = register_class("CurSeenClipPreview", preview_proc, hinst);
+        // 注册类（★ 用**非短路**的 `&`：四个都要真跑一遍，好让每个失败都留下日志，
+        //   而不是第一个失败就把后面三个的原因吞掉）
+        let classes_ok = register_class("CurSeenClipCmd", cmd_proc, hinst)
+            & register_class("CurSeenClipListener", listener_proc, hinst)
+            & register_class("CurSeenClipPanel", panel_proc, hinst)
+            & register_class("CurSeenClipPreview", preview_proc, hinst);
+        if !classes_ok {
+            log::error!("剪贴板: 窗口类注册失败，本模块本次不可用（其余功能不受影响）");
+            mark_start_done();
+            return;
+        }
 
         // 命令窗（message-only）
-        let cmd = CreateWindowExW(
+        let Some(cmd) = create_clip_window(
             WINDOW_EX_STYLE(0),
-            PCWSTR(wide("CurSeenClipCmd").as_ptr()),
-            PCWSTR(wide("clipcmd").as_ptr()),
+            "CurSeenClipCmd",
+            "clipcmd",
             WS_OVERLAPPED,
             0,
             0,
             0,
             0,
             Some(HWND_MESSAGE),
-            None,
-            Some(hinst),
-            None,
-        )
-        .expect("clip cmd window");
+            hinst,
+        ) else {
+            mark_start_done();
+            return;
+        };
         SetWindowLongPtrW(cmd, GWLP_USERDATA, mgr_ptr as isize);
 
         // 监听窗（message-only）
-        let listener = CreateWindowExW(
+        let Some(listener) = create_clip_window(
             WINDOW_EX_STYLE(0),
-            PCWSTR(wide("CurSeenClipListener").as_ptr()),
-            PCWSTR(wide("clipln").as_ptr()),
+            "CurSeenClipListener",
+            "clipln",
             WS_OVERLAPPED,
             0,
             0,
             0,
             0,
             Some(HWND_MESSAGE),
-            None,
-            Some(hinst),
-            None,
-        )
-        .expect("clip listener window");
+            hinst,
+        ) else {
+            mark_start_done();
+            return;
+        };
         SetWindowLongPtrW(listener, GWLP_USERDATA, mgr_ptr as isize);
         let _ = AddClipboardFormatListener(listener);
 
         // 面板窗
-        let panel = CreateWindowExW(
+        let Some(panel) = create_clip_window(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            PCWSTR(wide("CurSeenClipPanel").as_ptr()),
-            PCWSTR(wide("剪贴板").as_ptr()),
+            "CurSeenClipPanel",
+            "剪贴板",
             WS_POPUP | WS_CLIPCHILDREN,
             0,
             0,
             PANEL_W,
             PANEL_H,
             None,
-            None,
-            Some(hinst),
-            None,
-        )
-        .expect("clip panel window");
+            hinst,
+        ) else {
+            mark_start_done();
+            return;
+        };
         SetWindowLongPtrW(panel, GWLP_USERDATA, mgr_ptr as isize);
         mgr.panel = panel;
 
@@ -4659,21 +4722,21 @@ fn run() {
         //     （后者让多行也不自动换行，行为跟单行一致），**不带** `ES_WANTRETURN`
         //     （回车不插换行，且子类里本来就把 VK_RETURN 吃掉了 → 走粘贴）。
         let edit_w = edit_right() - edit_left();
-        let edit = CreateWindowExW(
+        let Some(edit) = create_clip_window(
             WINDOW_EX_STYLE(0),
-            PCWSTR(wide("EDIT").as_ptr()),
-            PCWSTR(wide("").as_ptr()),
+            "EDIT",
+            "",
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | ES_MULTILINE as u32 | ES_AUTOHSCROLL as u32),
             edit_left(),
             TOP_Y,
             edit_w,
             SEARCH_BOX_H,
             Some(panel),
-            None,
-            Some(hinst),
-            None,
-        )
-        .expect("clip edit window");
+            hinst,
+        ) else {
+            mark_start_done();
+            return;
+        };
         SetWindowLongPtrW(edit, GWLP_USERDATA, mgr_ptr as isize);
         SendMessageW(
             edit,
@@ -4709,25 +4772,27 @@ fn run() {
         // 预览窗（无激活，不抢焦点；★ WS_EX_TRANSPARENT 点击穿透——
         // hover 400ms 后预览弹出，用户此刻点击必须落到下面的列表行，
         // 而不是被预览窗吃掉变成死点击）
-        let preview = CreateWindowExW(
+        let Some(preview) = create_clip_window(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            PCWSTR(wide("CurSeenClipPreview").as_ptr()),
-            PCWSTR(wide("预览").as_ptr()),
+            "CurSeenClipPreview",
+            "预览",
             WS_POPUP,
             0,
             0,
             10,
             10,
             None,
-            None,
-            Some(hinst),
-            None,
-        )
-        .expect("clip preview window");
+            hinst,
+        ) else {
+            mark_start_done();
+            return;
+        };
         SetWindowLongPtrW(preview, GWLP_USERDATA, mgr_ptr as isize);
         mgr.preview = preview;
 
         CMD_HWND.set(AtomicUsize::new(cmd.0 as usize)).ok();
+        // ★ 成功也要"了结"：主线程等的是这个旗标（见 `ensure_started`）。
+        mark_start_done();
         log::info!("剪贴板: 后台线程就绪（窗口已创建）");
 
         // ★ 主线程此刻已解锁。历史元数据在这里载（纯文本行解析，毫秒级；不解码像素）。
@@ -4809,11 +4874,35 @@ fn run() {
     }
 }
 
+/// Win32 错误码 1410：窗口类已存在（重注一次是幂等的，不算失败）。
+const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+
+/// 注册窗口类；返回"这个类现在**可用**吗"。
+///
+/// ★★ 老代码是 `let _ = register_class(..)` —— 失败被彻底吞掉，紧接着的
+///   `CreateWindowExW` 必报 1407「找不到窗口类」，再被 `.expect` 打成 panic，
+///   后台线程死掉 → `CMD_HWND` 永不设置 → 主线程死等 → 进程变成没有托盘的僵尸
+///   （2026-10-12 实测）。所以这里**必须出声**，并把结论交回调用方决定降级。
+/// ★ 1410「类已存在」不算失败：类是幂等的，重注一次无副作用。
 unsafe fn register_class(
     name: &str,
     wndproc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
     hinst: HINSTANCE,
-) -> u16 {
+) -> bool {
+    // ★★★ 类名缓冲**必须**先绑到局部变量（2026-10-13 根因修复）。
+    //
+    //   `wide(name)` 返回的是一个临时 `Vec<u16>`。把它直接写进 struct literal 里的话，
+    //   它在 `let wc = ...;` 这条语句结束的**分号处**就被 drop 了，下一句
+    //   `RegisterClassExW(&wc)` 拿到的是一块**已释放**的堆地址。因为这里用的是
+    //   `.as_ptr()`（裸指针，不产生借用），借用检查器**看不见**它，编译静默通过。
+    //
+    //   后果链条（与 2026-10-12 23:11:51 的现场逐字对应）：类被注成一个乱码名字
+    //   （或注册失败）→ `CreateWindowExW("CurSeenClipPanel")` 报 1407「找不到窗口类」
+    //   → `.expect()` panic → clip-cmd 线程死 → `CMD_HWND` 永不置位 → 主线程
+    //   `ensure_started()` 死等 → 进程活着、托盘出不来、单实例互斥被占 ⇒ **僵尸**。
+    //
+    //   ★ 时好时坏也解释得通：堆刚 free 时字节通常还在，侥幸能用；被复用时才暴露。
+    let name_w = wide(name);
     let wc = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         // ★ 不用 `CS_HREDRAW | CS_VREDRAW`：这两个 class style 会在**任何**尺寸变化时
@@ -4824,10 +4913,21 @@ unsafe fn register_class(
         style: WNDCLASS_STYLES(CS_DBLCLKS.0),
         lpfnWndProc: Some(wndproc),
         hInstance: hinst,
-        lpszClassName: PCWSTR(wide(name).as_ptr()),
+        lpszClassName: PCWSTR(name_w.as_ptr()),
         ..Default::default()
     };
-    RegisterClassExW(&wc)
+    // ★ 注意返回值是 **ATOM（u16）不是 Result**：0 才是失败，失败原因要自己问
+    //   `GetLastError`（windows crate 这个绑定不做转换）。
+    if RegisterClassExW(&wc) != 0 {
+        return true;
+    }
+    let err = GetLastError().0;
+    if err == ERROR_CLASS_ALREADY_EXISTS {
+        true
+    } else {
+        log::error!("剪贴板: 窗口类 {name} 注册失败，GetLastError={err}");
+        false
+    }
 }
 
 // ── 纯函数单测（过滤 / 去重 / 淘汰 / URL 判定 / 缩略图 / 签名）──────────

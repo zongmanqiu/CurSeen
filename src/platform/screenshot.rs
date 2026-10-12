@@ -24,9 +24,7 @@ use windows::Win32::Graphics::Gdi::{
     CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, ROP_CODE,
     SRCCOPY,
 };
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-};
+use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 
 use crate::core::error::{CurSeenError, Result};
@@ -287,18 +285,29 @@ pub fn to_clipboard(shot: &Shot) -> Result<()> {
         }
         let _ = GlobalUnlock(hg);
 
-        if OpenClipboard(None).is_ok() {
+        // ★★★ 必须走进程级门禁（2026-10-13 根因修复）：`EmptyClipboard()` 会释放
+        //   剪贴板上现有的数据块，而 `clip-thumb` 线程同一时刻可能正拿着那块的指针
+        //   逐行 memcpy —— Windows 对**同进程内**的并发 `OpenClipboard` 不提供互斥
+        //   （探针实测两个线程能同时打开），不加锁就是 use-after-free。
+        //   返回值 `Some(None)` = 成功；`Some(Some(msg))` = 失败且内存已回收；
+        //   `None` = 剪贴板开不了（内存还归我们，交给下面回收）。
+        let r = crate::platform::clipboard::with_clipboard(|| {
             let _ = EmptyClipboard();
             // `SetClipboardData` 成功后剪贴板接管内存，不能再 GlobalFree。
-            let r = SetClipboardData(CF_DIB, Some(windows::Win32::Foundation::HANDLE(hg.0)));
-            let _ = CloseClipboard();
-            if r.is_err() {
+            if SetClipboardData(CF_DIB, Some(windows::Win32::Foundation::HANDLE(hg.0))).is_err() {
                 let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
-                return Err(CurSeenError::Unsupported("SetClipboardData 失败"));
+                return Some(Some("SetClipboardData 失败"));
             }
-        } else {
-            let _ = windows::Win32::Foundation::GlobalFree(Some(hg)); // OpenClipboard 失败，内存仍归我们，必须释放
-            return Err(CurSeenError::Unsupported("OpenClipboard 失败"));
+            Some(None)
+        });
+        match r {
+            Some(None) => {}
+            Some(Some(msg)) => return Err(CurSeenError::Unsupported(msg)),
+            None => {
+                // OpenClipboard 失败，内存仍归我们，必须释放
+                let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+                return Err(CurSeenError::Unsupported("OpenClipboard 失败"));
+            }
         }
     }
     Ok(())

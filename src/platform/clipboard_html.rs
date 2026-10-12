@@ -23,8 +23,8 @@ use std::sync::OnceLock;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GHND};
 
@@ -51,16 +51,6 @@ pub fn html_format() -> u32 {
     })
 }
 
-/// RAII：离开作用域时关剪贴板（与 `clipboard.rs` 同款）。
-struct Closer;
-impl Drop for Closer {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseClipboard();
-        }
-    }
-}
-
 /// RAII：离开作用域时 GlobalUnlock。
 struct Unlocker(HGLOBAL);
 impl Drop for Unlocker {
@@ -79,9 +69,8 @@ pub fn available() -> bool {
 /// 读取 "HTML Format" 的**原始字节**（含 CF_HTML 头）。失败一律 `None`
 /// （不可用 / 被占用 / 锁不上都是常态，调用方回落纯文本）。
 pub fn read() -> Option<Vec<u8>> {
-    unsafe {
-        OpenClipboard(None).ok()?;
-        let _guard = Closer;
+    // ★ 走进程级门禁：与 `clip-thumb` 的读、截图模块的写共用同一把锁（2026-10-13）。
+    crate::platform::clipboard::with_clipboard(|| unsafe {
         let fmt = html_format();
         if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
             return None;
@@ -106,7 +95,7 @@ pub fn read() -> Option<Vec<u8>> {
             .map(|p| p + 2)
             .unwrap_or(size);
         Some(raw[..end].to_vec())
-    }
+    })
 }
 
 /// 头部最小合理性：真 CF_HTML 以 `Version:` 起头且带 `StartHTML:` 偏移声明。
@@ -177,8 +166,8 @@ pub unsafe fn write_text_and_html(text: &str, html: Option<&[u8]>) {
         }
     }
 
-    if OpenClipboard(None).is_ok() {
-        let _guard = Closer;
+    // ★ 走进程级门禁（2026-10-13）：`EmptyClipboard()` 会释放别人正在读的那块内存。
+    let opened = crate::platform::clipboard::with_clipboard(|| unsafe {
         let _ = EmptyClipboard();
         let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hg.0)));
         if let Some(h) = html_hg.take() {
@@ -188,7 +177,10 @@ pub unsafe fn write_text_and_html(text: &str, html: Option<&[u8]>) {
             }
         }
         set_self_shield_opened();
-    } else {
+        Some(())
+    })
+    .is_some();
+    if !opened {
         let _ = GlobalFree(Some(hg));
         if let Some(h) = html_hg {
             let _ = GlobalFree(Some(h));
