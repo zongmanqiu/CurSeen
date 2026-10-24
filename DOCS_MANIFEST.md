@@ -15,11 +15,12 @@
 | 1 | `AGENTS.md` | 项目规则变化；发现新的环境坑 / 源码陷阱；新增硬约束 | `test_docs_checks_the_manifest_files_exist` |
 | 2 | `目录结构说明.md` | 增删源码文件或目录；改变某个文件的职责；分层变动 | `test_structure_doc_lists_every_source_module` |
 | 3 | `DOCS_MANIFEST.md`（本文件） | 清单本身变化时 | `test_docs_checks_the_manifest_files_exist` |
-| 4 | `patches/wind-ui-rust-0.20.0/PATCHES.md` | **任何**对 `.3rdParty/wind-ui-rust-0.20.0` 的修改（编号递增）。0.19 的 `PATCHES.md` 是历史归档，只增不改 | `test_patch_record_has_a_section_for_every_windui_patch` |
+| 4 | `patches/wind-ui-rust-0.30.0/PATCHES.md` | **任何**对 `.3rdParty/wind-ui-rust-0.30.0` 的修改（编号递增）。0.19 / 0.20 时代的历史章节原样并入本表，只增不改 | `test_patch_record_has_a_section_for_every_windui_patch` |
 | 5 | `README.md` | 项目总说明：顶层目录树 / 技术栈 / 构建 / 架构描述变化 | （`Cargo.toml` 的 `readme` 字段依赖其存在） |
 | 6 | `HISTORY.md` | 发新版本（**顶部**按主题追加**要点**，旧内容不改）；踩到的坑写进 `docs/踩坑记录*.md`。规范见《开发指南.md》§五 | `test_docs_checks_the_manifest_files_exist` + `test_controlled_docs_stay_concise` |
 | 7 | `THIRD-PARTY-NOTICES.md` | 新增/移除/更换任何第三方依赖，或依赖版本变化 | `test_docs_checks_the_manifest_files_exist` |
 | 8 | `docs/DESIGN.md` | 功能取舍、分层架构、防打架约定、UI 分类、路线图变化（含视觉令牌 / 卡片结构结论）；体积策略变化（§10：方法 / 实测 / 终点判据） | `test_docs_checks_the_manifest_files_exist` |
+| 8b | `docs/DESIGN_ADOPTION.md` | **外部规范 / 通用建议的裁决结果**：采纳了哪条、落到哪个文件、不采纳的理由、已知缺口。读了新规范先查这里，已裁决的条目不重新讨论 | `test_docs_checks_the_manifest_files_exist` |
 | 9 | `docs/PLATFORM_NOTES.md` | **新测出来的** Win32 行为（凭印象下结论必须先写探针测过） | （门禁未强制；但凡拿 Win32 当依据先查这里） |
 | 10 | `docs/RELEASE_CHECKLIST.md` | 发版流程 / 门禁步骤 / 自动更新地址规则变化 | （发版时逐条打勾） |
 | 11 | `build/build_readme.md` | 构建流程、脚本职责、环境变量、常见坑变化 | `test_docs_checks_the_manifest_files_exist` |
@@ -28,7 +29,7 @@
 | 13b | `docs/踩坑记录-2.md` | 同上，本册 §六–§十。**分册规则：册数不限，每册 ≤ 500 行，写满就再开一册**（章节编号跨册唯一，源码注释的 `《踩坑记录》§N` 按编号查） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise`（发现式扫 `踩坑记录*.md`） |
 | 13c | `docs/踩坑记录-3.md` | 同上，本册 §十一–§十五（录屏 MF/DXGI、编译成本与测试分层、SinkWriter 节流、被否定的槽位池、moov 单点）。**分册规则：每册 ≤ 500 行，写满再开一册** | 同上 |
 | 13d | `docs/踩坑记录-4.md` | 同上，本册 §十六起：录制内核（单文件方案）的失败根因链、音频内容驱动时间线、看门狗与限时收尾；**§十七 录制的结构性隔离**（采集/编码解耦 + 出进程隔离 `curseen-rec.exe`） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise` |
-| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.15–17.19**；**§二十 覆盖层两套 DPI 换算源分家（特效不落鼠标）** | 同上 |
+| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.15–17.19**；**§二十 覆盖层两套 DPI 换算源分家（特效不落鼠标）**；**§二十六 贴图长图放大图片不放大：系统跟踪尺寸收口（windui 补丁 095）** | 同上 |
 | 14 | `docs/UI_COMPONENTS.md` | 面板行组件库（`card.rs` 正本）变化；脚本参数类型→控件映射变化；Lua 脚本契约 / 绘图指令 / 宿主 API 变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 15 | `assets/README.md` | 资源目录版图（归谁 / 放什么）变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 16 | `assets/Sounds/README.md` | 音频格式白名单 / 配置键 / 版权归属变化 | （凡动 `SUPPORTED_EXT` 必读） |
@@ -41,9 +42,9 @@
 | 19 | `examples/README.md` | 离屏探针增删（整目录职责变化） | （`Cargo.toml` 的 `[[example]]` 必须同步） |
 | 20 | `开发指南.md` | 开发/发版流程、文档同步对照、提交前清单、HISTORY 登记规范、工程纪律变化 | `test_docs_checks_the_manifest_files_exist`（修改流程唯一正本） |
 
-> **成品 `docs/` 只收这六份**：`DESIGN.md` / `PLATFORM_NOTES.md` / `RELEASE_CHECKLIST.md` /
-> `UI_COMPONENTS.md` / `踩坑记录.md` / `踩坑记录-2.md`。新增其它文档要先在这里登记，否则
-> 根 `.md` 白名单门禁会红。（踩坑记录可继续分册：`踩坑记录-3.md`……登记一条即可。）
+> **成品 `docs/` 只收这七份**：`DESIGN.md` / `DESIGN_ADOPTION.md` / `PLATFORM_NOTES.md` /
+> `RELEASE_CHECKLIST.md` / `UI_COMPONENTS.md` / `踩坑记录.md` / `踩坑记录-2.md`。新增其它文档
+> 要先在这里登记，否则根 `.md` 白名单门禁会红。（踩坑记录可继续分册：`踩坑记录-3.md`……登记一条即可。）
 
 ## 二、构建脚本（也是文档的一部分，改了要同步 `build/build_readme.md`）
 

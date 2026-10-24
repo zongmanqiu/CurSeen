@@ -311,13 +311,22 @@ impl Runtime {
             outcome.stats.no_motion,
             outcome.stats.ambiguous
         );
-        let shot = Shot {
+        // ③ 一次转换到位：画布 BGRA → 非预乘 RGBA（原地换序 + 补 α，不另分配）。
+        //    旧路为贴图环借用转一份、落盘时再把原帧转一遍 —— 长画布（1920×10000 ≈ 77 MB）
+        //    上这两趟都随高度线性涨。转换后的这一份位图是剪贴板 / 留档 / 贴图环的**同一份**
+        //    数据，环只多拿一个 `Rc` 指针。
+        let Some(bmp) = crate::core::backdrop::shot_to_bitmap_owned(Shot {
             w: w as i32,
             h: h as i32,
             bgra,
+        }) else {
+            log::warn!("长截图产物尺寸非法（{w}×{h}），无法交付");
+            self.action_notify.show("长截图失败（尺寸非法）");
+            return;
         };
-        // ③ 剪贴板。写成功就记序列号（贴图轮询别把自家产物当"外部复制"再读一遍）。
-        if let Err(e) = screenshot::to_clipboard(&shot) {
+        let bmp = Rc::new(bmp);
+        // ④ 剪贴板。写成功就记序列号（贴图轮询别把自家产物当"外部复制"再读一遍）。
+        if let Err(e) = screenshot::to_clipboard_rgba(&bmp) {
             log::warn!("长截图写入剪贴板失败: {e}");
             self.action_notify.show("长截图写入剪贴板失败");
         } else {
@@ -325,36 +334,32 @@ impl Runtime {
             self.own_clip_seq = Some(n);
             self.clip_seq = n;
         }
-        // ④ 入贴图环，带原位（用户口径 2：凡是我们功能截下来的图都要记住"原来在哪"）。
-        //    失败只跳过入环：图已经在剪贴板里，主产物不因环而失败。
-        if let Some(bmp) = crate::core::backdrop::shot_to_bitmap(&shot) {
-            let origin = Rect {
-                x: rect.x as f32,
-                y: rect.y as f32,
-                w: rect.w as f32,
-                h: rect.h as f32,
-            };
-            self.snap
-                .note_shot(snap::PinContent::Image(Rc::new(bmp)), origin);
-        } else {
-            log::warn!("长截图产物无法转入贴图环（尺寸非法）");
-        }
-        // ⑤ 留档（与普通截图同一个目录）。
+        // ⑤ 入贴图环，带原位（用户口径 2：凡是我们功能截下来的图都要记住"原来在哪"）。
+        let origin = Rect {
+            x: rect.x as f32,
+            y: rect.y as f32,
+            w: rect.w as f32,
+            h: rect.h as f32,
+        };
+        self.snap
+            .note_shot(snap::PinContent::Image(Rc::clone(&bmp)), origin);
+        // ⑥ 留档（与普通截图同一个目录）。同一份位图直接走快档（用户看不到这个文件，
+        //    长图默认档编码尤其慢）。
         let dir = crate::core::paths::module_temp_dir(crate::core::paths::MODULE_SCREENSHOT);
         let path = dir.join(format!("CurSeen_scroll_{}.png", timestamp()));
-        let saved = screenshot::save_png(&shot, &path).is_ok();
-        // ⑥ 反馈：白闪 + 中央浮字（两条通道并存，与截图编辑态完成时同款）。
+        let saved = screenshot::save_png_rgba_fast(&bmp, &path).is_ok();
+        // ⑦ 反馈：白闪 + 中央浮字（两条通道并存，与截图编辑态完成时同款）。
         self.action_notify.flash();
         self.action_notify.show(&format!(
             "长截图 {}×{} 已保存到　temp\\{}",
-            shot.w,
-            shot.h,
+            w,
+            h,
             crate::core::paths::MODULE_SCREENSHOT
         ));
         log::info!(
             "长截图完成：{}×{}（留档={saved}，{}）",
-            shot.w,
-            shot.h,
+            w,
+            h,
             path.display()
         );
     }
@@ -565,5 +570,290 @@ mod tests {
     fn poll_scroll_without_a_session_is_a_noop() {
         let mut rt = drawing_only();
         assert!(!rt.poll_scroll());
+    }
+
+    /// 长截图交付：一次转换、三处共享 —— 剪贴板 / 留档 / 贴图环必须是同一张图。
+    ///
+    /// 画布用 GDI 帧的不变量 α=255（`scroll_capture` 拼的都是 `grab` 出来的帧），
+    /// 走**真实**的 `deliver_scroll`：剪贴板读回、PNG 解码、环内容三者都要与源像素
+    /// 逐字节一致。新路径里换序、行序、DIB 自下而上任一处理错，这条会红。
+    #[cfg(windows)]
+    #[test]
+    fn deliver_scroll_produces_identical_clipboard_archive_and_ring() {
+        let mut rt = drawing_only();
+        let (w, h) = (4_usize, 3_usize);
+        let mut bgra = Vec::with_capacity(w * h * 4);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let b = (0x10 + x * 0x11) as u8;
+                let g = (0x20 + y * 0x21) as u8;
+                let r = (0x30 + (x + y) * 0x07) as u8;
+                bgra.extend_from_slice(&[b, g, r, 0xFF]);
+                rgba.extend_from_slice(&[r, g, b, 0xFF]);
+            }
+        }
+
+        let dir = crate::core::paths::module_temp_dir(crate::core::paths::MODULE_SCREENSHOT);
+        let scroll_pngs = || -> Vec<std::path::PathBuf> {
+            std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("CurSeen_scroll_"))
+                })
+                .collect()
+        };
+        let existing = scroll_pngs();
+
+        rt.deliver_scroll(
+            ScrollOutcome {
+                stats: crate::platform::scroll_capture::ScrollStats::default(),
+                reason: EndReason::UserStop,
+                error: None,
+                canvas: Some((w, h, bgra.clone())),
+            },
+            ScreenRect::new(10, 20, w as i32, h as i32),
+        );
+
+        // ① 剪贴板：读回与画布逐字节相同。
+        let mut back = None;
+        for _ in 0..20 {
+            if let Some(s) = crate::platform::clipboard::get_image() {
+                back = Some(s);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let back = back.expect("读回长截图剪贴板");
+        assert_eq!((back.w, back.h), (w as i32, h as i32));
+        assert_eq!(back.bgra, bgra, "剪贴板像素（含通道与行序）必须与画布一致");
+
+        // ② 留档：本次新出现的 CurSeen_scroll_*.png 解码后必须与画布 RGBA 一致。
+        let fresh: Vec<_> = scroll_pngs()
+            .into_iter()
+            .filter(|p| !existing.contains(p))
+            .collect();
+        assert_eq!(fresh.len(), 1, "本次交付应恰好落一张 PNG");
+        let bytes = std::fs::read(&fresh[0]).expect("读留档");
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("读 PNG 头");
+        let mut buf = vec![0_u8; reader.output_buffer_size().expect("输出缓冲可算")];
+        let info = reader.next_frame(&mut buf).expect("解码 PNG");
+        buf.truncate(info.buffer_size());
+        assert_eq!((info.width, info.height), (w as u32, h as u32));
+        assert_eq!(buf, rgba, "留档像素必须与画布一致");
+        let _ = std::fs::remove_file(&fresh[0]);
+
+        // ③ 贴图环：同一张图（新路径只复制了 Rc）。
+        match rt.snap.ring_back(0) {
+            Some(snap::PinContent::Image(rc)) => {
+                assert_eq!(rc.rgba, rgba, "贴图环内容必须与画布一致");
+            }
+            _ => panic!("长截图产物应进入贴图环"),
+        }
+        assert!(rt.action_notify.flashing(), "交付必须触发白闪");
+    }
+
+    /// 生产路径量具：长截图交付的旧/新序列，两个画布高度把固定项与面积项分开。
+    ///
+    /// 跑法：`PERF_ROUNDS=200 cargo test --release --lib perf_probe_scroll_deliver -- --ignored --nocapture --test-threads=1`
+    /// `PERF_REVERSE=1` 交换同轮内旧/新序列的先后，排除"后跑吃热缓存"。
+    ///
+    /// 旧序列 = 借用转换（给环）+ `to_clipboard(&shot)` + `save_png_fast(shot)`；
+    /// 新序列 = 消费转换 + `to_clipboard_rgba` + `save_png_rgba_fast`。每一臂都是生产
+    /// 函数；画布由一次真实抓屏的行循环铺成（相邻 1080 行块交替翻转，避免整块重复把
+    /// PNG 压缩率撑得太好看）。
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn perf_probe_scroll_deliver() {
+        use std::time::{Duration, Instant};
+
+        fn tiled(base: &Shot, out_h: usize) -> Shot {
+            let src_w = base.w as usize;
+            let src_h = base.h as usize;
+            let mut bgra = Vec::with_capacity(src_w * out_h * 4);
+            for y in 0..out_h {
+                let block = y / src_h;
+                let within = y % src_h;
+                let sy = if block.is_multiple_of(2) {
+                    within
+                } else {
+                    src_h - 1 - within
+                };
+                let start = sy * src_w * 4;
+                bgra.extend_from_slice(&base.bgra[start..start + src_w * 4]);
+            }
+            Shot {
+                w: base.w,
+                h: out_h as i32,
+                bgra,
+            }
+        }
+
+        fn report(label: &str, v: &mut [Duration]) {
+            v.sort();
+            let n = v.len();
+            if n == 0 {
+                println!("{label:<28} 无样本");
+                return;
+            }
+            let mean = v.iter().map(|d| d.as_secs_f64()).sum::<f64>() / n as f64 * 1e3;
+            println!(
+                "{label:<28} median {:7.2} ms  mean {:7.2}  p95 {:7.2}  (n={n})",
+                v[n / 2].as_secs_f64() * 1e3,
+                mean,
+                v[(n * 95 / 100).min(n - 1)].as_secs_f64() * 1e3
+            );
+        }
+
+        let rounds: usize = std::env::var("PERF_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3)
+            .max(1);
+        let reverse = std::env::var("PERF_REVERSE").is_ok();
+        let r = crate::platform::display::virtual_screen();
+        let base = crate::platform::screenshot::grab(r).expect("预热抓屏");
+        let heights = [r.h as usize, r.h as usize * 6];
+
+        /// 剪贴板是共享资源（另一个进程短暂占用是常态）：失败重试，样本只记成功那一次；
+        /// 持续占用就丢这一臂的样本（不能把 10 ms 的退避睡进读数）。
+        fn timed_clip(mut write: impl FnMut() -> bool) -> Option<Duration> {
+            for _ in 0..100 {
+                let t = Instant::now();
+                if write() {
+                    return Some(t.elapsed());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            None
+        }
+
+        for height in heights {
+            let canvas = tiled(&base, height);
+            println!("--- {}×{} ---", canvas.w, canvas.h);
+            let mut old_total = Vec::new();
+            let mut old_convert = Vec::new();
+            let mut old_clip = Vec::new();
+            let mut old_save = Vec::new();
+            let mut new_total = Vec::new();
+            let mut new_convert = Vec::new();
+            let mut new_clip = Vec::new();
+            let mut new_save = Vec::new();
+            let (mut old_len, mut new_len) = (0_u64, 0_u64);
+            let mut skipped = 0;
+
+            for round in 0..rounds {
+                let old_path =
+                    std::env::temp_dir().join(format!("curseen_scroll_old_{height}_{round}.png"));
+                let new_path =
+                    std::env::temp_dir().join(format!("curseen_scroll_new_{height}_{round}.png"));
+
+                let run_old = |old_total: &mut Vec<Duration>,
+                               old_convert: &mut Vec<Duration>,
+                               old_clip: &mut Vec<Duration>,
+                               old_save: &mut Vec<Duration>|
+                 -> bool {
+                    let shot = canvas.clone();
+                    let t0 = Instant::now();
+                    let bmp = crate::core::backdrop::shot_to_bitmap(&shot).expect("借用转换");
+                    let t1 = Instant::now();
+                    let clip = timed_clip(|| screenshot::to_clipboard(&shot).is_ok());
+                    let t2 = Instant::now();
+                    screenshot::save_png_fast(shot, &old_path).expect("旧留档");
+                    let t3 = Instant::now();
+                    drop(bmp);
+                    let Some(clip) = clip else { return false };
+                    old_convert.push(t1 - t0);
+                    old_clip.push(clip);
+                    old_save.push(t3 - t2);
+                    old_total.push(t3 - t0);
+                    true
+                };
+                let run_new = |new_total: &mut Vec<Duration>,
+                               new_convert: &mut Vec<Duration>,
+                               new_clip: &mut Vec<Duration>,
+                               new_save: &mut Vec<Duration>|
+                 -> bool {
+                    let shot = canvas.clone();
+                    let t0 = Instant::now();
+                    let bmp = Rc::new(
+                        crate::core::backdrop::shot_to_bitmap_owned(shot).expect("消费转换"),
+                    );
+                    let t1 = Instant::now();
+                    let clip = timed_clip(|| screenshot::to_clipboard_rgba(&bmp).is_ok());
+                    let t2 = Instant::now();
+                    screenshot::save_png_rgba_fast(&bmp, &new_path).expect("新留档");
+                    let t3 = Instant::now();
+                    drop(bmp);
+                    let Some(clip) = clip else { return false };
+                    new_convert.push(t1 - t0);
+                    new_clip.push(clip);
+                    new_save.push(t3 - t2);
+                    new_total.push(t3 - t0);
+                    true
+                };
+
+                let both = if reverse {
+                    let new_ok = run_new(
+                        &mut new_total,
+                        &mut new_convert,
+                        &mut new_clip,
+                        &mut new_save,
+                    );
+                    let old_ok = run_old(
+                        &mut old_total,
+                        &mut old_convert,
+                        &mut old_clip,
+                        &mut old_save,
+                    );
+                    new_ok && old_ok
+                } else {
+                    let old_ok = run_old(
+                        &mut old_total,
+                        &mut old_convert,
+                        &mut old_clip,
+                        &mut old_save,
+                    );
+                    let new_ok = run_new(
+                        &mut new_total,
+                        &mut new_convert,
+                        &mut new_clip,
+                        &mut new_save,
+                    );
+                    old_ok && new_ok
+                };
+                if !both {
+                    skipped += 1;
+                }
+
+                old_len = std::fs::metadata(&old_path).map(|m| m.len()).unwrap_or(0);
+                new_len = std::fs::metadata(&new_path).map(|m| m.len()).unwrap_or(0);
+                if round == 0 {
+                    let a = std::fs::read(&old_path).expect("读旧留档");
+                    let b = std::fs::read(&new_path).expect("读新留档");
+                    assert_eq!(a, b, "快档产物的字节必须与旧路完全相同");
+                }
+                let _ = std::fs::remove_file(&old_path);
+                let _ = std::fs::remove_file(&new_path);
+            }
+
+            println!(
+                "留档字节 old={old_len} new={new_len}（round 0 逐字节相同；丢弃 {skipped} 轮）"
+            );
+            report("旧 total", &mut old_total);
+            report("  旧 convert(借用)", &mut old_convert);
+            report("  旧 clipboard(BGRA)", &mut old_clip);
+            report("  旧 save_png_fast", &mut old_save);
+            report("新 total", &mut new_total);
+            report("  新 convert(消费)", &mut new_convert);
+            report("  新 clipboard(RGBA)", &mut new_clip);
+            report("  新 save_png_rgba_fast", &mut new_save);
+        }
     }
 }

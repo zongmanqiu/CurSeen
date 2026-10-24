@@ -39,7 +39,7 @@ main\build\6_deploy.bat      REM 只是想刷新 build\
 
 ```
 # 每行：name=url|marker-file
-wind-ui-rust-0.20.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.20.0|src/core.rs
+wind-ui-rust-0.30.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.30.0|src/core.rs
 ```
 
 - `name` 必须与 `.3rdParty/<name>/` 目录名、`main/Cargo.toml` 的 path 依赖**逐字对应**
@@ -68,7 +68,7 @@ wind-ui-rust-0.20.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/ref
 │   ├── .cargo\config.toml     ← target-dir = ../temp/target
 │   └── ...
 ├── .3rdParty\                 ← path 依赖（不在仓库里；由 ② 下载、③ 打补丁）
-│   └── wind-ui-rust-0.20.0\
+│   └── wind-ui-rust-0.30.0\
 ├── temp\target\               ← cargo 中间产物（不在仓库里）
 └── build\                     ← 可直接分发：exe + LICENSE + licenses\（含全部第三方
                                   许可文件） + assets\ + 运行期数据（不在仓库里）
@@ -145,7 +145,7 @@ build/
 | `sync_assets.py` | `main/assets/` → `<项目根>/build/assets/` **单向**同步（只增和覆盖，**从不删**——`build/assets/` 是运行期数据目录，用户会在里面放自己的脚本/音效） |
 | `gate.py` | 按需跑测试组（`python build/gate.py config runtime`），省的是**信号**不是时间 |
 | `layering_scan.py` | 分层体检（只读，`python build/layering_scan.py` → 「违规 0 处」） |
-| `hygiene_scan.py` | 静态异味体检（只读，`python build/hygiene_scan.py` → 「违规 0 处」）：硬编码绝对路径 / 调试残留（`println!` 等）/ 未完成标记（`TODO:`·`FIXME:`·`XXX:`）；`#[cfg(test)]` 之后与纯注释性提及自动豁免 |
+| `hygiene_scan.py` | 静态异味体检（只读，`python build/hygiene_scan.py` → 「违规 0 处」）：硬编码绝对路径 / 调试残留（`println!` 等）/ 未完成标记（`TODO:`·`FIXME:`·`XXX:`）/ 裸 `OpenClipboard` / struct literal 里的临时宽字符缓冲 / **指针类 unsafe 缺 `// SAFETY:`** / **本机真实路径泄漏（全树，第 1~6 查之外唯一扫 `main/` 全部文本文件的检查）**；`#[cfg(test)]` 之后与纯注释性提及自动豁免 |
 | `boot_check.py` | 启动冒烟：跑一次 exe，确认日志里没有 `[FATAL]` |
 | `check_deps.ps1` | 依赖体检（PowerShell） |
 | `deps.txt` | 第三方源码下载登记表（② 消费，格式见第二节；ASCII-only） |

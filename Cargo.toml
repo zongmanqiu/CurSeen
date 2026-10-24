@@ -1,6 +1,6 @@
 [package]
 name = "curseen-ui"
-version = "2.0.4"
+version = "2.0.5"
 edition = "2021"
 rust-version = "1.94"
 # ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。
@@ -109,7 +109,7 @@ required-features = ["icon-gen"]
 
 [dependencies]
 # ── UI 框架（本地 path 依赖；含 CurSeen 补丁 001：分层覆盖窗） ──
-windui = { path = "../.3rdParty/wind-ui-rust-0.20.0", version = "0.20.0", default-features = false, features = ["layered"] }
+windui = { path = "../.3rdParty/wind-ui-rust-0.30.0", version = "0.30.0", default-features = false, features = ["layered"] }
 
 # ── 序列化：配置持久化 ──
 serde = { version = "1", features = ["derive"] }

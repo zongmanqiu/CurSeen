@@ -213,7 +213,25 @@ impl TopmostKeeper {
     }
 
     /// 对账一次：让覆盖层处在"该在的位置"。幂等——状态正确时不调用任何 OS API。
-    pub fn reconcile(&mut self) {
+    ///
+    /// `overlay_parked` = 覆盖层当前休眠（没有像素在屏上，见 `runtime::overlay` 的缓冲
+    /// 休眠）。此时**不碰覆盖层**：抬一个全透明窗口既没有视觉收益，还会和 Quicker、
+    /// 任务管理器之类的置顶窗每 250ms 抢一次 z 序（日志里成串的"重新插回置顶带顶部"）。
+    /// 工具窗（GIF 控件条、放大镜）仍照常守——它们可能正被用户操作。
+    pub fn reconcile(&mut self, overlay_parked: bool) {
+        if overlay_parked {
+            if self.always_on_top {
+                self.enforce_aux_windows();
+            }
+            // 休眠期间覆盖层可能被别的窗口压到任何位置：唤醒后第一拍按真实 z 序重新
+            // 判断，而不是拿休眠前的旧账继续退避/让位。
+            self.yielded = false;
+            self.menu_yield = None;
+            self.last_cover = None;
+            self.strikes = 0;
+            return;
+        }
+
         let Some(hwnd) = self.resolve() else {
             return; // 覆盖层还没建出来
         };
@@ -1043,6 +1061,34 @@ mod tests {
         unsafe {
             let _ = UnregisterClassW(windows::core::PCWSTR(cls.as_ptr()), Some(hinst.into()));
         }
+    }
+
+    /// ★★ 覆盖层休眠时不得再抢 z 序（2026-10-24 用户口径"全关时还有东西在跑"）。
+    ///
+    /// 休眠态的覆盖层是全透明的、屏上没有一个像素；此时每 250ms 扫描遮挡并
+    /// `SetWindowPos` 抬升，只会和 Quicker 等置顶窗反复争抢（日志成串）。判据必须
+    /// 在定位窗口之前短路，且工具窗守卫要留在短路分支里（放大镜/控件条可能正被用）。
+    #[test]
+    fn parked_overlay_short_circuits_before_resolving_the_window() {
+        let src = production_src();
+        let parked_at = src.find("if overlay_parked {").unwrap_or(usize::MAX);
+        let resolve_at = src
+            .find("let Some(hwnd) = self.resolve()")
+            .unwrap_or(usize::MAX);
+        assert!(
+            parked_at < resolve_at,
+            "休眠短路必须写在 resolve 之前，否则仍会枚举窗口/抢 z 序"
+        );
+        let block = &src[parked_at..resolve_at];
+        assert!(
+            block.contains("self.enforce_aux_windows();"),
+            "休眠时工具窗（放大镜/控件条）仍要守"
+        );
+        assert!(block.contains("return;"), "短路分支必须直接返回");
+        assert!(
+            !block.contains("cover_above") && !block.contains("raise_to("),
+            "休眠分支里不该出现任何覆盖层抬升/遮挡扫描"
+        );
     }
 
     /// 退避参数的自洽性：重试周期必须大于快抢次数，否则退避形同虚设。

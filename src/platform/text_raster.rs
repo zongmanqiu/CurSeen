@@ -180,6 +180,10 @@ pub fn render_text(text: &str, max_w: i32, scale: f32) -> Option<Shot> {
 
         // ③ 取回像素（BGRA，自上而下）。
         let mut bgra = vec![0_u8; total];
+        // SAFETY: `bits` 是 `CreateDIBSection` 成功返回的数据区指针，大小正是上面
+        // 按 `biSizeImage = w*h*4` 申请的 `total` 字节；`bgra` 也刚好 `total` 字节。
+        // 源（DIB）与目的（本地 Vec）是两块独立内存，**不重叠**；`w/h <= 16384`
+        // 已在上一步挡掉溢出。
         std::ptr::copy_nonoverlapping(bits as *const u8, bgra.as_mut_ptr(), total);
         for px in bgra.chunks_exact_mut(4) {
             px[3] = 255;

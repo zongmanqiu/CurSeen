@@ -7,12 +7,32 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::error::{CurSeenError, Result};
+
+/// 父目录 fsync 的实现，由 `platform` 在启动时注册（见 [`Config::save`] 第 ④ 步）。
+///
+/// ★ 用注入而不是直接调 `platform::win_util::sync_dir`：依赖方向是
+///   `core ← platform`，`core` 反向引用 `platform` 就是分层违规（AGENTS.md 第三节）。
+///   抓屏那条路（`core::backdrop::Backdrop::capture` 收一个抓屏函数）是同一个手法。
+/// 未注册时（单测 / 平台未提供）跳过该步——见 `save` 里的说明。
+static DIR_SYNC: OnceLock<fn(&Path) -> bool> = OnceLock::new();
+
+/// 注册父目录 fsync 实现。幂等：重复注册保留**先注册**的那个（钩子只应有一个实现）。
+pub fn set_dir_sync(f: fn(&Path) -> bool) {
+    let _ = DIR_SYNC.set(f);
+}
+
+/// 测试用：钩子是否已注册（避免测试之间互相污染时无法判因）。
+#[cfg(test)]
+pub(crate) fn dir_sync_registered() -> bool {
+    DIR_SYNC.get().is_some()
+}
 
 /// 五个鼠标按键的键名。`ripple_bindings` / `sound_bindings` 的键就是它，
 /// 面板子卡的展开态 id（`ripple.<key>` / `sound.<key>`）也由它派生。
@@ -3079,19 +3099,62 @@ impl Config {
                     Ok(cfg)
                 }
             },
-            Err(e) => Err(CurSeenError::Io(e)),
+            // ★ 带上路径与操作名：`From<io::Error>` 的自动转换在这里会把"读的是
+            //   config.json"这件事抹掉，日志里只剩 `io error: ...`。
+            Err(e) => Err(CurSeenError::io_at(&path, "read", e)),
         }
     }
 
-    /// 写盘。原子写：写 `.tmp` → `rename` 覆盖。
+    /// 写盘。**耐久原子写**：临时文件 → 文件 fsync → 原子替换 → 父目录 fsync。
+    ///
+    /// 四步缺一不可（总纲 §7.2）：
+    ///   ① 写临时文件——直接覆写的话，写到一半断电就留下一个 0 字节的 `config.json`；
+    ///   ② **文件 fsync**——`rename` 只保证"目录项原子切换"，不保证数据已落盘，
+    ///      少了这步断电后可能读到新名字 + 旧内容/半截内容；
+    ///   ③ `rename` 覆盖（同分区原子替换，Windows 上即 `MoveFileEx(REPLACE_EXISTING)`）；
+    ///   ④ **父目录 fsync**——让 ③ 这个目录项本身也落盘。
+    ///
+    /// ★ 第 ④ 步由 [`set_dir_sync`] 注入：`core` 不得碰 Win32（分层硬规则），而目录
+    ///   fsync 必须 `CreateFileW` + `GENERIC_WRITE`。**未注册时跳过**——目录项丢了
+    ///   只是"回到上一版配置"，而第 ①② 步保证了它永远是**完整的一版**，不会损坏。
     pub fn save(&self) -> Result<()> {
         let dir = Self::config_dir();
-        fs::create_dir_all(&dir)?;
         let path = Self::config_path();
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(&tmp, &json)?;
-        fs::rename(&tmp, &path)?;
+        Self::write_durable(&dir, &path, json.as_bytes())
+    }
+
+    /// 耐久原子写（四步见 [`Config::save`] 的文档）。
+    ///
+    /// 抽成独立函数是为了**可测**：`Config::save()` 的路径由 `core::paths` 决定
+    /// （exe 相对，测试里改不动，也不该在测试里真写一次用户配置），而这条序列
+    /// 必须在临时目录里被真的跑一遍。
+    fn write_durable(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+        fs::create_dir_all(dir).map_err(|e| CurSeenError::io_at(dir, "create_dir_all", e))?;
+        let tmp = path.with_extension("json.tmp");
+        // ① + ②：同一个句柄写完立刻 fsync（`File::sync_all` 需要写权限，
+        //    所以这里用 `OpenOptions::write` 而不是 `fs::write`）。
+        {
+            use std::io::Write;
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(|e| CurSeenError::io_at(&tmp, "write", e))?;
+            f.write_all(bytes)
+                .map_err(|e| CurSeenError::io_at(&tmp, "write", e))?;
+            f.sync_all()
+                .map_err(|e| CurSeenError::io_at(&tmp, "fsync", e))?;
+        }
+        // ③
+        fs::rename(&tmp, path).map_err(|e| CurSeenError::io_at(path, "rename", e))?;
+        // ④：失败只告警——"锦上添花的目录 fsync"绝不许反过来毁掉整条保存路径。
+        if let Some(sync) = DIR_SYNC.get() {
+            if !sync(dir) {
+                log::warn!("父目录 fsync 失败（{}）：本次保存可能不耐久", dir.display());
+            }
+        }
         Ok(())
     }
 
@@ -4625,6 +4688,86 @@ mod tests {
         let read: Config = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read, cfg);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── 耐久原子写（`write_durable`，总纲 §7.2）─────────────────────────────
+    //
+    // 钩子是进程级的一次性注册，所以用静态计数器 + 静态返回值来"遥控"假实现；
+    // 测试按 `--test-threads=1` 跑（开发指南第四节），不存在交错。
+
+    static HOOK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static HOOK_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    static HOOK_DIR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    fn fake_dir_sync(dir: &Path) -> bool {
+        HOOK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut g) = HOOK_DIR.lock() {
+            *g = Some(dir.to_string_lossy().into_owned());
+        }
+        HOOK_OK.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 四步都要真的发生：内容逐字节一致、临时文件不留残骸、父目录被同步过。
+    #[test]
+    fn durable_write_syncs_file_and_dir() {
+        let dir = std::env::temp_dir().join("curseen_test_durable");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+
+        set_dir_sync(fake_dir_sync);
+        assert!(
+            dir_sync_registered(),
+            "钩子注册后必须可见（幂等：只保留先注册的）"
+        );
+        HOOK_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        let before = HOOK_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+
+        let bytes = b"{\"hello\":\"world\"}";
+        Config::write_durable(&dir, &path, bytes).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes, "落盘内容必须逐字节一致");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "临时文件必须已被 rename 掉，不能留在目录里"
+        );
+        assert_eq!(
+            HOOK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before + 1,
+            "父目录 fsync 必须被调用一次"
+        );
+        let seen = HOOK_DIR.lock().unwrap().clone().unwrap_or_default();
+        assert_eq!(
+            std::path::Path::new(&seen),
+            dir,
+            "同步的必须是配置所在目录，不是别的路径"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 目录 fsync 失败**不得**让保存失败——它是锦上添花的一步。
+    #[test]
+    fn durable_write_survives_dir_sync_failure() {
+        let dir = std::env::temp_dir().join("curseen_test_durable_fail");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+
+        set_dir_sync(fake_dir_sync);
+        HOOK_OK.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        Config::write_durable(&dir, &path, b"{\"a\":1}").unwrap();
+        assert!(path.exists(), "目录 fsync 失败也必须留下完整的新文件");
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}");
+        HOOK_OK.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 错误要带路径与操作名：日志里只有 `io error: ...` 是没法排查的（总纲 §9.2）。
+    #[test]
+    fn io_error_carries_path_and_op() {
+        let e = CurSeenError::io_at("/tmp/config.json", "rename", std::io::Error::other("x"));
+        let msg = e.to_string();
+        assert!(msg.contains("rename"), "操作名要在消息里：{msg}");
+        assert!(msg.contains("config.json"), "路径要在消息里：{msg}");
     }
 
     #[test]

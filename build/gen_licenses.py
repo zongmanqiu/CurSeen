@@ -59,8 +59,8 @@ MAIN_FILES = [
 # (nnnoiseless used to be here too; since 2026-09-28 it is a plain crates.io
 #  dependency, so its COPYING travels via THIRD-PARTY-LICENSES.txt instead.)
 LICENSE_BUNDLE = [
-    ("windui-LICENSE-MIT.txt", ".3rdParty/wind-ui-rust-0.20.0/LICENSE-MIT", "windui 0.20.0 (MIT)"),
-    ("windui-LICENSE-APACHE.txt", ".3rdParty/wind-ui-rust-0.20.0/LICENSE-APACHE", "windui 0.20.0 (Apache-2.0)"),
+    ("windui-LICENSE-MIT.txt", ".3rdParty/wind-ui-rust-0.30.0/LICENSE-MIT", "windui 0.30.0 (MIT)"),
+    ("windui-LICENSE-APACHE.txt", ".3rdParty/wind-ui-rust-0.30.0/LICENSE-APACHE", "windui 0.30.0 (Apache-2.0)"),
     # 出厂声音素材（assets/Sounds/*.wav，Kenney UI Audio）的 CC0 原文。
     # CC0 本无署名义务，但随包带上全文是最干净的姿势（2026-09-29 用户要求）。
     ("CC0-1.0.txt", "main/licenses/CC0-1.0.txt", "Kenney UI Audio (CC0 1.0)"),

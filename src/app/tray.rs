@@ -18,14 +18,10 @@ pub fn create_tray(ui_tx: Sender<UiMsg>) -> Tray {
     // 放大出锯齿；现在五档齐备，每一档都是 SVG 直接光栅化出来的。
     let (n, rgba) = icon::tray_icon(false);
     let tray = Tray::new()
-        // ★ 版本号编译期从 `Cargo.toml` 拼接（`concat!` + `CARGO_PKG_VERSION`），
-        //   不手写字面量——改版本永不漂移；标语与 README 主标题 / 关于页副标题同源
-        //   （2026-10-08 定稿，同步替换掉旧的"键鼠痕迹呈现工具"口径）。
-        .tooltip(concat!(
-            "CurSeen ",
-            env!("CARGO_PKG_VERSION"),
-            " - 键鼠所至 · 屏幕所书 · 不止所见"
-        ))
+        // ★ 只留产品名 + 版本号（2026-10-24 用户口径"不用显示那么长的信息"）：
+        //   托盘提示要等约 1 秒才弹出、长句还会被截断，标语留在 README / 关于页。
+        //   版本号编译期从 `Cargo.toml` 拼接，不手写字面量——改版本永不漂移。
+        .tooltip(concat!("CurSeen ", env!("CARGO_PKG_VERSION")))
         .icon_rgba(n, n, rgba)
         // 左键单击：面板是唯一的交互入口，直接打开它。
         .on_left_click({
@@ -44,7 +40,7 @@ pub fn create_tray(ui_tx: Sender<UiMsg>) -> Tray {
         });
 
     tray.menu(vec![
-        TrayMenuItem::item("打开控制面板", {
+        TrayMenuItem::item("控制面板", {
             let tx = ui_tx.clone();
             move |_ctx| {
                 let _ = tx.send(UiMsg::OpenPanel);

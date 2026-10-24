@@ -1606,6 +1606,10 @@ extern "system" fn note_wndproc(
                     }
                 }
                 if let Some(p) = state(hwnd) {
+                    // SAFETY: `p` 来自建窗时 `SetWindowLongPtrW(GWLP_USERDATA,
+                    // Box::into_raw(st))`，`state()` 只在非空时返回它；`WM_NCDESTROY`
+                    // 是每个窗口**最后一次**消息，之后没人再读这份状态——取回所有权
+                    // 并 drop 正是"谁分配谁释放"的另一半，不会二次释放。
                     let st = Box::from_raw(p);
                     let _ = DeleteObject(st.bg_brush.into());
                     let _ = DeleteObject(st.edit_brush.into());
@@ -1780,6 +1784,9 @@ extern "system" fn body_wndproc(
             WM_NCDESTROY => {
                 let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut BodyState;
                 if !p.is_null() {
+                    // SAFETY: 这个地址是建窗时 `Box::into_raw` 存进 `GWLP_USERDATA` 的，
+                    // `WM_NCDESTROY` 是最后一条消息、只会来一次，取回所有权后立刻
+                    // 把槽位置 0（下一行）防重入，故不存在二次释放/悬垂读。
                     drop(Box::from_raw(p));
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
@@ -1819,6 +1826,9 @@ extern "system" fn edit_wndproc(
         if prev == 0 {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
+        // SAFETY: `GWLP_USERDATA` 里存的是子类化前 EDIT 的**原窗口过程**
+        // （`extern "system"` 函数指针，`SetWindowLongPtrW(GWLP_WNDPROC, ..)` 的返回值），
+        // 非 0 即有效；与 usize 等宽，调用约定由 `RawWndProc` 的 `extern "system"` 保证。
         let f: RawWndProc = std::mem::transmute(prev as usize as *const ());
         f(hwnd, msg, wparam, lparam)
     }

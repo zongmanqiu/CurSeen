@@ -16,7 +16,7 @@ use curseen_ui::modules::drawing::DrawingModule;
 use curseen_ui::modules::Module;
 use curseen_ui::platform::display::ScreenRect;
 
-const CONFIG_JSON: &str = r"E:\tmp\AI.Agent\CurSeen\build\config.json";
+const CONFIG_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "\\..\\build\\config.json");
 
 fn tick16() -> Tick {
     Tick {

@@ -397,6 +397,10 @@ impl SharedPage {
         unsafe {
             let seq = AtomicU32::from_ptr(self.view.add(OFF_SEQ).cast());
             seq.fetch_add(1, Ordering::AcqRel); // → 奇数 = 写入中
+                                                // SAFETY: 目的 `self.view.add(HDR)` 起 `need` 字节在本函数的入口已用
+                                                // `self.data_bytes() >= need` 校验（映射视图总长固定），源 `f.bgra` 也已校验
+                                                // `len >= need`；两端都在各自的独立分配里，**不重叠**。共享内存上的并发由
+                                                // seqlock 保护（seq 奇数 = 写入中），不是靠这次拷贝本身。
             std::ptr::copy_nonoverlapping(f.bgra.as_ptr(), self.view.add(HDR), need);
             // 元数据写在像素之后：读端拿旧元数据配新像素时尺寸恒一致。
             let set = |off: usize, v: u32| {
@@ -450,6 +454,9 @@ impl SharedPage {
                 return SlotRead::Empty;
             }
             let mut bgra = vec![0u8; len];
+            // SAFETY: `bgra` 刚按 `len` 分配，可写正好 `len` 字节；源区间长度已由上面的
+            // `len == w*h*4` 校验过（不符就 early return），不会读越界。两端不重叠。
+            // ★ 读到的是不是"完整一帧"不归这份拷贝管——由紧随其后的 seq 复检判 Torn。
             std::ptr::copy_nonoverlapping(self.view.add(HDR), bgra.as_mut_ptr(), len);
             if seq.load(Ordering::Acquire) != s1 {
                 return SlotRead::Torn; // 读期间被改写

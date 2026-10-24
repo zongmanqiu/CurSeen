@@ -495,6 +495,16 @@ fn mark_start_done() {
     START_DONE.store(true, Ordering::SeqCst);
 }
 
+/// 历史面板当前是否可见。
+///
+/// ★ 空闲工作集回收的判据之一：面板开着说明用户正在翻历史，此时裁工作集会让下一次
+///   悬停预览/滚动去缺页。由面板线程在 show/hide 时维护，读端是 UI 线程的低频对账。
+static PANEL_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+pub fn panel_visible() -> bool {
+    PANEL_VISIBLE.load(Ordering::Relaxed)
+}
+
 /// 模块配置镜像（命令载荷）。
 #[derive(Clone, Copy)]
 pub struct ClipCfg {
@@ -596,8 +606,11 @@ pub fn ensure_started() {
 }
 
 /// 推送配置（容量 / 启用）。每帧配置变化时才应调用。
+///
+/// ★ 不隐式启动后台线程（2026-10-24）：剪贴板功能关着时，管理器线程、隐藏监听窗、
+///   系统剪贴板监听链一律不存在。需要它跑起来的调用方（启用边沿）先显式
+///   [`ensure_started`]，这里只负责投递。
 pub fn set_config(cfg: ClipCfg) {
-    ensure_started();
     let p = Box::into_raw(Box::new(cfg)) as isize;
     if let Some(a) = CMD_HWND.get() {
         let h = HWND(a.load(Ordering::Relaxed) as *mut c_void);
@@ -605,7 +618,9 @@ pub fn set_config(cfg: ClipCfg) {
             let _ = PostMessageW(Some(h), WM_APP_CLIP_CMD, WPARAM(CMD_SETCFG), LPARAM(p));
         }
     } else {
-        // ensure_started 后应已就绪；极端情况下丢弃 Box 避免泄漏。
+        // 未启动（功能关着）：丢弃这次配置，绝不能顺手把线程拉起来。
+        // SAFETY: `p` 就是上面 `Box::into_raw` 交出的那一个，且这条分支里它**没有被投递**
+        // （没有别的持有者），取回所有权立刻 drop 正好补上"谁分配谁释放"。
         unsafe {
             drop(Box::from_raw(p as *mut ClipCfg));
         }
@@ -627,8 +642,9 @@ pub fn toggle_panel() {
 }
 
 /// 功能开关被关掉时收起面板（无条件，不看当前可见性——见 [`CMD_HIDE`]）。
+///
+/// ★ 不启动后台线程：从没启用过剪贴板时，"收起面板"没有对象可收。
 pub fn hide_panel() {
-    ensure_started();
     if let Some(a) = CMD_HWND.get() {
         let h = HWND(a.load(Ordering::Relaxed) as *mut c_void);
         unsafe {
@@ -638,8 +654,9 @@ pub fn hide_panel() {
 }
 
 /// 「清空历史」按钮（tool.rs 调用）。
+///
+/// ★ 不启动后台线程：功能关着时没有历史可清，按钮应当是安静的 no-op。
 pub fn request_clear_history() {
-    ensure_started();
     if let Some(a) = CMD_HWND.get() {
         let h = HWND(a.load(Ordering::Relaxed) as *mut c_void);
         unsafe {
@@ -2251,6 +2268,7 @@ impl ClipboardMgr {
                 IsWindowVisible(self.panel).as_bool()
             );
             ShowWindow(self.panel, SW_SHOW);
+            PANEL_VISIBLE.store(true, Ordering::Relaxed);
             // ★ 首开激活兜底（2026-10-07 晚定案）：SetForegroundWindow 在「explorer
             //   启动 + 自提权重启」链路上首次调用会被前台锁**静默拒绝**（F4 热键不算
             //   "用户刚给过输入"），面板悬在未激活态——系统把它当"还在启动的进程"，
@@ -2287,6 +2305,7 @@ impl ClipboardMgr {
         self.hide_preview();
         unsafe {
             ShowWindow(self.panel, SW_HIDE);
+            PANEL_VISIBLE.store(false, Ordering::Relaxed);
             KillTimer(Some(self.panel), SEARCH_TIMER);
             KillTimer(Some(self.panel), HOVER_TIMER);
             KillTimer(Some(self.panel), PASTE_TIMER);

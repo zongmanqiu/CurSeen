@@ -1333,3 +1333,198 @@ pub fn focus_window_handle(hwnd: HWND) {
         }
     }
 }
+
+/// 目录 fsync：把"文件改名"这次**目录项**的修改真正刷到盘上。
+///
+/// 为什么需要它（总纲 §7.2）：`fs::rename` 是原子的，但**目录项本身也躺在缓存里**。
+/// 断电时可能落到"文件数据写进去了、目录项没更新"——结果是配置回到上一版
+/// （不是损坏，但用户以为刚保存过）。
+///
+/// ★ 两个 Windows 专属的坑（Win10/11 实测，别凭印象改）：
+///   ① `std::fs::File::open` **打不开目录**（ACCESS_DENIED），必须
+///      `CreateFileW` + `FILE_FLAG_BACKUP_SEMANTICS`；
+///   ② 目录句柄必须以 `GENERIC_WRITE` 打开——`FlushFileBuffers` 要写权限，
+///      用 `GENERIC_READ` 打开再 `sync_all` 会被直接拒绝（os error 5）。
+///
+/// 失败只返回 `false`，**不返回错误**：这一步是锦上添花，受限账户 / U 盘 / 网络盘上
+/// 常被拒，绝不能让它反过来毁掉整条保存路径（`Config::save` 里失败只告警）。
+pub fn sync_dir(dir: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::GENERIC_WRITE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` 是本函数栈上的、以 NUL 结尾的 UTF-16 缓冲，在整个 `CreateFileW`
+    // 调用期间活着；`PCWSTR` 只是把地址传给系统读一下，不取得所有权、不延长生命周期。
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR::from_raw(wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    };
+    let handle = match handle {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    // SAFETY: `CreateFileW` 成功返回的句柄（windows-rs 的 `Result` 已替我们排除了
+    // `INVALID_HANDLE_VALUE`）归我们所有；交给 `File::from_raw_handle` 后由 `File`
+    // 的 `Drop` 关闭，既不泄漏也不会二次关闭。
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+    file.sync_all().is_ok()
+}
+
+/// 把「这次启动的环境」写进日志。
+///
+/// 为什么要有它（总纲 §10）：桌面软件没有运维，**用户能给你的只有一份日志**。缺了
+/// 版本 / OS / 显示器 / 权限级别这四项，一半的「在我机器上好的」问题根本无从下手——
+/// 而它的成本只是启动时的一次性几行。
+///
+/// ★ 启动参数照原样记：日志落在用户自己的程序目录里，而路径恰恰是最高频的诊断线索。
+pub fn log_env_banner() {
+    let ver = env!("CARGO_PKG_VERSION");
+    let hash = option_env!("CURSEEN_GIT_HASH").unwrap_or("unknown");
+    let os = os_version_summary();
+    let monitors = monitor_summary();
+    let level = if crate::platform::elevate::is_elevated() {
+        "高（已提权）"
+    } else {
+        "中（普通权限）"
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = if args.is_empty() {
+        "（无）".to_string()
+    } else {
+        args.join(" ")
+    };
+    log::info!(
+        "启动环境 | 版本 v{ver} (git {hash}) | 系统 {os} | 显示器 {monitors} \
+         | 完整性级别 {level} | 启动参数 {args}"
+    );
+}
+
+/// `HKLM\...\CurrentVersion` 下的一个字符串值。
+///
+/// 用注册表而不是 `GetVersionExW`：后者在**没有 manifest 声明支持的进程里会撒谎**
+/// （Win11 上照样报 6.2），而本 exe 只嵌入图标与版本资源，没有 manifest。
+fn reg_sz(subkey: &str, value: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+
+    let sub: Vec<u16> = std::ffi::OsStr::new(subkey)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let val: Vec<u16> = std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = [0u16; 128];
+    let mut len = (buf.len() * 2) as u32;
+    let code = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            // SAFETY: `sub` / `val` 是本函数栈上以 NUL 结尾的 UTF-16 缓冲，调用期间活着，
+            // `PCWSTR` 只借地址不取得所有权；`len` 以**字节**写入（`buf.len() * 2`），
+            // 与 `RegGetValueW` 的契约一致，不会写越界。
+            PCWSTR::from_raw(sub.as_ptr()),
+            PCWSTR::from_raw(val.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut std::ffi::c_void),
+            Some(&mut len),
+        )
+    };
+    if code.0 != 0 {
+        return None;
+    }
+    // `len` 是字节数且含结尾 NUL；REG_SZ 也可能不带 NUL，故按 min 裁一遍。
+    let n = (len as usize / 2).min(buf.len());
+    Some(
+        String::from_utf16_lossy(&buf[..n])
+            .trim_end_matches('\0')
+            .to_string(),
+    )
+}
+
+/// 「Windows 10 Pro 25H2 (build 26200.xxxx)」这类一句话摘要；取不到就如实说未知。
+///
+/// ★ 实测（2026-10-24，本机）：`ProductName` 在 25H2 上仍写着 **"Windows 10 Pro"**
+///   ——微软没改这个值的字面量。所以**不要**拿它判断是否 Win11：真正的判别依据是
+///   `CurrentBuild >= 22000`（Win11 起）+ `DisplayVersion`。摘要里两项都带上，
+///   就是为了让人自己去对号，而不是被 ProductName 误导。
+fn os_version_summary() -> String {
+    const KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+    let name = reg_sz(KEY, "ProductName").unwrap_or_else(|| "未知版本".to_string());
+    let display = reg_sz(KEY, "DisplayVersion").unwrap_or_default();
+    let build = reg_sz(KEY, "CurrentBuild").unwrap_or_default();
+    let ubr = reg_sz(KEY, "UBR").unwrap_or_default();
+    let mut s = name;
+    let mut detail = String::new();
+    if !display.is_empty() {
+        detail.push_str(&display);
+    }
+    if !build.is_empty() {
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+        detail.push_str("(build ");
+        detail.push_str(&build);
+        if !ubr.is_empty() {
+            detail.push('.');
+            detail.push_str(&ubr);
+        }
+        detail.push(')');
+    }
+    if !detail.is_empty() {
+        s.push(' ');
+        s.push_str(&detail);
+    }
+    s
+}
+
+/// 「2 台，虚拟屏 3840x1080@(0,0)，主屏 125%」这类一句话摘要。
+///
+/// ★ DPI 走 `GetDpiForMonitor` 而不是 `GetDpiForSystem`：后者是**系统 DPI**（多屏不同
+///   缩放时必错），本项目明令禁用它；这里问的又是"主屏"这一台，per-monitor 值才对得上。
+fn monitor_summary() -> String {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
+
+    let count = unsafe { GetSystemMetrics(SM_CMONITORS) };
+    let (x, y, x2, y2) = virtual_screen_rect();
+    let mut dpi = 96u32;
+    unsafe {
+        let m = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut dx = 0u32;
+        let mut dy = 0u32;
+        if GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx > 0 {
+            dpi = dx;
+        }
+    }
+    format!(
+        "{} 台，虚拟屏 {}x{}@({},{})，主屏 {}%",
+        count,
+        x2 - x,
+        y2 - y,
+        x,
+        y,
+        dpi * 100 / 96
+    )
+}

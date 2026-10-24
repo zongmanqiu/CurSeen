@@ -842,6 +842,9 @@ extern "system" fn chat_btn_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: L
         if prev == 0 {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
+        // SAFETY: `prev` 是建窗时存进 `GWLP_USERDATA` 的**原窗口过程**（`extern "system"`
+        // 函数指针，见上面 `SetWindowLongPtrW(GWLP_WNDPROC, ..)` 的返回值），`prev != 0`
+        // 排除了"没子类化过"；与 usize 等宽，调用约定由 `RawWndProc` 保证一致。
         let f: RawWndProc = std::mem::transmute(prev as usize as *const ());
         f(hwnd, msg, wparam, lparam)
     }
@@ -868,6 +871,8 @@ extern "system" fn chat_edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         if prev == 0 {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
+        // SAFETY: 同上——`GWLP_USERDATA` 里存的就是子类化前的 EDIT 原窗口过程
+        // （`extern "system"` 函数指针），非 0 即有效，调用约定由 `RawWndProc` 固定。
         let f: RawWndProc = std::mem::transmute(prev as usize as *const ());
         f(hwnd, msg, wparam, lparam)
     }
@@ -965,6 +970,9 @@ fn chat_send(hwnd: HWND) {
             }
             .is_err()
             {
+                // SAFETY: `ptr` 就是本线程上面 `Box::into_raw` 交出来的那一个，
+                // 投递失败意味着没人会再收它——这里取回所有权并 drop，正好补上
+                // "谁分配谁释放"的另一半；此后 ptr 不再被任何地方使用。
                 drop(unsafe { Box::from_raw(ptr) });
             }
         });
@@ -981,6 +989,9 @@ fn chat_result(hwnd: HWND, wparam: WPARAM) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: `ptr` 由 worker 线程 `Box::into_raw` 后经 `WM_APP_CHAT_RESULT` 的
+    // `WPARAM` 送来（非 0 已由上面的 `is_null` 排除），且**每条消息只投递一次**——
+    // 消费方是唯一的释放者，不存在二次释放；所有权在这里回到 Box 后立刻解引用。
     let (status, body) = *unsafe { Box::from_raw(ptr) };
     chat_unbusy(hwnd);
     let hm = now_hms();

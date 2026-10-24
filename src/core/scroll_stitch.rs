@@ -521,10 +521,10 @@ fn row_texture(row: &[u8], _w: usize) -> u32 {
     let mut n = 0u64;
     let mut i = 4; // 从第 2 个采样点开始（有左邻可比）
     while i + 4 <= row.len() {
-        // BGR 三通道差的绝对值之和（A 不参与）。
-        let d = (row[i].abs_diff(row[i - 4])
-            + row[i + 1].abs_diff(row[i - 3])
-            + row[i + 2].abs_diff(row[i - 2])) as u64;
+        // BGR 三通道差的绝对值之和（A 不参与）。各自升 u64 再加，理由同 `avg_row_diff`。
+        let d = (row[i].abs_diff(row[i - 4]) as u64)
+            + (row[i + 1].abs_diff(row[i - 3]) as u64)
+            + (row[i + 2].abs_diff(row[i - 2]) as u64);
         acc += d;
         n += 1;
         i += step;
@@ -542,8 +542,11 @@ fn avg_row_diff(a: &[u8], b: &[u8]) -> f32 {
     let mut n = 0u64;
     let mut i = 0;
     while i + 4 <= a.len().min(b.len()) {
-        let d = (a[i].abs_diff(b[i]) + a[i + 1].abs_diff(b[i + 1]) + a[i + 2].abs_diff(b[i + 2]))
-            as u64;
+        // 先各自升 u64 再相加：三通道差之和最大 765，u8 直加在 debug 下必溢出 panic
+        // （release 静默回绕，均值也被污染）。
+        let d = (a[i].abs_diff(b[i]) as u64)
+            + (a[i + 1].abs_diff(b[i + 1]) as u64)
+            + (a[i + 2].abs_diff(b[i + 2]) as u64);
         acc += d;
         n += 1;
         i += step;

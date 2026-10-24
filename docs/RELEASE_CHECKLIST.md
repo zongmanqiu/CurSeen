@@ -43,7 +43,7 @@
 - [ ] `README.md` —— 顶层目录树 / 构建方式 / 技术栈
 - [ ] `THIRD-PARTY-NOTICES.md` —— 依赖版本变化（下载地址同步 `build/deps.txt`）
 - [ ] `HISTORY.md` —— 顶部追加本版本小节
-- [ ] `patches/wind-ui-rust-0.20.0/PATCHES.md` —— 本版本动过 windui 就补章节（同步归档改后完整文件）
+- [ ] `patches/wind-ui-rust-0.30.0/PATCHES.md` —— 本版本动过 windui 就补章节（同步归档改后完整文件）
 
 ## 四、打包
 

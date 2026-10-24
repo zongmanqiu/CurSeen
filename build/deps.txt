@@ -38,6 +38,6 @@
 # 3_patch.bat must copy main/patches/ over .3rdParty/ - otherwise the fork
 # changes are silently missing and the build either fails or loses features.
 
-# windui 0.20.0 - UI framework. Upstream zip (for reference):
-#   https://github.com/huanfeng/wind-ui-rust/archive/refs/tags/v0.20.0.zip
-wind-ui-rust-0.20.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.20.0|src/core.rs
+# windui 0.30.0 - UI framework. Upstream zip (for reference):
+#   https://github.com/huanfeng/wind-ui-rust/archive/refs/tags/v0.30.0.zip
+wind-ui-rust-0.30.0=https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.30.0|src/core.rs

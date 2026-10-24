@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.0.4 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.0.4/CurSeen_2.0.4.zip)**
- ｜ **[⬇️ 下载 2.0.4 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.0.4/CurSeen_2.0.4.zip)**
+**[⬇️ 下载 2.0.5 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.0.5/CurSeen_2.0.5.zip)**
+ ｜ **[⬇️ 下载 2.0.5 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.0.5/CurSeen_2.0.5.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
@@ -43,12 +43,12 @@ main\build\full.bat
 
 | 步骤 | 脚本 | 干什么 |
 |---|---|---|
-| ① | `build\1_check_env.bat` | 只读体检：cargo / rustc host 是否 MSVC、python、git、`.3rdParty/` |
-| ② | `build\2_download.bat` | 按 `build\deps.txt` 下载第三方源码到 `.3rdParty/`（已有则跳过） |
-| ③ | `build\3_patch.bat` | 把 `patches/<库>-<版本>/` 单向覆盖到 `.3rdParty/`（重放我们的补丁） |
-| ④ | `build\4_build.bat` | `cargo build --release` |
-| ⑤ | `build\5_test.bat` | **真门禁**：集成测试 + 单元测试，失败即停（不会部署） |
-| ⑥ | `build\6_deploy.bat` | 拷 exe 到 `build/` 并 MD5 对账 + 同步 `assets/` + 同步许可文件 |
+| 1 | `build\1_check_env.bat` | 只读体检：cargo / rustc host 是否 MSVC、python、git、`.3rdParty/` |
+| 2 | `build\2_download.bat` | 按 `build\deps.txt` 下载第三方源码到 `.3rdParty/`（已有则跳过） |
+| 3 | `build\3_patch.bat` | 把 `patches/<库>-<版本>/` 单向覆盖到 `.3rdParty/`（重放我们的补丁） |
+| 4 | `build\4_build.bat` | `cargo build --release` |
+| 5 | `build\5_test.bat` | **真门禁**：集成测试 + 单元测试，失败即停（不会部署） |
+| 6 | `build\6_deploy.bat` | 拷 exe 到 `build/` 并 MD5 对账 + 同步 `assets/` + 同步许可文件 |
 
 > **全新克隆也能直接跑**：`.3rdParty/` 在仓库之外、克隆出来是空的，②③ 会负责
 > 下载上游源码并重放补丁，所以没有"先手工准备依赖"这一步。
@@ -118,7 +118,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 │   └── fixtures/                  共享素材（config_v1.json）
 ├── examples/                      Rust 离屏验收探针（cargo run --example，不进发布产物）
 ├── build/                         构建脚本（编号 bat）+ 构建辅助 python —— 是源码，要上传
-├── patches/                       第三方补丁登记 + 补丁后完整文件（wind-ui-rust-0.20.0/）
+├── patches/                       第三方补丁登记 + 补丁后完整文件（wind-ui-rust-0.30.0/）
 └── docs/                          现行文档：DESIGN / PLATFORM_NOTES / RELEASE_CHECKLIST / UI_COMPONENTS / 踩坑记录（分册）
 ```
 
@@ -131,7 +131,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 | 组件 | 说明 |
 |---|---|
 | Rust（edition 2021） | 全部第一方源码 |
-| windui 0.20.0（含 CurSeen 补丁） | UI 框架 + 分层覆盖窗；CPU 软渲染（tiny-skia 后端） |
+| windui 0.30.0（含 CurSeen 补丁） | UI 框架 + 分层覆盖窗；CPU 软渲染（tiny-skia 后端） |
 | mlua 0.12（Lua 5.4, vendored） | 鼠标拖尾 / 点击效果等特效脚本引擎 |
 | windows 0.62 | Win32 API 绑定（截图 / DXGI 录屏 / MediaFoundation 编码 / 剪贴板 / 音频） |
 | `nnnoiseless` 0.5.2（path 依赖） | 麦克风降噪（BSD-3，纯 Rust 移植，无 C 绑定） |
@@ -177,7 +177,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 | 发版流程 | `docs/RELEASE_CHECKLIST.md` |
 | 面板组件库 / UI·Lua API 参考 | `docs/UI_COMPONENTS.md` |
 | 写 Lua 脚本（脚本作者向，随程序分发） | `assets/lua/README.md`（`API.md` 为完整 API 参考） |
-| 第三方改动 | `patches/wind-ui-rust-0.20.0/PATCHES.md` |
+| 第三方改动 | `patches/wind-ui-rust-0.30.0/PATCHES.md` |
 | 版本历史 | `HISTORY.md` |
 | 踩坑与教训（现象 / 根因 / 判据） | `docs/踩坑记录*.md`（分册，按 §N 编号查） |
 
@@ -185,4 +185,4 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 
 Copyright © 2026 邱宗满 <qiuzongman@foxmail.com>
 
-CurSeen 以 [GNU AGPL-3.0](LICENSE) 授权（见 `Cargo.toml` 的 `license` 字段）。第三方组件的许可证、下载来源与 CurSeen 对它们的修改说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)；补丁明细见 `patches/wind-ui-rust-0.20.0/PATCHES.md`。
+CurSeen 以 [GNU AGPL-3.0](LICENSE) 授权（见 `Cargo.toml` 的 `license` 字段）。第三方组件的许可证、下载来源与 CurSeen 对它们的修改说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)；补丁明细见 `patches/wind-ui-rust-0.30.0/PATCHES.md`。

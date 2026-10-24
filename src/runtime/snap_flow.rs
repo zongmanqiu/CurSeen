@@ -17,13 +17,13 @@ pub(crate) fn read_clipboard_content(screen: ScreenRect) -> Option<snap::PinCont
             .min(screen.w as f32 * 0.9)
             .max(160.0);
         if let Some(shot) = text_raster::render_text(&text, max_w as i32, dpi) {
-            if let Some(b) = crate::core::backdrop::shot_to_bitmap(&shot) {
+            if let Some(b) = crate::core::backdrop::shot_to_bitmap_owned(shot) {
                 return Some(snap::PinContent::Image(Rc::new(b)));
             }
         }
     }
     crate::platform::clipboard::get_image()
-        .and_then(|s| crate::core::backdrop::shot_to_bitmap(&s))
+        .and_then(crate::core::backdrop::shot_to_bitmap_owned)
         .map(|b| snap::PinContent::Image(Rc::new(b)))
 }
 
@@ -38,7 +38,9 @@ impl Runtime {
     /// 截图 / 贴图快捷键的入口（★ 三个快捷键共用同一条底层链）。
     ///
     /// GDI 冻结帧一次抓取整张**虚拟桌面**（不是光标所在显示器——跨屏框选要它）→ 置入
-    /// 状态机 → 由 overlay 通道回调打开区域选择窗。抓屏阻塞 UI 线程约 0.1–0.3s。
+    /// 状态机 → 由 overlay 通道回调打开区域选择窗。抓屏阻塞 UI 线程 release 实测
+    /// median 约 33 ms（1920×1080），位图转换已改成就地换序（median 3 ms；旧路径 12 ms
+    /// 且峰值多一份 8.3 MB）。
     ///
     /// ★ 抓屏用的 `screenshot::grab` 与屏幕注释的底图是**同一个函数**，区别只在冻结帧
     /// 的用途（用户要求"截图与屏幕画板调用同一个函数"）。
@@ -59,16 +61,20 @@ impl Runtime {
         // ★ 截图/贴图是独立行为，**不再**收起控制面板（用户口径 2026-09-17：面板
         //   开着也照常截图；区域窗本身是全屏置顶窗，盖在面板之上，互不干扰）。
         match screenshot::grab(self.screen) {
-            Ok(shot) => match crate::core::backdrop::shot_to_bitmap(&shot) {
-                Some(bmp) => {
-                    self.snap.begin(mode, Rc::new(bmp));
-                    log::info!("截图区域选择开始（{mode:?}，{}×{}）", shot.w, shot.h);
+            Ok(shot) => {
+                // 原帧只用来转位图，转完即弃 → 就地换序（省一份 8.3 MB 与一次拷贝）。
+                let (w, h) = (shot.w, shot.h);
+                match crate::core::backdrop::shot_to_bitmap_owned(shot) {
+                    Some(bmp) => {
+                        self.snap.begin(mode, Rc::new(bmp));
+                        log::info!("截图区域选择开始（{mode:?}，{w}×{h}）");
+                    }
+                    None => {
+                        log::warn!("冻结帧尺寸非法：{w}×{h}");
+                        self.action_notify.show("截图失败");
+                    }
                 }
-                None => {
-                    log::warn!("冻结帧尺寸非法：{}×{}", shot.w, shot.h);
-                    self.action_notify.show("截图失败");
-                }
-            },
+            }
             Err(e) => {
                 log::warn!("冻结屏幕失败: {e}");
                 self.action_notify.show("截图失败");
@@ -78,6 +84,9 @@ impl Runtime {
 
     /// 区域选择确认（区域窗拖拽松手 / 回车）：裁剪 → 剪贴板 → 临时留档 →
     /// 反馈（白闪）→ ShotPin 模式追加贴图请求。
+    ///
+    /// ★ GIF / 选区录屏 / 长截图只取**矩形**，在进剪贴板/留档之前就分岔出去（见下方
+    /// 两处提前返回）——它们不是截图，不能有截图出口的副作用。
     ///
     /// `rect` 是**冻结帧坐标系**（物理像素，相对冻结帧左上角；单显示器下也就是虚拟桌面
     /// 坐标）——换算由区域窗经 `layer::WorldMap` 完成，本函数不做任何 DPI 推理。
@@ -121,12 +130,21 @@ impl Runtime {
         let Some((cropped, mode)) = self.snap.confirm(rect, self.screen) else {
             return;
         };
-        // ★ 选区录屏：确认那一刻直接进倒计时，不截图、不进剪贴板、不留档、不白闪 ——
-        //   那些都是「截图」语义，套在「要录哪一块」上是错的（与 GIF 同理，GIF 选框也
-        //   只要那块矩形）。MP4 是「一键开关」，不需要 GIF 那种控件条。
-        if let snap::SnapMode::Mp4Region = mode {
-            self.arm_mp4_region(rect);
-            return;
+        // ★★ 两种「要的是矩形、不是截图」的模式在这里分岔，**必须排在剪贴板/留档之前**：
+        //   - 选区录屏：确认即进倒计时（一键开关，不需要 GIF 那种控件条）；
+        //   - GIF 选框：只把矩形交给控件条等「开始」。
+        //   剪贴板 / 留档 / 白闪都是「截图」语义，套在「要录哪一块」上是错的——用户
+        //   没截图，把剪贴板冲掉是纯副作用（m08：GIF 分支原来排在两个副作用之后）。
+        match mode {
+            snap::SnapMode::Mp4Region => {
+                self.arm_mp4_region(rect);
+                return;
+            }
+            snap::SnapMode::Gif => {
+                self.arm_gif(rect);
+                return;
+            }
+            _ => {}
         }
         // ★ 长截图 / 宽截图：确认那一刻同样**不走截图出口**（不裁帧、不进剪贴板、
         //   不留档、不白闪 —— 与选区录屏同一条理由，那些都是「截图」语义）。矩形交
@@ -139,12 +157,11 @@ impl Runtime {
         if matches!(mode, snap::SnapMode::Scroll | snap::SnapMode::ScrollWide) {
             return;
         }
-        let Some(shot) = crate::core::backdrop::bitmap_to_shot(&cropped) else {
-            log::warn!("裁剪结果无法转回帧格式");
-            return;
-        };
+        // ★ 裁剪结果本身就是非预乘 RGBA：剪贴板与留档都从它直接出发，不再造一份整帧
+        //   BGRA 中间帧（旧路 `bitmap_to_shot` 既有一次整帧分配，又让剪贴板再拷一遍、
+        //   快档 PNG 再换序一遍）。
         // ★ 一定进剪贴板（原「存入剪贴板」开关删除：截图就是要能直接粘出去）。
-        if let Err(e) = screenshot::to_clipboard(&shot) {
+        if let Err(e) = screenshot::to_clipboard_rgba(&cropped) {
             log::warn!("区域截图写入剪贴板失败: {e}");
         } else {
             // ★ 记下"这次写入的序列号"。轮询与贴图快捷键看到它就知道剪贴板里是我们自己刚截的图，
@@ -155,9 +172,12 @@ impl Runtime {
         }
         // 临时留档：`<exe>/temp/screenshot/`。用户要留下的那份走贴图右键「另存为」，
         // 这里只保证"程序自己产生的东西有个固定落点"，便于排查与回溯。
+        // ★ 走快档：留档在确认的同步路径上（白闪要等它），而用户从来看不到这个文件；
+        //   1920×1080 实测默认档 median 122–123 ms、快档 14–15 ms（文件 2.9×，只落在 temp）。
+        let (sw, sh) = (cropped.w, cropped.h);
         let dir = crate::core::paths::module_temp_dir(crate::core::paths::MODULE_SCREENSHOT);
         let path = dir.join(format!("CurSeen_{}.png", timestamp()));
-        let saved = screenshot::save_png(&shot, &path).is_ok();
+        let saved = screenshot::save_png_rgba_fast(&cropped, &path).is_ok();
         // ★★ 两种模式都**记录原位**（用户口径 2，2026-09-17）：*"只要是通过我们的功能截图的，
         //    就要记录信息。这样贴图的时候才方便。"*
         //    - ShotPin：立刻贴图 + 原位（`pin_push` 同时入环并请求开窗）；
@@ -165,16 +185,10 @@ impl Runtime {
         //      只能靠剪贴板轮询"捡"进环，而轮询那条路给不出原位 → 用户后来按贴图键时
         //      落在屏幕正中（这正是用户报的现象）。
         match mode {
-            // ★ GIF 选框：只要那块矩形。剪贴板 / 留档 / 白闪**一律不做** —— 那三件事都是
-            //   "截图"的语义，套在"要录哪一块"上是错的：用户没截图，把剪贴板冲掉是纯副作用。
-            snap::SnapMode::Gif => {
-                self.arm_gif(rect);
-                return;
-            }
-            snap::SnapMode::Mp4Region => {
-                // ★ 已由上方「确认即进倒计时」分支提前返回处理，正常走不到这里；
-                //   保留这一臂只为让匹配在编译期收敛（Mp4Region 不会落到截图语义）。
-                unreachable!("Mp4Region 应由 confirm_snap 的提前返回处理")
+            // ★ GIF / 选区录屏：已由上方「确认即交矩形」的分岔提前返回处理，正常走不到
+            //   这里；保留这一臂只为让匹配在编译期收敛（它们不会落到截图语义）。
+            snap::SnapMode::Gif | snap::SnapMode::Mp4Region => {
+                unreachable!("Gif/Mp4Region 应由 confirm_snap 的提前返回处理")
             }
             snap::SnapMode::Scroll | snap::SnapMode::ScrollWide => {
                 // ★ 与 Mp4Region 同款：确认那一刻已提前返回给 `arm_scroll`。
@@ -200,8 +214,8 @@ impl Runtime {
         self.action_notify.flash();
         log::info!(
             "区域截图完成：{}×{}（{mode:?}，留档={saved}，{}）",
-            shot.w,
-            shot.h,
+            sw,
+            sh,
             path.display()
         );
     }
@@ -297,7 +311,7 @@ impl Runtime {
             let title = crate::platform::topmost::OVERLAY_TITLE;
             match crate::platform::screenshot::grab_hiding(title, self.screen) {
                 Ok(shot) => {
-                    if let Some(bmp) = crate::core::backdrop::shot_to_bitmap(&shot) {
+                    if let Some(bmp) = crate::core::backdrop::shot_to_bitmap_owned(shot) {
                         self.drawing
                             .set_backdrop(Backdrop::Frozen(std::rc::Rc::new(bmp)));
                     }
@@ -414,11 +428,8 @@ impl Runtime {
             self.action_notify.show("截图失败");
             return;
         };
-        let Some(shot) = crate::core::backdrop::bitmap_to_shot(&bmp) else {
-            log::warn!("截图编辑产物无法转回帧格式");
-            return;
-        };
-        if let Err(err) = screenshot::to_clipboard(&shot) {
+        // 合成结果本身就是非预乘 RGBA：剪贴板与留档直接吃它，不再转一份 Shot。
+        if let Err(err) = screenshot::to_clipboard_rgba(&bmp) {
             log::warn!("截图编辑写入剪贴板失败: {err}");
         } else {
             // 与区域截图同款：记下序列号，免得剪贴板轮询把自家这张又当"外部复制"读一遍
@@ -427,13 +438,20 @@ impl Runtime {
             self.own_clip_seq = Some(n);
             self.clip_seq = n;
         }
+        // 与区域截图同款：内部留档走快档（用户在等白闪，且看不到这个文件）。
+        let (sw, sh) = (bmp.w, bmp.h);
         let dir = crate::core::paths::module_temp_dir(crate::core::paths::MODULE_SCREENSHOT);
         let path = dir.join(format!("CurSeen_{}.png", timestamp()));
-        let saved = screenshot::save_png(&shot, &path).is_ok();
+        let saved = screenshot::save_png_rgba_fast(&bmp, &path).is_ok();
 
         // 入环（+ 按需立刻贴图）：原位取**世界**坐标的选区，贴图窗才会落在用户框的那一块上。
         let origin = e.region();
-        let content = snap::PinContent::Image(Rc::new(bmp.clone()));
+        // ★「保存」那条路还要把同一张图交给另存为对话框（落盘用 `Shot`），先登记；
+        //   「打勾完成」没有对话框，直接把位图移进贴图环——旧路无条件 clone 一份整帧。
+        if save_as {
+            self.stash_save_as(&bmp, "CurSeen");
+        }
+        let content = snap::PinContent::Image(Rc::new(bmp));
         if e.pin {
             self.snap.pin_push(content, Some(origin));
         } else {
@@ -449,16 +467,12 @@ impl Runtime {
         ));
         log::info!(
             "截图编辑完成：{}×{}（pin={}，留档={saved}，{}）",
-            shot.w,
-            shot.h,
+            sw,
+            sh,
             e.pin,
             path.display()
         );
-        // 落点由用户挑：图已经备好，只差一次原生对话框（UI 线程延后执行）。
-        // ★ 只在「保存」那条路上弹 —— 打勾「完成」用户已经挑过默认位置了（`save_as`）。
-        if save_as {
-            self.stash_save_as(&bmp, "CurSeen");
-        }
+        // 落点由用户挑的那条路已在入环前登记（`save_as`）：对话框是延后弹的，这里不再做事。
     }
 
     /// 编辑态**取消**：整次截图作废（`Esc` / 工具栏的「退出」）。
@@ -795,6 +809,13 @@ impl Runtime {
     ///
     /// 两个贴图快捷键都停用时整个跳过：没有任何出口能用上这些内容，不必积累。
     pub(crate) fn poll_clipboard(&mut self) {
+        // ★ 截图总开关关着就整段跳过（2026-10-24）：贴图/贴剪贴板快捷键的派发在
+        //   `handle_action_key` 里同样受 `screenshot.enabled` 管（`input.rs`），关着时
+        //   没有任何出口能用上这里收进来的内容。此前只判快捷键非空，关掉截图后仍每
+        //   250ms 读剪贴板、继续往贴图环里囤位图。
+        if !self.config.screenshot.enabled {
+            return;
+        }
         if self.config.screenshot.hotkey_pin_clipboard.is_empty()
             && self.config.screenshot.hotkey_pin.is_empty()
         {
@@ -817,6 +838,84 @@ impl Runtime {
 mod tests {
     use super::*;
     use crate::runtime::testkit::*;
+
+    /// ★ 截图总开关是贴图环轮询的总闸（2026-10-24，用户报「全关还有东西在跑」）：
+    /// 关着时连剪贴板序列号都不该读。开的那一半必须有反应——否则这条门写成恒
+    /// `return` 也是绿的（对照臂）。
+    #[test]
+    fn clipboard_polling_needs_the_screenshot_switch() {
+        let mut rt = drawing_only();
+        assert!(!rt.config.screenshot.enabled, "前提：夹具截图总开关是关的");
+        // 出厂贴图快捷键是空的；没有出口时轮询本来就会停，测不到总开关。
+        rt.config.screenshot.hotkey_pin_clipboard = "F3".into();
+        let sentinel = crate::platform::clipboard::sequence_number().wrapping_add(1_000_000);
+        rt.clip_seq = sentinel;
+        rt.poll_clipboard();
+        assert_eq!(rt.clip_seq, sentinel, "总开关关着 → 不该碰剪贴板");
+
+        rt.config.screenshot.enabled = true;
+        rt.poll_clipboard();
+        assert_ne!(rt.clip_seq, sentinel, "总开关开着 → 必须读到序列号");
+    }
+
+    fn png_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|it| {
+                it.filter_map(Result::ok)
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .is_some_and(|x| x.eq_ignore_ascii_case("png"))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// ★★ m08 回归锁：GIF 选框确认**只交矩形**，不能碰截图出口的两件事。
+    ///
+    /// 缺陷现场（2026-10-24 静态审查 + 探针复现）：剪贴板写入与 `temp/screenshot` 留档
+    /// 排在 `match mode` 之前，于是每次确认 GIF 选框都会把用户剪贴板换成一张裁剪图，
+    /// 并留下一个用户不会用到的 PNG。
+    ///
+    /// 三条读数必须一起看：
+    /// - `gif_selection()`：证明 GIF 分支真的跑到了（否则"没副作用"可能只是没走这条路）；
+    /// - `own_clip_seq` / `clip_seq`：该 Runtime 自己有没有写过剪贴板（生产写入口会记账）；
+    /// - PNG 数量：`save_png_rgba_fast` 真的没被调用。
+    ///
+    /// ★ 不断言全局剪贴板序列号：本机是共享桌面，别的进程改剪贴板会让它假红；本 Runtime
+    ///   的记账字段才是"这一笔是谁写的"的判据。
+    #[test]
+    fn gif_confirm_only_arms_the_selector() {
+        let mut rt = drawing_only();
+        let frame = Rc::new(
+            RgbaBitmap::new(320, 240, vec![180u8; 320 * 240 * 4]).expect("测试位图尺寸自洽"),
+        );
+        assert!(
+            rt.snap.begin(snap::SnapMode::Gif, frame),
+            "GIF 会话没开起来"
+        );
+
+        let dir = crate::core::paths::module_temp_dir(crate::core::paths::MODULE_SCREENSHOT);
+        let before = png_count(&dir);
+        let clip_before = rt.clip_seq;
+        let own_before = rt.own_clip_seq;
+
+        rt.confirm_snap(Rect::new(10.0, 10.0, 100.0, 80.0));
+
+        assert_eq!(
+            rt.gif_selection(),
+            Some(ScreenRect::new(10, 10, 100, 80)),
+            "GIF 分支没跑到 / 矩形没交出去"
+        );
+        assert_eq!(rt.own_clip_seq, own_before, "GIF 确认不该写剪贴板");
+        assert_eq!(rt.clip_seq, clip_before, "GIF 确认不该改动剪贴板轮询游标");
+        assert_eq!(
+            png_count(&dir),
+            before,
+            "GIF 确认不该在 temp/screenshot 留档"
+        );
+    }
 
     /// ★★ 任务 2 的回归锁：编辑态两条确认出口的**唯一差别是弹不弹原生框**。
     ///

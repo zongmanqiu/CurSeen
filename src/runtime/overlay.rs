@@ -112,7 +112,7 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
     );
 
     let mut app = App::new(crate::platform::topmost::OVERLAY_TITLE, vw, vh)
-        .pos(vs.x, vs.y)
+        .position(vs.x, vs.y)
         .layered()
         .click_through()
         .tool_window()
@@ -522,7 +522,9 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
         // 晚于我们创建/被抬起的置顶窗口会压在我们上面，拖尾就被盖住（实测墨迹归零，
         // 而 CPU 照旧，说明只是看不见）。这里每 250ms 对账一次，必要时把自己插回顶部；
         // 前台是全屏应用/游戏时主动让位。详见 `platform/topmost.rs` 的模块说明。
-        keeper.reconcile();
+        // ★ 覆盖层休眠时只守工具窗、不碰覆盖层（2026-10-24）：屏上没有任何覆盖层像素，
+        //   抬它没有收益，反而会和 Quicker 等置顶窗每 250ms 抢一次 z 序。
+        keeper.reconcile(overlay_is_parked());
         // ★ 休眠态下补一次模块对账（配置版本变了才真干活）。放在读帧门**之前**：
         //   新勾上一个复合脚本时，"它到底要不要覆盖层的帧"只有同步进实例才知道，而
         //   同步平时挂在 `tick()` 里、休眠时根本不跑（详见 `Runtime::sync_trail_if_stale`）。
@@ -556,6 +558,15 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
                 crate::platform::working_set::request_trim_soon();
             }
         }
+        // ★ 空闲工作集回收（2026-10-24）：进入休眠的边沿只裁一次，可用户可能一连几小时
+        //   什么都不做——期间页面会被系统/别的事件重新带回工作集，数字又慢慢爬回十几 MB。
+        //   这里在"真闲着"时补一拍低频对账：休眠 + 控制面板关 + 剪贴板面板关 + 区域放大镜
+        //   不在屏 + 已静置 15s + 体积超阈值，才请求整理（判据与节流全在 `working_set`）。
+        let idle_eligible = overlay_is_parked()
+            && !poll_rt.borrow().panel_open()
+            && !crate::platform::clipboard_history::panel_visible()
+            && !poll_rt.borrow().region_magnifier.is_shown();
+        crate::platform::working_set::idle_tick(idle_eligible);
         // ★ GIF 控件条兜底（与通道回调同一逻辑，见 `sync_gif_bar`）：`GifSelChanged`
         //   消息通路万一没送达（覆盖层尚未起、`ui_tx` 还没装上），这里 250ms 内补上，
         //   保证"框好选框"与"控件条出现"之间不会无限期地差一拍。
@@ -2651,14 +2662,14 @@ mod tests {
 
     /// 提示窗固定 400×150、windui 文本**不换行**：长路径只能按像素预算截断。
     ///
-    /// ★ 本测试同时钉死"降字号救不了"：下面那条 46 字符的目录按 12px 排仍是 391px，
+    /// ★ 本测试同时钉死"降字号救不了"：下面那条长目录按 12px 排也超宽，
     /// 一样超出 372px 的可用宽——所以字号统一走 `FONT_MD`，长度交给 [`rec_toast_elide`]
     /// （[`crate::ui::card::ellipsize`]，保尾部；与下拉显示名同一套宽度模型）。
     #[test]
     fn rec_toast_elides_the_path_instead_of_shrinking_the_font() {
         let font = crate::ui::tokens::FONT_MD;
         let label_w = crate::ui::card::text_width(REC_TOAST_FOLDER_LABEL, font);
-        let folder = r"C:\Users\user\Videos\CurSeen\2026-09-28_170533";
+        let folder = r"C:\Users\somebody\Videos\CurSeen\2026-09-28_170533";
         let full = |f: f32| {
             crate::ui::card::text_width(folder, f)
                 + crate::ui::card::text_width(REC_TOAST_FOLDER_LABEL, f)

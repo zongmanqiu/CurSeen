@@ -128,6 +128,10 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "CompanyName", "{author}"
+            // ★ 杀软视角：无厂商 / 无版权 / 无描述的"三无 exe"是云查杀的重点关照对象。
+            //   总纲 §11.1 把 LegalCopyright 列为**必填**七字段之一（另六个下面都有），
+            //   缺了它「文件属性 → 详细信息」的版权一栏是空的。
+            VALUE "LegalCopyright", "Copyright © {author}"
             VALUE "FileDescription", "CurSeen"
             VALUE "FileVersion", "{version}"
             VALUE "InternalName", "curseen"

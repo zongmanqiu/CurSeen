@@ -81,10 +81,10 @@ if !ERRORLEVEL! neq 0 (
 REM ---- third-party PATH dependencies (informational) ------------------------
 REM NOT a hard error: on a clean checkout .3rdParty/ is empty by design and
 REM 2_download.bat populates it. Only warn so full.bat can run from scratch.
-if exist "%PROJECT_ROOT%\.3rdParty\wind-ui-rust-0.20.0\Cargo.toml" (
-    echo   [OK] .3rdParty\wind-ui-rust-0.20.0
+if exist "%PROJECT_ROOT%\.3rdParty\wind-ui-rust-0.30.0\Cargo.toml" (
+    echo   [OK] .3rdParty\wind-ui-rust-0.30.0
 ) else (
-    echo   [WARNING] missing .3rdParty\wind-ui-rust-0.20.0
+    echo   [WARNING] missing .3rdParty\wind-ui-rust-0.30.0
     echo             step 2 ^(2_download.bat^) will fetch it
 )
 if exist "%PROJECT_ROOT%\.3rdParty\nnnoiseless-0.5.2\Cargo.toml" (

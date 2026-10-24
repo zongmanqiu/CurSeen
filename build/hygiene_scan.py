@@ -4,7 +4,7 @@ r"""静态异味体检（只读）——对齐《开发指南.md》第四节「�
   python build/hygiene_scan.py            # 违规清单 + 汇总
   python build/hygiene_scan.py --json     # 机器可读
 
-五查（只扫第一方 Rust 源码 `main/src/**/*.rs`）：
+七查（第 1~6 查只扫第一方 Rust 源码 `main/src/**/*.rs`；第 7 查扫**全树**）：
 
   1. 硬编码绝对路径  `[A-Z]:\`  —— 换台电脑就失效
   2. 调试残留        `println!` / `eprintln!` / `print!` / `eprint!` / `dbg!`
@@ -18,6 +18,19 @@ r"""静态异味体检（只读）——对齐《开发指南.md》第四节「�
      这种写法里，`wide()` 的临时 `Vec<u16>` 在这条 `let` 语句的**分号处**就被 drop，
      下一句 `RegisterClassExW` 拿到野指针；且因为是 `.as_ptr()`，借用检查器看不见。
      2026-10-12 的「找不到窗口类 → 僵尸进程」就是它。必须先 `let name_w = wide(x);`。
+  6. **指针类 unsafe 缺 `// SAFETY:`** —— `transmute` / `from_raw` / `get_unchecked` /
+     `copy_nonoverlapping` / `read|write_unaligned`。这类操作的前提编译器一个都查不了
+     （越界、对齐、生命周期、别名全靠人），所以注释不是"风格"而是**义务与证据**：
+     写下它才迫使你想清楚前提是什么。判据：该行或其上方 4 行内出现 `SAFETY`
+     （4 是实测的最小够用值：常见排版是「SAFETY 注释 → `unsafe {` → 调用名 →
+     指针参数」，正好差 4 行）。
+
+  7. **本机真实路径泄漏（全树）** —— 硬编码绝对路径换台电脑就失效是小恶；
+     把开发机的目录结构（工作目录名 / 真实用户名）发进公开仓库是大恶。
+     判据只认**只可能来自本机**的指纹（工作目录名、`C:\Users\<真实用户名>\`），
+     占位示例（`C:\App`、`D:\素材`、`C:\Users\someone`）一律不命中。
+     覆盖 `main/` 全部文本类文件（源码 / 文档 / 脚本 / 配置），豁免本文件自身
+     （模式定义处不含明文指纹，豁免是双保险）。
 
 豁免（与 Pecia 开发指南第四节口径一致）：
   - `#[cfg(test)]` 之后的代码是测试桩：允许硬编路径与往 stdout 打印。
@@ -65,9 +78,44 @@ TEMP_WIDE_IN_STRUCT = re.compile(
     r"^\s*lpsz\w*[Nn]ame\s*:\s*(?:windows::core\.)?PCWSTR\(\s*wide\("
 )
 
+# ── 第 6 查：指针类 unsafe 缺 `// SAFETY:` ────────────────────────────────
+# 只卡**指针类**：那才是 UB 高发区（越界 / 对齐 / 生命周期 / 别名，编译器全都看不见）。
+# 普通 FFI 调用的 unsafe（`GetCursorPos(&mut p)` 之类）前提是"参数类型对不对"，
+# 由签名保证，逐个写 SAFETY 的收益远低于噪音——存量 300+ 处，留作逐步清零
+# （见 docs/DESIGN_ADOPTION.md D3）。
+PTR_UNSAFE = re.compile(
+    r"\b(?:transmute|from_raw|get_unchecked|copy_nonoverlapping"
+    r"|read_unaligned|write_unaligned)\b"
+)
+# 往上找几行内的 SAFETY 说明（注释常常写在 unsafe 块的上方）。
+SAFETY_LOOKBACK = 4
+
+# ── 第 7 查：本机真实路径泄漏（全树） ──────────────────────────────────────
+# 指纹只认"只可能来自本机"的两种形态：开发机工作目录名、真实用户目录
+# （带尾分隔符，避免误伤 user2 / username 这类合法用户名）。
+LEAK_FINGERPRINTS = [
+    re.compile(r"AI\.Agent"),
+    re.compile(r"Users[\\/]+user[\\/]"),
+]
+SCAN_EXTS = {
+    ".rs", ".md", ".py", ".bat", ".cmd", ".toml", ".json", ".lua", ".txt",
+    ".ps1", ".yml", ".yaml", ".rc", ".cfg", ".xml", ".html", ".css", ".js", ".sh",
+}
+# 本文件的模式定义不含明文指纹（正则形态不匹配自身）；豁免是防将来改动时自伤。
+SCAN_SELF_EXEMPT = {"build/hygiene_scan.py"}
+
 
 def is_comment(line: str) -> bool:
     return line.lstrip().startswith("//")
+
+
+def has_safety(lines: list, idx: int) -> bool:
+    """`lines[idx]`（0-based）及其上方 SAFETY_LOOKBACK 行里有没有 `SAFETY` 说明。"""
+    lo = max(0, idx - SAFETY_LOOKBACK)
+    for j in range(lo, idx + 1):
+        if "SAFETY" in lines[j]:
+            return True
+    return False
 
 
 def main():
@@ -102,6 +150,34 @@ def main():
                     f"{rel}:{i}: struct literal 里的临时宽字符缓冲 —— 先 `let n = wide(x);` "
                     f"再取址，否则 RegisterClass 拿到野指针 —— {line.strip()[:80]}"
                 )
+            # 第 6 查：指针类 unsafe 必须有 `// SAFETY:`（本行或上方 4 行内）。
+            # 注释行自己带着关键字样是常见写法（`// SAFETY: ...transmute...`），要豁免，
+            # 否则"写了说明"反而被判违规。
+            if PTR_UNSAFE.search(line) and not comment and not has_safety(lines, i - 1):
+                violations.append(
+                    f"{rel}:{i}: 指针类 unsafe 缺 `// SAFETY:` —— 写清你凭什么认为它安全 "
+                    f"（越界 / 对齐 / 生命周期 / 别名）—— {line.strip()[:80]}"
+                )
+
+    # ── 第 7 查：本机真实路径泄漏（全树，不只 src） ────────────────────────
+    for p in sorted(ROOT_DIR.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in SCAN_EXTS:
+            continue
+        rel = p.relative_to(ROOT_DIR).as_posix()
+        if rel in SCAN_SELF_EXEMPT:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, OSError):
+            continue  # 二进制 / 非 UTF-8 文件不在本查范围
+        for i, line in enumerate(text.splitlines(), 1):
+            for pat in LEAK_FINGERPRINTS:
+                if pat.search(line):
+                    violations.append(
+                        f"{rel}:{i}: 本机真实路径泄漏 —— 开发机的目录名 / 真实用户名"
+                        f"不得进仓库，改用相对或 CARGO_MANIFEST_DIR 派生路径 —— "
+                        f"{line.strip()[:80]}"
+                    )
 
     if "--json" in sys.argv:
         print(json.dumps({"violations": violations, "count": len(violations)},

@@ -347,7 +347,7 @@ fn fill_shape(
             }
             let windui_pts: Vec<(f32, f32)> = pts.iter().map(|p| (v.x(p.x), v.y(p.y))).collect();
             if *closed {
-                canvas.fill_polygon(&windui_pts, &wp);
+                canvas.fill_polygon(&[&windui_pts[..]], &wp);
             } else {
                 canvas.draw_polyline(&windui_pts, 1.0, &wp);
             }
@@ -477,7 +477,7 @@ fn stroke_shape(
                 canvas.fill_circle(v.x(center.x), v.y(center.y), r_outer, &wp);
             } else {
                 let pts = circle_annulus_polygon(v.x(center.x), v.y(center.y), r_outer, r_inner);
-                canvas.fill_polygon(&pts, &wp);
+                canvas.fill_polygon(&[&pts[..]], &wp);
             }
         }
         Shape::Ellipse {
@@ -500,7 +500,7 @@ fn stroke_shape(
                 canvas.fill_ellipse(cx, cy, rx_outer, ry_outer, &wp);
             } else {
                 let pts = ellipse_annulus_polygon(cx, cy, rx_outer, ry_outer, rx_inner, ry_inner);
-                canvas.fill_polygon(&pts, &wp);
+                canvas.fill_polygon(&[&pts[..]], &wp);
             }
         }
         Shape::Line { a, b } => {
@@ -513,7 +513,7 @@ fn stroke_shape(
             }
             let windui_pts: Vec<(f32, f32)> = pts.iter().map(|p| (v.x(p.x), v.y(p.y))).collect();
             if *closed {
-                canvas.fill_polygon(&windui_pts, &wp);
+                canvas.fill_polygon(&[&windui_pts[..]], &wp);
             } else {
                 canvas.draw_polyline(&windui_pts, w, &wp);
             }

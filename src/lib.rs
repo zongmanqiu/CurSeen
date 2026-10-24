@@ -52,6 +52,11 @@ pub fn run() {
         return;
     }
 
+    // ★ 配置落盘的「父目录 fsync」实现在这里注入（`core` 不得碰 Win32，见
+    //   `core::config::DIR_SYNC` 的注释）。必须在**读配置之前**——`Config::load()`
+    //   里的迁移会立刻写盘，那次写盘同样该是耐久的。
+    crate::core::config::set_dir_sync(crate::platform::win_util::sync_dir);
+
     let mut config = Config::load().unwrap_or_default();
     // 剪贴板：旧 panel.json 的窗口记忆一次性并入 config.json（迁完删旧文件）。
     crate::platform::clipboard_history::migrate_legacy_panel_state(&mut config);
@@ -65,15 +70,16 @@ pub fn run() {
     // 用 `WH_KEYBOARD_LL` / `WH_MOUSE_LL` 而不是轮询 `GetCursorPos`：轮询拿不到按键、
     // 拿不到点击，而且 4ms 一跳会持续唤醒 CPU（实测空闲 ~0.7%）。钩子是事件驱动，
     // 不产生任何空闲开销。
+    // ★ 鼠标钩子按需装卸（2026-10-24）：没有鼠标功能时它根本不该被系统调用。
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let hook = match InputHook::start(event_tx) {
         Ok(h) => {
-            log::info!("键鼠钩子已安装");
+            log::info!("键盘钩子已安装（鼠标钩子按需启用）");
             Some(h)
         }
         Err(e) => {
             // 装不上钩子不是致命错误：面板、托盘、配置都还能用，只是没有特效输入。
-            log::error!("安装键鼠钩子失败，特效将不响应输入: {e}");
+            log::error!("安装键盘钩子失败，特效将不响应输入: {e}");
             None
         }
     };

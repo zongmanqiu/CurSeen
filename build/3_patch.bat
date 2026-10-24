@@ -8,7 +8,7 @@ REM Rule: for every sub-directory of main/patches/ whose name matches a
 REM directory under .3rdParty/, copy its whole tree over (recursive, overwrite),
 REM except the registry file PATCHES.md itself. Example:
 REM
-REM   main\patches\wind-ui-rust-0.20.0\**  ->  .3rdParty\wind-ui-rust-0.20.0\**
+REM   main\patches\wind-ui-rust-0.30.0\**  ->  .3rdParty\wind-ui-rust-0.30.0\**
 REM
 REM WHY one-way: .3rdParty/ usually holds the PRISTINE upstream sources right
 REM after 2_download.bat, so copying back would overwrite the authoritative

@@ -1223,6 +1223,10 @@ fn monitor_loop(
                     if n > 0 {
                         if let Ok(p) = ren.GetBuffer((n / frame_bytes) as u32) {
                             if !p.is_null() {
+                                // SAFETY: `p` 是 `GetBuffer(n / frame_bytes)` 返回的设备缓冲，
+                                // 可写 `n / frame_bytes * frame_bytes == n` 字节（非 null 已判）；
+                                // `n` 已按整帧向下取整且 `n <= pending.len()`，源区间有效；
+                                // 源是自己的 `Vec`、目的是 WASAPI 的环形缓冲，**不重叠**。
                                 std::ptr::copy_nonoverlapping(pending.as_ptr(), p, n);
                                 let _ = ren.ReleaseBuffer((n / frame_bytes) as u32, 0);
                                 pending.drain(..n);

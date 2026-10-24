@@ -21,9 +21,9 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 
 | 组件 | 版本 | 许可证 | 位置 | 修改 |
 |---|---|---|---|---|
-| `windui` | 0.20.0 | MIT OR Apache-2.0 | `.3rdParty/wind-ui-rust-0.20.0`（path 依赖，**不在仓库内**） | 有，逐条登记在 **`patches/wind-ui-rust-0.20.0/PATCHES.md`**；源码里每处用 `★ CurSeen 补丁 0NN` 标注 |
+| `windui` | 0.30.0 | MIT OR Apache-2.0 | `.3rdParty/wind-ui-rust-0.30.0`（path 依赖，**不在仓库内**） | 有，逐条登记在 **`patches/wind-ui-rust-0.30.0/PATCHES.md`**；源码里每处用 `★ CurSeen 补丁 0NN` 标注 |
 
-**我们的修改在哪里可以取到**：`patches/wind-ui-rust-0.20.0/` 存放的是**修改后的完整文件**
+**我们的修改在哪里可以取到**：`patches/wind-ui-rust-0.30.0/` 存放的是**修改后的完整文件**
 （不是 diff），与 `PATCHES.md` 的逐条说明一一对应——这就是 AGPL-3.0 / MIT 所要求的
 "提供修改"的落点。上游原始归档 + 本仓库的 `patches/`，两者合起来构成可分发的对应源码。
 
@@ -37,7 +37,7 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 
 | 组件 | 版本 | 上游地址 |
 |---|---|---|
-| `wind-ui-rust` | 0.20.0 | <https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.20.0> |
+| `wind-ui-rust` | 0.30.0 | <https://codeload.github.com/huanfeng/wind-ui-rust/tar.gz/refs/tags/v0.30.0> |
 
 > `nnnoiseless` 曾经也是 path 依赖，2026-09-28 起直接用 crates.io 版（与本仓 vendored
 > 版逐字一致，实测确认），故从本表与 `.3rdParty/` 中移除。
@@ -120,6 +120,6 @@ build/
 
 - 分发 CurSeen 的二进制时，请连同 `build/` 里的 `LICENSE`、`THIRD-PARTY-NOTICES.md`
   与 `licenses/` 一起分发（它们已放在同一目录，整目录拷贝即可）。
-- 对 `windui` 的本地修改必须可被获取：`patches/wind-ui-rust-0.20.0/PATCHES.md`
-  与 `patches/wind-ui-rust-0.20.0/`（修改后完整文件）即为此而存在。
+- 对 `windui` 的本地修改必须可被获取：`patches/wind-ui-rust-0.30.0/PATCHES.md`
+  与 `patches/wind-ui-rust-0.30.0/`（修改后完整文件）即为此而存在。
 - 本程序为单 exe + `assets/` 的便携形态，配置、日志、运行期产物都留在程序目录。

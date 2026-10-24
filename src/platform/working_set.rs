@@ -7,11 +7,13 @@
 //! 系统，数字才落回基线。它不释放任何内存，只是"看起来也轻了"——对常驻软件，
 //! 这个观感就是用户对"轻量"的全部感知。
 //!
-//! # 三条纪律（pecia 实测踩过坑，别重踩）
+//! # 纪律（pecia 实测踩过坑，别重踩）
 //!
-//! - **只事件驱动，不做 idle/定时轮询**：空闲时反复裁剪会把马上要用的页也逐出工作集，
-//!   下次激活触发 soft-fault 风暴，"切回来变卡"。本项目 park 态本就不出帧，更没有
-//!   理由养一个定时器。
+//! - **不做无条件 idle/定时轮询**：反复裁剪会把马上要用的页也逐出工作集，下次激活触发
+//!   soft-fault 风暴，"切回来变卡"。但完全不做也不行——纯空闲时事件边沿永不发生，工作集
+//!   就一直停在"上次用过的样子"（用户 2026-10-24 实测：只开截图/贴图/剪贴板时后台约
+//!   17 MB，开一下再关面板才掉到 0.2 MB）。折中是 [`idle_tick`]：只有「覆盖层休眠 +
+//!   面板全关 + 真的静置够久 + 工作集确实胖」才整理，且两次之间至少隔 2 分钟。
 //! - **延迟 2 秒**：等释放真正落地、页进入 standby 再裁，避免裁掉即将复用的页。
 //!   系统侧的释放还会更慢（见 [`SWEEP_WAIT`]），所以在 12 秒处补第二刀。
 //! - **录制中跳过这一刀，等下一刀**：录制缓冲是全项目最大的常驻块（DXGI 帧纹理 +
@@ -20,7 +22,8 @@
 //!   再来第二次，这一刀就要等到下一次无关事件才发生。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// 请求代数：每次请求 +1。睡眠醒来的线程发现代数变了（期间又有新请求）就静默退出，
 /// 只留最新一个线程执行裁剪——把风暴式请求合并成一次。
@@ -72,19 +75,102 @@ pub fn request_trim_soon() {
 
 /// 当前进程的提交内存（`PagefileUsage`，KB）——诊断泄漏用（标注留档链路埋点）。
 pub fn private_kb() -> u64 {
+    memory_counters().map_or(0, |pmc| pmc.PagefileUsage as u64 / 1024)
+}
+
+/// 当前进程的工作集（`WorkingSetSize`，KB）——任务管理器"内存"一列的来源。
+pub fn working_set_kb() -> u64 {
+    memory_counters().map_or(0, |pmc| pmc.WorkingSetSize as u64 / 1024)
+}
+
+fn memory_counters() -> Option<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS> {
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut pmc = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
     unsafe {
-        let pmc = PROCESS_MEMORY_COUNTERS {
-            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-            ..Default::default()
-        };
-        let mut pmc = pmc;
         if GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb).is_err() {
-            return 0;
+            return None;
         }
-        pmc.PagefileUsage as u64 / 1024
     }
+    Some(pmc)
+}
+
+// ── 空闲回收（2026-10-24）────────────────────────────────────────────────
+//
+// 只在**真闲着**时整理：静置不足、面板还开着、或者工作集本来就不大，都不动。
+// 上一次整理之后至少隔 2 分钟，避免"刚裁完→用一下→又裁"的抖动。
+
+/// 连续静置多久才允许整理。
+const IDLE_MIN_IDLE: Duration = Duration::from_secs(15);
+/// 两次空闲整理之间的最小间隔（事件路径的请求不受此限）。
+const IDLE_MIN_INTERVAL: Duration = Duration::from_secs(120);
+/// 工作集低于这个值就不裁——没多少可摘的页，徒增一次进程级调用。
+const IDLE_MIN_KB: u64 = 8 * 1024;
+/// 空闲判据采样的最小间隔（`GetProcessMemoryInfo` 不必每 250ms 问一次）。
+const IDLE_PROBE_EVERY: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct IdleState {
+    /// 本轮"可以回收"的状态从何时开始；不满足条件时置 `None`（重新计时）。
+    idle_since: Option<Instant>,
+    /// 上一次真正发起空闲整理的时刻。
+    last_trim: Option<Instant>,
+    /// 上一次询问工作集的时刻（节流用）。
+    last_probe: Option<Instant>,
+}
+
+fn idle_state() -> &'static Mutex<IdleState> {
+    static STATE: std::sync::OnceLock<Mutex<IdleState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(IdleState::default()))
+}
+
+/// 空闲整理判据（纯函数，便于单测）。
+fn idle_trim_due(idle_for: Duration, since_last: Option<Duration>, ws_kb: u64) -> bool {
+    idle_for >= IDLE_MIN_IDLE
+        && since_last.is_none_or(|d| d >= IDLE_MIN_INTERVAL)
+        && ws_kb >= IDLE_MIN_KB
+}
+
+/// 250ms 对账每拍调用一次：`eligible` = 覆盖层已休眠且没有面板/会话需要交互。
+///
+/// ★ 只从 UI 线程调用，锁不跨线程竞争。工作集采样按 [`IDLE_PROBE_EVERY`] 节流：
+///   空闲时每 250ms 问一次系统内存没有意义，还正好制造我们要消除的"偷偷在跑"。
+pub fn idle_tick(eligible: bool) {
+    let now = Instant::now();
+    let Ok(mut st) = idle_state().lock() else {
+        return;
+    };
+    if !eligible {
+        st.idle_since = None;
+        return;
+    }
+    let since = *st.idle_since.get_or_insert(now);
+    if now.duration_since(since) < IDLE_MIN_IDLE {
+        return;
+    }
+    if st
+        .last_probe
+        .is_some_and(|t| now.duration_since(t) < IDLE_PROBE_EVERY)
+    {
+        return;
+    }
+    st.last_probe = Some(now);
+    let since_last = st.last_trim.map(|t| now.duration_since(t));
+    let ws_kb = working_set_kb();
+    if !idle_trim_due(now.duration_since(since), since_last, ws_kb) {
+        return;
+    }
+    st.last_trim = Some(now);
+    drop(st);
+    log::info!(
+        "空闲回收：工作集 {:.1} MB（已静置 {}s），请求整理",
+        ws_kb as f64 / 1024.0,
+        now.duration_since(since).as_secs()
+    );
+    request_trim_soon();
 }
 
 /// 立即把进程工作集交还系统。只摘页、不释放内存，随时调用都安全；正常走
@@ -121,5 +207,44 @@ mod tests {
         request_trim_soon();
         request_trim_soon();
         request_trim_soon();
+    }
+
+    /// ★ 空闲回收必须同时满足「静置够久」「距上次够久」「工作集够大」，缺一不可。
+    ///
+    /// 这三条各自防一种劣化：静置不足 = 把马上要用的页逐出（soft-fault 风暴）；
+    /// 间隔不足 = 刚裁完又裁的抖动；体积不足 = 为了几 MB 白调一次进程级 API。
+    #[test]
+    fn idle_trim_requires_settle_interval_and_size() {
+        let settled = IDLE_MIN_IDLE + Duration::from_secs(1);
+        // 命中：三条全满足。
+        assert!(idle_trim_due(settled, None, IDLE_MIN_KB));
+        assert!(idle_trim_due(
+            settled,
+            Some(IDLE_MIN_INTERVAL),
+            IDLE_MIN_KB + 1
+        ));
+        // 静置不足。
+        assert!(!idle_trim_due(
+            IDLE_MIN_IDLE - Duration::from_secs(1),
+            None,
+            IDLE_MIN_KB
+        ));
+        // 距上次整理不足。
+        assert!(!idle_trim_due(
+            settled,
+            Some(IDLE_MIN_INTERVAL - Duration::from_secs(1)),
+            IDLE_MIN_KB
+        ));
+        // 工作集不够大。
+        assert!(!idle_trim_due(settled, None, IDLE_MIN_KB - 1));
+    }
+
+    /// 工作集读数必须来自真实进程（0 代表 API 失败，会把空闲判据永远判假）。
+    #[test]
+    fn working_set_kb_is_readable() {
+        assert!(
+            working_set_kb() > 0,
+            "GetProcessMemoryInfo 应能读到自身工作集"
+        );
     }
 }

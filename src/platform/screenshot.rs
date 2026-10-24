@@ -28,6 +28,7 @@ use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 
 use crate::core::error::{CurSeenError, Result};
+use crate::core::image::RgbaBitmap;
 use crate::platform::display::ScreenRect;
 
 /// [`Shot`] 的真身已下沉到 `core::image`（它是纯数据：BGRA + 尺寸，无 Win32 调用）。
@@ -203,7 +204,12 @@ fn read_dib(dc: HDC, bmp: HBITMAP, w: i32, h: i32) -> Result<Shot> {
     Ok(Shot { w, h, bgra: buf })
 }
 
-/// PNG 编码。压缩级别取 `Default`：截图是低频操作，多花两百毫秒换个明显更小的文件划算。
+/// PNG 编码（**用户可见落点**用：默认压缩档）。
+///
+/// 默认档 1920×1080 实测 median 122–123 ms、177–178 KB（n=200 正序 / n=100 倒序）。
+/// 程序内部 `temp/` 的自动留档不走这里，走 [`encode_png_fast`]（median 14–15 ms、
+/// 510–514 KB，2.9×）；两者解码出的像素完全一致，只差体积与耗时。「另存为」、剪贴板
+/// 历史、脚本导出都留在默认档：用户挑的落点不该为省一百毫秒把文件撑大三倍。
 pub fn encode_png(shot: &Shot) -> Result<Vec<u8>> {
     use png::{BitDepth, ColorType, Encoder};
     let mut out = Vec::new();
@@ -221,7 +227,7 @@ pub fn encode_png(shot: &Shot) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// 存成 PNG 文件（父目录不存在则创建）。
+/// 存成 PNG 文件（父目录不存在则创建）。用户可见落点用这一版（默认压缩档）。
 pub fn save_png(shot: &Shot, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -231,26 +237,108 @@ pub fn save_png(shot: &Shot, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// PNG 编码（**程序内部 `temp/` 自动留档专用**的快档）。
+///
+/// 压缩级别 `Fastest`：1920×1080 实测 median 14–15 ms（默认档 122–123 ms），文件
+/// 510–514 KB（默认档 177–178 KB，2.9×）。用户没有指定位置、只用于回溯的留档拿体积
+/// 换确认时延；用户点「另存为」选的落点仍走 [`encode_png`]。
+///
+/// 消费 `shot`：换序直接在原缓冲上做（[`Shot::into_rgba`]），不再多分配一份 `w*h*4`。
+pub fn encode_png_fast(shot: Shot) -> Result<Vec<u8>> {
+    let (w, h) = (shot.w as u32, shot.h as u32);
+    let rgba = shot.into_rgba();
+    encode_rgba_fast(w, h, &rgba)
+}
+
+/// [`encode_png_fast`] 的直通版：直接编码非预乘 RGBA 位图，不造中间 `Shot`。
+///
+/// 截图确认 / 标注留档手里就是 `RgbaBitmap`；旧路为调编码器先把它换成 BGRA，编码器
+/// 再换回 RGBA——两趟整帧都是白走的。
+pub fn encode_png_rgba_fast(bmp: &RgbaBitmap) -> Result<Vec<u8>> {
+    encode_rgba_fast(bmp.w, bmp.h, &bmp.rgba)
+}
+
+/// `Fastest` 档的实际编码（两个入口共用同一份，避免两处参数漂移）。
+fn encode_rgba_fast(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    use png::{BitDepth, ColorType, Compression, Encoder};
+    let mut out = Vec::new();
+    {
+        let mut enc = Encoder::new(&mut out, w, h);
+        enc.set_color(ColorType::Rgba);
+        enc.set_depth(BitDepth::Eight);
+        enc.set_compression(Compression::Fastest);
+        let mut writer = enc
+            .write_header()
+            .map_err(|e| CurSeenError::Unsupported(box_str(&format!("PNG 头: {e}"))))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| CurSeenError::Unsupported(box_str(&format!("PNG 数据: {e}"))))?;
+    }
+    Ok(out)
+}
+
+/// 存成 PNG 文件（内部临时留档的快档，语义见 [`encode_png_fast`]）。
+pub fn save_png_fast(shot: Shot, path: &std::path::Path) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let bytes = encode_png_fast(shot)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// 存成 PNG 文件（内部临时留档的快档，直通版，语义见 [`encode_png_rgba_fast`]）。
+pub fn save_png_rgba_fast(bmp: &RgbaBitmap, path: &std::path::Path) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let bytes = encode_png_rgba_fast(bmp)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// 把一帧放到剪贴板（CF_DIB）。
 ///
 /// 用 CF_DIB 而不是 PNG：前者是画图板 / 微信 / Word / 浏览器全都认的通用位图格式，
 /// 后者只有部分应用注册了。`CF_DIB` 要求**自下而上**的行序，所以这里要把行倒过来写。
 pub fn to_clipboard(shot: &Shot) -> Result<()> {
-    let w = shot.w;
-    let h = shot.h;
-    // ★★ 不变量先钉死，再碰 `unsafe`。`Shot` 是**公开且外部可构造**的结构（PNG 解码、
-    //    缩略图缩放、剪贴板回读都会造一个），一旦 `bgra` 比 `w*h*4` 短，下面那段逐行
-    //    拷贝就会读越界——在 `unsafe` 里越界就是 0xC0000005，且发布版无符号、现场只留
-    //    一句"程序没了"（2026-09-29 剪贴板"复制置顶"一按即崩）。宁可这一笔不写。
+    put_dib(shot.w, shot.h, &shot.bgra, false)
+}
+
+/// 直接把一张非预乘 RGBA 位图放进剪贴板（CF_DIB），不再经 `Shot` 中转。
+///
+/// 截图确认拿到的是 `RgbaBitmap`：旧路 `bitmap_to_shot` 先分配并写一份整帧 BGRA，
+/// 再被 `to_clipboard` 逐行拷进 DIB；这一版只在写 DIB 的那一趟里换 R/B。
+pub fn to_clipboard_rgba(bmp: &RgbaBitmap) -> Result<()> {
+    let w = i32::try_from(bmp.w).map_err(|_| CurSeenError::Unsupported("DIB 尺寸非法"))?;
+    let h = i32::try_from(bmp.h).map_err(|_| CurSeenError::Unsupported("DIB 尺寸非法"))?;
+    put_dib(w, h, &bmp.rgba, true)
+}
+
+/// `src`（自上而下、4 字节/像素）→ CF_DIB 全局内存 → 剪贴板。
+///
+/// `swap_rb` 为真时逐像素 RGBA→BGRA（`RgbaBitmap`）；为假时整行 `memcpy`
+/// （`Shot` 本来就是这个通道序）。两条路都只过一趟整帧。
+fn put_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<()> {
+    // ★★ 不变量先钉死，再碰 `unsafe`。`Shot` / `RgbaBitmap` 都是**公开且外部可构造**
+    //    的结构（PNG 解码、缩略图缩放、剪贴板回读都会造一个），一旦像素缓冲比 `w*h*4`
+    //    短，下面那段逐行拷贝就会读越界——在 `unsafe` 里越界就是 0xC0000005，且发布版
+    //    无符号、现场只留一句"程序没了"（2026-09-29 剪贴板"复制置顶"一按即崩）。
+    //    宁可这一笔不写。
     if w <= 0 || h <= 0 {
-        return Err(CurSeenError::Unsupported("Shot 尺寸非法"));
+        return Err(CurSeenError::Unsupported("DIB 尺寸非法"));
     }
     let stride = (w as usize) * 4;
-    if shot.bgra.len() < stride * (h as usize) {
-        return Err(CurSeenError::Unsupported("Shot 像素数据短于尺寸声明"));
+    let Some(pixel_bytes) = stride.checked_mul(h as usize) else {
+        return Err(CurSeenError::Unsupported("DIB 尺寸非法"));
+    };
+    if src.len() < pixel_bytes {
+        return Err(CurSeenError::Unsupported("DIB 像素数据短于尺寸声明"));
     }
     let header = std::mem::size_of::<BITMAPINFOHEADER>();
-    let total = header + stride * (h as usize);
+    let Some(total) = header.checked_add(pixel_bytes) else {
+        return Err(CurSeenError::Unsupported("DIB 尺寸非法"));
+    };
     unsafe {
         let hg =
             GlobalAlloc(GHND, total).map_err(|_| CurSeenError::Unsupported("GlobalAlloc 失败"))?;
@@ -262,26 +350,15 @@ pub fn to_clipboard(shot: &Shot) -> Result<()> {
             let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
             return Err(CurSeenError::Unsupported("GlobalLock 失败"));
         }
-        {
+        let written = {
             let dst = std::slice::from_raw_parts_mut(ptr.cast::<u8>(), total);
-            let bi = dst.as_mut_ptr().cast::<BITMAPINFOHEADER>();
-            std::ptr::write(
-                bi,
-                BITMAPINFOHEADER {
-                    biSize: header as u32,
-                    biWidth: w,
-                    biHeight: h, // 正 = 自下而上
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    biSizeImage: (stride * h as usize) as u32,
-                    ..Default::default()
-                },
-            );
-            for row in 0..h as usize {
-                let src = &shot.bgra[(h as usize - 1 - row) * stride..][..stride];
-                dst[header + row * stride..header + (row + 1) * stride].copy_from_slice(src);
-            }
+            write_dib(dst, w, h, src, swap_rb)
+        };
+        if !written {
+            // 上面的校验与本函数对尺寸的判断漂移了；宁可这一笔不写。
+            let _ = GlobalUnlock(hg);
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+            return Err(CurSeenError::Unsupported("DIB 数据长度不符"));
         }
         let _ = GlobalUnlock(hg);
 
@@ -311,6 +388,62 @@ pub fn to_clipboard(shot: &Shot) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 把 `BITMAPINFOHEADER` + 自下而上的像素写进 `dst`；尺寸或源长度不符返回 `false`。
+///
+/// 返回 `bool` 而不是 `Result`：两种失败在调用方是同一件事（这一笔不写），而
+/// `put_dib` 在调它之前已经按同一套尺寸算过一遍——这里再判一次是防两者漂移。
+fn write_dib(dst: &mut [u8], w: i32, h: i32, src: &[u8], swap_rb: bool) -> bool {
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let stride = (w as usize) * 4;
+    let Some(pixel_bytes) = stride.checked_mul(h as usize) else {
+        return false;
+    };
+    let header = std::mem::size_of::<BITMAPINFOHEADER>();
+    let Some(total) = header.checked_add(pixel_bytes) else {
+        return false;
+    };
+    if dst.len() < total || src.len() < pixel_bytes {
+        return false;
+    }
+    let bi = dst.as_mut_ptr().cast::<BITMAPINFOHEADER>();
+    unsafe {
+        // SAFETY: `dst.len() >= header + pixel_bytes` 已在上方校验，头部这一笔不越界；
+        // `write_unaligned` 不要求对齐（`dst` 可能是只保证 1 字节对齐的 `Vec<u8>`，生产里是
+        // GlobalAlloc 内存）。`bi` 与随后的 `payload` 借用不重叠：头部写完就丢指针。
+        std::ptr::write_unaligned(
+            bi,
+            BITMAPINFOHEADER {
+                biSize: header as u32,
+                biWidth: w,
+                biHeight: h, // 正 = 自下而上
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: pixel_bytes as u32,
+                ..Default::default()
+            },
+        );
+    }
+    let payload = &mut dst[header..total];
+    for row in 0..h as usize {
+        let src_row = &src[(h as usize - 1 - row) * stride..][..stride];
+        let dst_row = &mut payload[row * stride..(row + 1) * stride];
+        if swap_rb {
+            for (s, d) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = s[3];
+            }
+        } else {
+            dst_row.copy_from_slice(src_row);
+        }
+    }
+    true
 }
 
 /// `CurSeenError::Unsupported` 只吃 `&'static str`，把动态串漏成静态串。
@@ -350,6 +483,121 @@ mod tests {
         assert!(bytes.len() > 40);
     }
 
+    /// 快档只换压缩级别，像素必须与默认档**完全一样**。
+    ///
+    /// 样本带非零 α 与互不相同的 R/B/G：若 `into_rgba` 漏换序、编码器写错通道，
+    /// 解码回来就对不上（只看 PNG 签名发现不了这类错）。
+    #[test]
+    fn fast_png_decodes_to_the_same_pixels_as_default() {
+        let s = Shot {
+            w: 2,
+            h: 2,
+            bgra: vec![
+                0x11, 0x22, 0x33, 0x7F, 0x44, 0x55, 0x66, 0x00, 0x77, 0x88, 0x99, 0x01, 0xAA, 0xBB,
+                0xCC, 0x02,
+            ],
+        };
+        let want = s.to_rgba();
+        let bytes = encode_png_fast(s).expect("快档应编码成功");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("读 PNG 头");
+        let mut buf = vec![0_u8; reader.output_buffer_size().expect("输出缓冲可算")];
+        let info = reader.next_frame(&mut buf).expect("解码 PNG");
+        buf.truncate(info.buffer_size());
+        assert_eq!(buf, want, "解码像素必须与 to_rgba 逐字节一致");
+    }
+
+    /// DIB 的两条写入口（RGBA 直通 / BGRA）必须产生同一份字节，且首行是源图最后一行。
+    #[test]
+    fn dib_writer_matches_between_rgba_and_bgra() {
+        let rgba = vec![
+            0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF, // 上排
+            0x70, 0x80, 0x90, 0xFF, 0xA0, 0xB0, 0xC0, 0xFF, // 下排
+        ];
+        let bmp = RgbaBitmap::new(2, 2, rgba).expect("位图");
+        let shot = crate::core::backdrop::bitmap_to_shot(&bmp).expect("帧");
+        let header = std::mem::size_of::<BITMAPINFOHEADER>();
+        let total = header + 2 * 2 * 4;
+        let mut from_rgba = vec![0_u8; total];
+        let mut from_bgra = vec![0_u8; total];
+        assert!(
+            write_dib(&mut from_rgba, 2, 2, &bmp.rgba, true),
+            "RGBA 入口"
+        );
+        assert!(
+            write_dib(&mut from_bgra, 2, 2, &shot.bgra, false),
+            "BGRA 入口"
+        );
+        assert_eq!(from_rgba, from_bgra, "两条入口必须逐字节相同");
+
+        // 像素区第一行 = 源图最后一行（自下而上），通道是 BGRA。
+        let px = &from_rgba[header..];
+        assert_eq!(&px[0..4], &[0x90, 0x80, 0x70, 0xFF]);
+        assert_eq!(&px[4..8], &[0xC0, 0xB0, 0xA0, 0xFF]);
+        // 头字段：正高度（自下而上）、32bpp、无压缩。
+        let w_le = i32::from_le_bytes(from_rgba[4..8].try_into().unwrap());
+        let h_le = i32::from_le_bytes(from_rgba[8..12].try_into().unwrap());
+        assert_eq!((w_le, h_le), (2, 2));
+        assert_eq!(
+            u16::from_le_bytes(from_rgba[14..16].try_into().unwrap()),
+            32
+        );
+    }
+
+    /// 端到端：RGBA 直接写剪贴板，读回来必须与 `bitmap_to_shot` 逐字节相同。
+    ///
+    /// 只测 `write_dib` 抓不到「wrapper 把 `swap_rb` 传成 false」那一行，这条走完整往返。
+    #[cfg(windows)]
+    #[test]
+    fn rgba_clipboard_roundtrip_keeps_channels_and_row_order() {
+        let rgba = vec![
+            0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF, // 上排
+            0x70, 0x80, 0x90, 0xFF, 0xA0, 0xB0, 0xC0, 0xFF, // 下排
+        ];
+        let bmp = RgbaBitmap::new(2, 2, rgba).expect("位图");
+        let expected = crate::core::backdrop::bitmap_to_shot(&bmp).expect("帧");
+        // 剪贴板被别的进程占着是常态：短暂重试，但失败就是失败。
+        let mut wrote = false;
+        for _ in 0..20 {
+            if to_clipboard_rgba(&bmp).is_ok() {
+                wrote = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(wrote, "剪贴板持续被占用，无法验证");
+        let mut back = None;
+        for _ in 0..20 {
+            if let Some(s) = crate::platform::clipboard::get_image() {
+                back = Some(s);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let back = back.expect("读回剪贴板图像");
+        assert_eq!((back.w, back.h), (2, 2));
+        assert_eq!(back.bgra, expected.bgra, "通道顺序或行序与 Shot 版不同");
+    }
+
+    /// 直通版快档：解码像素必须与位图原字节完全一致（不换序、不补 α）。
+    #[test]
+    fn rgba_fast_png_decodes_to_the_same_pixels() {
+        let rgba = vec![
+            0x11, 0x22, 0x33, 0x7F, 0x44, 0x55, 0x66, 0x00, // 上排
+            0x77, 0x88, 0x99, 0x01, 0xAA, 0xBB, 0xCC, 0x02, // 下排
+        ];
+        let bmp = RgbaBitmap::new(2, 2, rgba.clone()).expect("位图");
+        let bytes = encode_png_rgba_fast(&bmp).expect("快档应编码成功");
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("读 PNG 头");
+        let mut buf = vec![0_u8; reader.output_buffer_size().expect("输出缓冲可算")];
+        let info = reader.next_frame(&mut buf).expect("解码 PNG");
+        buf.truncate(info.buffer_size());
+        assert_eq!(buf, rgba, "解码像素必须与 RgbaBitmap 逐字节一致");
+    }
+
     #[cfg(windows)]
     #[test]
     fn grab_virtual_screen_is_non_empty() {
@@ -358,5 +606,186 @@ mod tests {
         assert_eq!(shot.w, r.w);
         assert_eq!(shot.h, r.h);
         assert_eq!(shot.bgra.len(), (r.w as usize) * (r.h as usize) * 4);
+    }
+
+    /// 生产路径量具：帧→位图两版、PNG 两档、出口直通臂的实际耗时与体积。
+    ///
+    /// 跑法：`PERF_ROUNDS=200 cargo test --release --lib perf_probe_screenshot_paths -- --ignored --nocapture --test-threads=1`
+    ///
+    /// ★ 对照臂也是**生产函数**（借用版 `shot_to_bitmap` / 默认档 `encode_png`），不另写
+    ///   一份等价实现——探针只该量产品，不该量它的复刻。`shot.clone()` 只为让同一帧喂给
+    ///   多个分支，落在计时区间之外。`PERF_REVERSE=1` 把成对的臂倒过来跑，
+    ///   用来排除"后跑的那一臂吃到热缓存"。
+    ///
+    /// ★ m06 的剪贴板两臂只量**写入**（`to_clipboard` / `to_clipboard_rgba`），
+    ///   `bitmap_to_shot` 单独一臂——旧端点 = 两者相加。这条探针会真的改写剪贴板
+    ///   （每轮 2 次，共 2n 次），只在手动跑时执行。
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn perf_probe_screenshot_paths() {
+        use std::time::{Duration, Instant};
+        let rounds: usize = std::env::var("PERF_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3)
+            .max(1);
+        let reverse = std::env::var("PERF_REVERSE").is_ok();
+        let r = crate::platform::display::virtual_screen();
+        let _ = grab(r).expect("预热抓屏");
+
+        let mut grab_t = Vec::new();
+        let mut borrowed_t = Vec::new();
+        let mut owned_t = Vec::new();
+        let mut default_t = Vec::new();
+        let mut fast_t = Vec::new();
+        let mut save_t = Vec::new();
+        let mut to_shot_t = Vec::new();
+        let mut clip_old_t = Vec::new();
+        let mut clip_new_t = Vec::new();
+        let mut png_rgba_slow_t = Vec::new();
+        let mut png_rgba_fast_t = Vec::new();
+        let mut save_rgba_t = Vec::new();
+        let (mut slow_len, mut fast_len, mut disk_len) = (0_usize, 0_usize, 0_usize);
+        let (mut rgba_slow_len, mut rgba_fast_len) = (0_usize, 0_usize);
+        let (mut w, mut h) = (0, 0);
+
+        for round in 0..rounds {
+            let t = Instant::now();
+            let shot = grab(r).expect("抓屏");
+            grab_t.push(t.elapsed());
+            (w, h) = (shot.w, shot.h);
+
+            let t = Instant::now();
+            let borrowed = crate::core::backdrop::shot_to_bitmap(&shot).expect("借用版");
+            borrowed_t.push(t.elapsed());
+
+            let t = Instant::now();
+            let owned = crate::core::backdrop::shot_to_bitmap_owned(shot.clone()).expect("消费版");
+            owned_t.push(t.elapsed());
+            assert_eq!(owned.rgba, borrowed.rgba, "两版必须逐字节一致");
+            drop(borrowed);
+            drop(owned);
+
+            // ── 出口直通臂（m06）：旧端点 = bitmap_to_shot + 写剪贴板/编码 ──────────
+            let bmp = crate::core::backdrop::shot_to_bitmap(&shot).expect("出口位图");
+            let t = Instant::now();
+            let bgra = crate::core::backdrop::bitmap_to_shot(&bmp).expect("BGRA 中间帧");
+            to_shot_t.push(t.elapsed());
+
+            if reverse {
+                let t = Instant::now();
+                to_clipboard_rgba(&bmp).expect("直通剪贴板");
+                clip_new_t.push(t.elapsed());
+
+                let t = Instant::now();
+                to_clipboard(&bgra).expect("旧剪贴板");
+                clip_old_t.push(t.elapsed());
+            } else {
+                let t = Instant::now();
+                to_clipboard(&bgra).expect("旧剪贴板");
+                clip_old_t.push(t.elapsed());
+
+                let t = Instant::now();
+                to_clipboard_rgba(&bmp).expect("直通剪贴板");
+                clip_new_t.push(t.elapsed());
+            }
+
+            if reverse {
+                let t = Instant::now();
+                let fast = encode_png_rgba_fast(&bmp).expect("RGBA 快档");
+                png_rgba_fast_t.push(t.elapsed());
+                rgba_fast_len = fast.len();
+
+                let t = Instant::now();
+                let slow = encode_png(&bgra).expect("RGBA 默认档");
+                png_rgba_slow_t.push(t.elapsed());
+                rgba_slow_len = slow.len();
+            } else {
+                let t = Instant::now();
+                let slow = encode_png(&bgra).expect("RGBA 默认档");
+                png_rgba_slow_t.push(t.elapsed());
+                rgba_slow_len = slow.len();
+
+                let t = Instant::now();
+                let fast = encode_png_rgba_fast(&bmp).expect("RGBA 快档");
+                png_rgba_fast_t.push(t.elapsed());
+                rgba_fast_len = fast.len();
+            }
+
+            let path_rgba =
+                std::env::temp_dir().join(format!("curseen_perf_probe_rgba_{round}.png"));
+            let t = Instant::now();
+            save_png_rgba_fast(&bmp, &path_rgba).expect("RGBA 快档落盘");
+            save_rgba_t.push(t.elapsed());
+            let _ = std::fs::remove_file(&path_rgba);
+            drop(bgra);
+            drop(bmp);
+
+            if reverse {
+                let t = Instant::now();
+                let fast = encode_png_fast(shot.clone()).expect("快档");
+                fast_t.push(t.elapsed());
+                fast_len = fast.len();
+
+                let t = Instant::now();
+                let slow = encode_png(&shot).expect("默认档");
+                default_t.push(t.elapsed());
+                slow_len = slow.len();
+            } else {
+                let t = Instant::now();
+                let slow = encode_png(&shot).expect("默认档");
+                default_t.push(t.elapsed());
+                slow_len = slow.len();
+
+                let t = Instant::now();
+                let fast = encode_png_fast(shot.clone()).expect("快档");
+                fast_t.push(t.elapsed());
+                fast_len = fast.len();
+            }
+
+            let path = std::env::temp_dir().join(format!("curseen_perf_probe_{round}.png"));
+            let t = Instant::now();
+            save_png_fast(shot, &path).expect("快档落盘");
+            save_t.push(t.elapsed());
+            disk_len = std::fs::metadata(&path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        fn stat(name: &str, mut v: Vec<Duration>) {
+            v.sort_unstable();
+            let n = v.len();
+            let p95 = v[(n * 95 / 100).min(n - 1)];
+            let mean = v.iter().sum::<Duration>() / n as u32;
+            println!(
+                "{name}: n={n} min={:?} mean={mean:?} median={:?} p95={p95:?} max={:?}",
+                v[0],
+                v[n / 2],
+                v[n - 1]
+            );
+        }
+        println!("--- {w}x{h} ---");
+        stat("grab", grab_t);
+        stat("convert_borrowed", borrowed_t);
+        stat("convert_owned", owned_t);
+        stat("png_default", default_t);
+        stat("png_fast", fast_t);
+        stat("save_png_fast", save_t);
+        stat("bitmap_to_shot", to_shot_t);
+        stat("clip_old(write only)", clip_old_t);
+        stat("clip_rgba(write only)", clip_new_t);
+        stat("png_rgba_default", png_rgba_slow_t);
+        stat("png_rgba_fast", png_rgba_fast_t);
+        stat("save_png_rgba_fast", save_rgba_t);
+        println!(
+            "sizes: default={slow_len} B fast={fast_len} B ({:.2}x) on_disk={disk_len} B",
+            fast_len as f64 / slow_len as f64
+        );
+        println!(
+            "sizes(rgba): default={rgba_slow_len} B fast={rgba_fast_len} B ({:.2}x)",
+            rgba_fast_len as f64 / rgba_slow_len as f64
+        );
     }
 }

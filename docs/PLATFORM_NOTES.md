@@ -61,3 +61,22 @@
 | exe **不可复现**：PE 头 `TimeDateStamp` 写的是构建时刻 | MD5 跨构建不可比。判"代码有没有变"要抹掉 PE 头那 4 字节再比哈希；`deploy.py` 的 `MD5_MATCH=True` 只证明"部署的就是刚编出来的那个文件" |
 | `build.rs` 的 `rerun-if-changed` 指向**不存在**的路径 ⇒ cargo 判"永远脏"，每次全量重编 | 新增前先确认目标存在（现有那行已按存在性下发） |
 | 编译成本结构：测试本身只跑几秒，慢的全是编译（改一个 `.rs` ≈ 1m25s） | 攒一批改动再编一次 |
+
+## 七、窗口最小 / 最大跟踪尺寸收口（贴图缩放，2026-10-24）
+
+> 用户报"贴图长图，放大之后图片并没有放大，只是外部的边框在放大；复制很多行文字再贴图
+> 就能看出来"。根因在这一节，修法是 windui 补丁 095（贴图窗建窗即 `WS_POPUP`）。
+
+| 结论 | 依据 |
+|---|---|
+| 非 `WS_POPUP` 的顶层窗（`WS_OVERLAPPEDWINDOW` 一族）在 `CreateWindowExW` **与** `SetWindowPos` 两处都被按 `WM_GETMINMAXINFO` 的跟踪尺寸收口 | `tests/probes/pin_zoom_clamp_probe.rs` 四变体对照；本机 `SM_CXMINTRACK=136` `SM_CYMINTRACK=39` |
+| **宽下限 136 是硬下限**，`ptMinTrackSize` 压不到更低：写 (1,1) 仍得 136，写 200 才变 200 | 同上（变体 2 = 只写 min=(1,1) 且不调 `DefWindowProcW`，结果与默认完全一致，仍被钳） |
+| **高上限约一屏**（本机 1100），来自 `DefWindowProcW` 预填的 `ptMaxTrackSize`：只写 `ptMinTrackSize` 不调 `DefWindowProcW` 时高仍被钳到 1100；显式写 `ptMaxTrackSize=16384` 才解除 | 同上（变体 1 vs 变体 2 的差集） |
+| `Window::min_size()` **治不了**这个病（只写 `ptMinTrackSize`，且 136 是硬下限） | 变体 2 实测 |
+| **换成 `WS_POPUP` 后两项收口全部消失**：2×80 / 3000×80 / 60×4000 原样授予 | 同上（变体 3：建窗后 `SetWindowLongPtrW(GWL_STYLE, WS_POPUP\|WS_VISIBLE)` + `SWP_FRAMECHANGED`） |
+| 换了样式，frameless 的其余机制**不受影响**：`WM_NCCALCSIZE` 读宿主状态（非样式位）、`WM_NCHITTEST` 的缩放热区判据是 `WS_THICKFRAME`（新旧样式都没有它）、`WM_GETMINMAXINFO` 在本窗 `min_w/min_h` 恒 0 时落到 `DefWindowProcW` 而 popup 无收口 | 读 windui `platform/win32/mod.rs` + e2e 探针实测 |
+| 症状与根因的对应：窄长条图（多行短文字栅格化出来的，12:1）窗口被顶宽 ⇒ `fit_aspect` 把图居中、两侧黑边；长图放大到窗高越过上限 ⇒ **图片高度被钉死**而另一维还在长 ⇒ "图片没放大、只是边框在放大" | `pin_zoom_e2e_probe`：撤掉 `.popup(true)` 复现 136×724 + 品红只占 60；修后 64×724 + 品红铺满 (2,2,60,720)，3 格 ×1.30 |
+
+判据写法：**平台级四变体对照探针**（默认 / 接管 minmax 写满 / 只写 min / 换 `WS_POPUP`）
+定修法，**端到端探针**（真 exe + 剪贴板放极端宽高比纯品红 CF_DIB + 截屏量品红包围盒）
+定验收。两者都必须能自己红一次。

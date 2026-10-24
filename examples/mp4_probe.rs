@@ -122,9 +122,10 @@ fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let paths: Vec<PathBuf> = if args.is_empty() {
-        vec![PathBuf::from(
-            "E:/tmp/AI.Agent/CurSeen/temp/record/sample.mp4",
-        )]
+        vec![PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../temp/record/sample.mp4"
+        ))]
     } else {
         args.iter().map(PathBuf::from).collect()
     };

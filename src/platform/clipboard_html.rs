@@ -148,6 +148,9 @@ pub unsafe fn write_text_and_html(text: &str, html: Option<&[u8]>) {
         let _ = GlobalFree(Some(hg));
         return;
     }
+    // SAFETY: `p` 是 `GlobalLock(hg)` 成功返回的非空指针，可写 `GlobalAlloc(GHND,
+    // utf16.len() * 2)` 个字节，正好等于源的长度（u16 = 2 字节）；源是本地 `Vec`，
+    // 目的是全局堆块，**不重叠**。写入后立刻 `GlobalUnlock`。
     std::ptr::copy_nonoverlapping(utf16.as_ptr(), p.cast::<u16>(), utf16.len());
     let _ = GlobalUnlock(hg);
 
@@ -159,6 +162,9 @@ pub unsafe fn write_text_and_html(text: &str, html: Option<&[u8]>) {
             if hp.is_null() {
                 let _ = GlobalFree(Some(h));
             } else {
+                // SAFETY: `hp` 是 `GlobalLock(h)` 成功返回的非空指针，块大小正是
+                // `GlobalAlloc(GHND, blob.len())`，与源长度逐字节相等；源是调用方的
+                // 切片、目的是全局堆块，**不重叠**；写完立刻 `GlobalUnlock`。
                 std::ptr::copy_nonoverlapping(blob.as_ptr(), hp.cast::<u8>(), blob.len());
                 let _ = GlobalUnlock(h);
                 html_hg = Some(h);

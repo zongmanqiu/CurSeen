@@ -1,8 +1,10 @@
 # CurSeen 项目规则（AGENTS.md）
 
-本文件对 `E:\tmp\AI.Agent\CurSeen` 工作文件夹生效。任何 AI 工具在此文件夹工作时必须遵守。
+本文件对 CurSeen 仓库根目录（本文件所在 `main/` 的上一级）及其全部子目录生效。任何 AI 工具在此文件夹工作时必须遵守。
 
-> 开发流程与提交前清单见《开发指南.md》；发行步骤见 `docs/RELEASE_CHECKLIST.md`。
+> 开发流程与提交前清单见《开发指南.md》；发行步骤见 `docs/RELEASE_CHECKLIST.md`；
+> **外部规范 / 通用建议的裁决清单（采纳哪些、不采纳哪些、为什么）见
+> `docs/DESIGN_ADOPTION.md`**——读过通用规范先查它，已裁决的条目不重新讨论。
 
 ---
 
@@ -45,7 +47,7 @@
 | 随源码的文档（`*.md` / `docs/`） | 未在 DOCS_MANIFEST.md 登记的文档 / 一次性草稿（→ 根 `temp/`） |
 | 构建脚本（`build/*.bat` + `build/*.py`） | 一次性诊断脚本（→ 根 `temp/`） |
 
-> 第三方依赖 `windui` 位于 `.3rdParty/wind-ui-rust-0.20.0`（本地 path 依赖）。
+> 第三方依赖 `windui` 位于 `.3rdParty/wind-ui-rust-0.30.0`（本地 path 依赖）。
 > `.3rdParty/` 在仓库之外，**由 `main/build/deps.txt` + `2_download.bat` 取回上游源码、
 > 再由 `3_patch.bat` 重放本仓库的补丁**——下载地址与补丁归档就是它存在的全部依据。
 > **禁止**把 `main/` 里任何文件复制到 `.3rdParty/`；反向（`.3rdParty/` → `main/`）也不允许。
@@ -146,15 +148,26 @@ python build/hygiene_scan.py      # 期望输出：「违规 0 处」
 2. 改 [`DrawCmd`](src/core/draw.rs) 必须同步改 `src/runtime/render.rs`——两边的命令集是一份契约。
 3. 新增多于 60 行的逻辑必须带对应单测；纯逻辑优先（UI 相关的用离屏渲染探针）。
 4. 注释写**为什么**而不是**做了什么**；每条非常规取舍都要留"踩过才知道"的理由。
-5. 对第三方 `windui` 的任何修改都必须登记进
-   **`main/patches/wind-ui-rust-0.20.0/PATCHES.md`**（编号递增，含背景 / 改法 /
+5. **★ unsafe 必须写 `// SAFETY:`**（义务与证据，不是复述操作）。**指针类** unsafe
+   （`transmute` / `from_raw_*` / `slice::from_raw_*` / `get_unchecked` / `copy_nonoverlapping`）
+   一律要写，漏写 `python build/hygiene_scan.py` 第 6 查会红（硬门禁，阈值 0）。
+   非指针类存量见 `docs/DESIGN_ADOPTION.md` D3，**新增的一律要写**。
+6. **错误要带路径 / 操作**：配置读写这类"用户数据"路径禁止无上下文的自动转换，
+   用 `CurSeenError::IoAt { path, op, source }`；只有上下文无关处才能 `From` 自动转。
+   （同一底层错误出现在 ≥2 条语义不同的路径时，自动转换会让日志只剩 `io error: …`。）
+7. **日志只打一次**：错误只传递，在事件入口和后台任务完成点统一记录——每一层都
+   `log::error!` 会让同一次失败产生五条日志，读的人无从判断影响面。
+8. **所有权签名**：要长期存储就收 `T`，只读就收 `&T`——**绝不让 `&T` 进函数再 `.clone()`**
+   （隐藏成本，还剥夺调用方"这份数据你拿走"的选择权）。newtype 不实现 `Deref`。
+9. 对第三方 `windui` 的任何修改都必须登记进
+   **`main/patches/wind-ui-rust-0.30.0/PATCHES.md`**（编号递增，含背景 / 改法 /
    可复实验收表），并在被改文件里用 `★ CurSeen 补丁 0NN` 标注。
    `tests/docs_consistency.rs` 会扫源码里的标记、回查登记表有没有对应章节——
    漏登记直接红。升级依赖时按该目录从头重放。
    ★ 两条硬约束（同 `patches/README.md`）：**只增不减**（补丁章节永不删节）、
    **禁止反向覆盖**（不得把 `.3rdParty/` 的文件复制回 `patches/` 当归档——那可能是
    未打补丁的副本，会让归档残缺）。
-6. **文档维护**：改了源码 / API / 目录结构，按《开发指南.md》第三节的对照表同步文档，
+10. **文档维护**：改了源码 / API / 目录结构，按《开发指南.md》第三节的对照表同步文档，
    并逐项核对 `DOCS_MANIFEST.md`；新增文档必须同时登记（`main/` 根 `.md` 有白名单门禁）。
    写"新测出来的结论"进现行文档，别只留在 `temp/`。
 

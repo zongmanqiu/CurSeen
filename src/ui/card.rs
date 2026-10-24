@@ -708,8 +708,8 @@ fn hotkey_box_el(
         .clickable()
         .on_click(enter)
         // ★ 失焦即退出捕获态（windui 补丁 094）：点框外的任何地方（别的控件或空白）
-        //   焦点离开本框，`blur` 在下一帧 paint 时触发。
-        .on_blur(blur)
+        //   焦点离开本框，`blur` 在下一帧 paint 时触发。0.30 起回调带 `&mut EventCtx`。
+        .on_blur(move |_ctx| blur())
 }
 
 pub fn hotkey_row(

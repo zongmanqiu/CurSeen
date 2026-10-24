@@ -15,7 +15,7 @@
 //!    加了模块却没写进结构说明；
 //! 4. `.3rdParty/wind-ui-rust-*` 里每一处 `CurSeen 补丁 0NN` 标记，都能在
 //!    `patches/**/PATCHES.md` 找到对应小节——防止"改了第三方却没登记"，那是升级
-//!    依赖时最容易丢的东西。（★ 发现式扫描：不写死版本号，0.16.1→0.19.0→0.20.0
+//!    依赖时最容易丢的东西。（★ 发现式扫描：不写死版本号，0.16.1→0.19.0→0.20.0→0.30.0
 //!    三次迁移都因为写死路径而扫错过地方。）
 //!
 //! 5. 现行文档只写"现在是什么"与"该怎么做"，不带"考古叙述"
@@ -178,11 +178,11 @@ fn test_shipped_licence_bundle_is_complete() {
     let expected = [
         (
             "windui-LICENSE-MIT.txt",
-            ".3rdParty/wind-ui-rust-0.20.0/LICENSE-MIT",
+            ".3rdParty/wind-ui-rust-0.30.0/LICENSE-MIT",
         ),
         (
             "windui-LICENSE-APACHE.txt",
-            ".3rdParty/wind-ui-rust-0.20.0/LICENSE-APACHE",
+            ".3rdParty/wind-ui-rust-0.30.0/LICENSE-APACHE",
         ),
     ];
     for (shipped_name, src_rel) in expected {

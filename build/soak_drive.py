@@ -27,7 +27,7 @@ import time
 from ctypes import wintypes
 from datetime import datetime
 
-ROOT = r"E:\tmp\AI.Agent\CurSeen"
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 BUILD = os.path.join(ROOT, "build")
 MAIN = os.path.join(ROOT, "main")
 OUTDIR = os.path.join(ROOT, "长测产物")

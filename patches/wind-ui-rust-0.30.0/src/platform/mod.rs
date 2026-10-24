@@ -1,0 +1,1880 @@
+//! 平台抽象层。按目标平台分发到具体后端：Windows→`win32`，macOS→`macos`，Linux→`linux`（X11）。
+//!
+//! 各后端对外暴露同形的 API（`run` / `open_url` / `Clipboard`），由本模块按 `cfg` 统一
+//! re-export；上层（`app`/`lib::prelude`）只依赖 `crate::platform::*`，不直接触碰任何具体
+//! 后端，从而保持平台无关。
+//!
+//! 托盘的 `Tray` 三件套**不按 cfg 分发**：声明层收在平台无关的 [`tray`] 模块里，两个后端
+//! 只保留执行半边（消费 `TrayAction`）。此前它是两份完整副本，下游的跨平台性只是「两边
+//! 方法名恰好一样」的巧合，且 macOS 那份直接调 OS 因而回调不可测——理由详见 [`tray`]。
+//!
+//! 平台无关的窗口配置 `WindowConfig` 也定义在本层。
+//! win32 模块名（而非 `windows`）以免与外部 `windows` crate 冲突。
+
+// 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
+#[cfg(windows)]
+pub mod win32;
+#[cfg(windows)]
+pub use win32::clipboard::WinClipboard as Clipboard;
+#[cfg(windows)]
+pub use win32::dragdrop::{drag_files, drag_files_with};
+
+/// 当前活跃窗口的原生句柄（Windows：HWND；其它平台暂无，返回 `None`）。
+///
+/// 给需要直接跟系统打交道的下游用：Shell 上下文菜单、属性对话框、缩略图提取这些
+/// API 都要一个父窗口。只在 UI 线程、事件分发期间或 `ctx.defer_blocking` 的闭包里
+/// 有效——那是消息循环写入它的时机；别的线程或时机拿到的是 0 / 上一次的值。
+#[cfg(windows)]
+pub fn native_window_handle() -> Option<isize> {
+    let h = win32::active_hwnd();
+    (h != 0).then_some(h)
+}
+
+/// 见 Windows 版：macOS 暂未暴露（NSView 指针的生命周期与 windui 的窗口模型还没对齐）。
+#[cfg(not(windows))]
+pub fn native_window_handle() -> Option<isize> {
+    None
+}
+/// 分层覆盖层的「休眠」开关（**CurSeen 补丁 007**）。
+///
+/// 覆盖层整屏时后备缓冲可达数十 MB，功能全关时纯属浪费。置 `true` 后后端释放
+/// `Pixmap` 与 DIB section，下一次 `paint` 生效。见 `win32::layered::set_parked`。
+#[cfg(all(windows, feature = "layered"))]
+pub use win32::layered::{
+    buffer_generation as overlay_buffer_generation, is_parked as overlay_is_parked,
+    request_partial_present as request_overlay_partial_present, set_parked as set_overlay_parked,
+};
+/// 系统的双击时限（毫秒）与漂移阈值（每侧逻辑像素）。
+///
+/// 平台层折算 `click_count` 用的就是这两个值；控件侧认三击
+/// （[`crate::event::TripleClick`]）必须用**同一套**，否则把双击速度调慢的用户
+/// 会遇到"双击好使、三击不灵"——第一、二下按系统阈值判，第三下却按写死的判。
+#[cfg(windows)]
+pub fn double_click_thresholds() -> (u32, i32) {
+    win32::double_click_thresholds()
+}
+
+/// 见 Windows 版。非 Windows 暂用 Windows 的默认值兜底。
+///
+/// macOS 本应读 `NSEvent::doubleClickInterval`；没有接上是因为改这里的人手上没有
+/// 能编译验证的 macOS 环境，与其塞一段编不过的猜测，不如把缺口写明。
+#[cfg(not(windows))]
+pub fn double_click_thresholds() -> (u32, i32) {
+    (500, 4)
+}
+
+/// 用户偏好的界面语言（BCP-47，按优先级排序）。
+///
+/// 供 [`Initial::System`](crate::i18n::Initial::System) 挑启动语言。按**偏好列表**而不是
+/// 单一语言返回：用户可能把「英文优先、中文次之」设成一串，只取第一项会在应用没有英文
+/// 译文时直接掉到 fallback，而本该轮到中文。
+///
+/// 无法取得时返回空表——调用方据此走 fallback，不需要区分"取不到"和"没有偏好"。
+#[cfg(windows)]
+pub fn system_locales() -> Vec<String> {
+    win32::system_locales()
+}
+
+/// 见 Windows 版。
+#[cfg(target_os = "macos")]
+pub fn system_locales() -> Vec<String> {
+    macos::system_locales()
+}
+
+/// 见 Windows 版。
+#[cfg(target_os = "linux")]
+pub fn system_locales() -> Vec<String> {
+    linux::system_locales()
+}
+
+#[cfg(windows)]
+pub use win32::open_url;
+/// 最近一次指针事件是否来自**触控笔**（CurSeen fork：数位板起笔延迟直通）。
+/// 只在指针分发回调（含宿主 `on_event` 同步调用链）内读才有意义，见 win32 侧说明。
+#[cfg(windows)]
+pub use win32::pointer_is_pen;
+/// 见 Windows 版。非 Windows 无笔指针管线，恒为 false。
+#[cfg(not(windows))]
+pub fn pointer_is_pen() -> bool {
+    false
+}
+#[cfg(windows)]
+pub(crate) use win32::run;
+#[cfg(windows)]
+pub(crate) use win32::single_window_open;
+#[cfg(windows)]
+pub(crate) use win32::system_prefers_dark;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::clipboard::MacClipboard as Clipboard;
+#[cfg(target_os = "macos")]
+pub use macos::open_url;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::run;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::system_prefers_dark;
+#[cfg(target_os = "macos")]
+pub use macos::{drag_files, drag_files_with};
+
+/// 见 Windows 版（`win32::single_window_open`）：macOS 的窗口登记表还没接上常驻模式，
+/// 这里恒为 `false`。
+///
+/// 不按"错得显眼"取 `true`：调用方拿它判的是「窗口开着就关掉、否则开一个」，恒真会让
+/// 那条路永远只去关一个不存在的窗口——界面再也唤不出来；恒假最坏是重复开窗请求，而那条
+/// 路上还有 `Window::single` 兜着（已开着就激活既有的那个）。
+#[cfg(target_os = "macos")]
+pub(crate) fn single_window_open(_key: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::clipboard::LinuxClipboard as Clipboard;
+#[cfg(target_os = "linux")]
+pub use linux::open_url;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::run;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::single_window_open;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::system_prefers_dark;
+#[cfg(target_os = "linux")]
+pub use linux::{drag_files, drag_files_with};
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台");
+
+/// 托盘的平台无关声明层（`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction`）。
+pub mod tray;
+pub use tray::{Tray, TrayAction, TrayCtx, TrayHandle, TrayMenuItem, TrayOp};
+
+use std::cell::Cell;
+use std::path::Path;
+use std::path::PathBuf;
+
+use tiny_skia::Pixmap;
+
+use crate::event::{CursorShape, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
+use crate::geometry::{Color, Point, Size};
+
+thread_local! {
+    /// 本线程是否正处于"风险事件分发窗口"内：控件 `on_pointer`/`on_key` 回调正在栈上运行，
+    /// OS 鼠标捕获尚未同步（见 win32/macos 后端 `dispatch_pointer`/`dispatch_key` 的两段式
+    /// 实现）。`PickDialog` 的阻塞方法据此在 debug 下检测误用。
+    static IN_EVENT_DISPATCH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII 标记：进入风险事件分发窗口，`Drop` 时自动清除（含回调 panic 时的展开路径）。
+/// 各平台后端在调用 `handler.on_pointer`/`on_key` 前后台此持有。
+pub(crate) struct EventDispatchGuard(());
+
+impl EventDispatchGuard {
+    pub(crate) fn enter() -> Self {
+        IN_EVENT_DISPATCH.with(|f| f.set(true));
+        Self(())
+    }
+}
+
+impl Drop for EventDispatchGuard {
+    fn drop(&mut self) {
+        IN_EVENT_DISPATCH.with(|f| f.set(false));
+    }
+}
+
+fn in_event_dispatch() -> bool {
+    IN_EVENT_DISPATCH.with(|f| f.get())
+}
+
+/// `Color`（非预乘 RGBA8）→ tiny-skia 颜色。各后端清屏/填底共用。
+pub(crate) fn to_skia_color(c: Color) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+/// 离屏截图的渲染后端：软光栅或 GPU。
+///
+/// `run_offscreen` 要连渲多帧（初始、右键、点击、悬停、动画收敛、基准），每帧都是
+/// 「清底 → 建 target → handler.render」这同一件事。收敛成一个类型，一是消掉六处
+/// 重复，二是让 GPU 路径**只需换一个构造**——否则每处都要写一遍 cfg 分支。
+enum Offscreen {
+    /// tiny-skia 软光栅：像素就地画在自己的 `Pixmap` 上。
+    Soft(Pixmap),
+    /// Direct2D GPU：画进离屏位图后把像素取回，`last` 持有最近一帧。
+    #[cfg(all(windows, feature = "d2d"))]
+    Gpu {
+        // 装箱：后端带六个缓存表，直接内联会让整个枚举跟着变胖，而软路径那一支
+        // 只需要一个 Pixmap。
+        backend: Box<crate::platform::win32::d2d::offscreen::OffscreenBackend>,
+        last: Pixmap,
+    },
+}
+
+impl Offscreen {
+    /// 按 `renderer` 选后端。
+    ///
+    /// [`Renderer::Auto`] 下设备建不起来就回退软光栅并告警——截图路径宁可出图也不该
+    /// 失败，但必须让人知道出的不是 GPU 的图，否则「GPU 与软渲染一致」这个结论会
+    /// 建立在两张软渲染图上。[`Renderer::Gpu`] 则直接终止：它的用途就是"拿不到 GPU
+    /// 要告诉我"，静默回退会让这次验证白做。
+    fn new(w: u32, h: u32, renderer: Renderer) -> Self {
+        #[cfg(all(windows, feature = "d2d"))]
+        if renderer.wants_gpu() {
+            if let Some(backend) =
+                crate::platform::win32::d2d::offscreen::OffscreenBackend::new(w, h)
+            {
+                return Offscreen::Gpu {
+                    backend: Box::new(backend),
+                    last: Pixmap::new(w, h).expect("分配 pixmap 失败"),
+                };
+            }
+            assert!(
+                !renderer.requires_gpu(),
+                "Renderer::Gpu 要求 GPU 截图，但 D2D 离屏设备建不起来（硬件与 WARP 都失败）。\
+                 需要自动回退请改用 Renderer::Auto"
+            );
+            eprintln!("[windui] D2D 离屏设备创建失败，截图回退软渲染");
+        }
+        // 非 Windows 或未开 d2d feature：`Renderer::Gpu` 无从满足，同样应当报错而非
+        // 让调用方以为拿到了 GPU 图。
+        assert!(
+            !renderer.requires_gpu() || cfg!(all(windows, feature = "d2d")),
+            "Renderer::Gpu 在当前平台/编译配置下不可用（需要 Windows 且启用 d2d feature）"
+        );
+        Offscreen::Soft(Pixmap::new(w, h).expect("分配 pixmap 失败"))
+    }
+
+    /// 实际落成的后端（`new` 可能已回退软光栅）。
+    fn active(&self) -> ActiveRenderer {
+        match self {
+            Offscreen::Soft(_) => ActiveRenderer::Software,
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { .. } => ActiveRenderer::Direct2D,
+        }
+    }
+
+    /// 渲染一帧（清底 + 整树绘制）。
+    ///
+    /// `fallback_bg` 只在宿主不报底色时兜底：本函数会连渲多帧，而中间合成的交互
+    /// （`--click` 回放到换肤按钮上）可能换掉主题——用创建时那份 `cfg.bg` 清屏，
+    /// 截出来就是"控件已转暗、底色还停在亮色"的半吊子图。
+    ///
+    /// 先要求整帧再清底：清底与局部重绘是对立的（局部帧只更新脏区，清底会把其余部分
+    /// 抹成纯色——settings 曾因此截成一张几乎全空的图）。截图要的是完整画面，
+    /// 那就明确地每帧都整帧重绘，而不是指望"这一帧恰好是全窗"。
+    fn frame(&mut self, handler: &mut Box<dyn AppHandler>, size: Size, fallback_bg: Color) {
+        let bg = handler.bg().unwrap_or(fallback_bg);
+        handler.request_full_frame();
+        match self {
+            Offscreen::Soft(pm) => {
+                pm.fill(to_skia_color(bg));
+                let mut tgt = crate::render::PixmapTarget { pixmap: pm };
+                handler.render(&mut tgt, size);
+            }
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { backend, last } => {
+                // D2D 的 Clear(bg) 已完成清底，无需另行 fill。
+                if let Some(pm) = backend.frame(bg, |t, s| handler.render(t, s)) {
+                    *last = pm;
+                }
+            }
+        }
+    }
+
+    fn pixmap(&self) -> &Pixmap {
+        match self {
+            Offscreen::Soft(pm) => pm,
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { last, .. } => last,
+        }
+    }
+}
+
+/// 报告一次合成点击的命中结果。
+///
+/// **落空时总是打印**，即使没开 `WINDUI_HITS`：合成点击不命中任何节点是完全无声的
+/// ——不报错、不 panic，截出来的图和没点一样。于是"坐标写错了"与"框架丢了这次点击"
+/// 在现象上无法区分，只能靠反复猜坐标。一行输出就能终结这类误判。
+///
+/// 命中但未被消费同样值得报：那说明点在了非交互区域（标签、留白、被遮住的节点）上。
+///
+/// 命中且被消费是常态，只在 `WINDUI_HITS=1` 时打印——想确认"到底点到了哪个节点"时用，
+/// 例如内容重建改变了布局、旧坐标已经指向别的控件。
+fn report_hit(handler: &dyn AppHandler, logical: (i32, i32), trace: bool) {
+    let Some(hit) = handler.last_pointer_hit() else {
+        return;
+    };
+    let (x, y) = logical;
+    match hit.node {
+        None => {
+            eprintln!("[windui] --click {x} {y} 未命中任何节点（该坐标处是空白）——截图将与没点一样")
+        }
+        Some(id) if !hit.consumed => {
+            let b = hit.bounds;
+            eprintln!(
+                "[windui] --click {x} {y} 命中 {id:?} bounds=({},{} {}×{})，但无人消费——点在了非交互区域上",
+                b.x, b.y, b.w, b.h
+            );
+        }
+        Some(id) if trace => {
+            let b = hit.bounds;
+            eprintln!(
+                "[windui] --click {x} {y} → {id:?} bounds=({},{} {}×{}) consumed",
+                b.x, b.y, b.w, b.h
+            );
+        }
+        Some(_) => {}
+    }
+}
+
+/// 启动时定下全局动效档位：显式配置优先；截屏路径恒全开（保证终态稳定、可取中间帧）；
+/// 否则系统要求减弱时取应用的减弱策略，不要求时全开。
+///
+/// `system_reduces` 只在需要时才查——Linux 上它要起一个 `gsettings` 子进程。
+pub(crate) fn apply_motion_level(cfg: &WindowConfig, system_reduces: impl FnOnce() -> bool) {
+    crate::anim::set_motion_level(resolve_motion_level(cfg, system_reduces));
+}
+
+fn resolve_motion_level(
+    cfg: &WindowConfig,
+    system_reduces: impl FnOnce() -> bool,
+) -> crate::anim::MotionLevel {
+    use crate::anim::MotionLevel;
+    if let Some(level) = cfg.motion {
+        return level;
+    }
+    if cfg.screenshot.is_some() || !system_reduces() {
+        return MotionLevel::Full;
+    }
+    cfg.reduced_motion
+}
+
+/// 应用是否把动效强制关死：此时连光标闪烁也一并停掉（"我要一个完全静止的界面"）。
+pub(crate) fn motion_forced_off(cfg: &WindowConfig) -> bool {
+    cfg.motion == Some(crate::anim::MotionLevel::Off)
+}
+
+/// 离屏渲染一帧并保存 PNG——**平台无关**逻辑，Windows 与 macOS 的 `run` 在
+/// `cfg.screenshot.is_some()` 时共用。无需窗口，适合自动化视觉回归。
+///
+/// 与窗口路径走同一渲染管线：按 `screenshot_scale` 物理化尺寸、可选合成
+/// 右键/单击/悬停交互、收敛动画推进若干帧以捕获稳定终态。
+pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &Path) {
+    // 光标恒实心：闪烁相位跟真实时钟走，开着会让同一界面每次截出的光标忽有忽无，
+    // 视觉回归的整页比对就永远对不上。平滑移动同理（连点后可能停在滑行途中）。
+    crate::ui::caret::set_animated(false);
+    // 物理像素 = 逻辑尺寸 × scale，供高 DPI 截屏验证。
+    let s = cfg.screenshot_scale.max(0.1);
+    let pw = (cfg.width as f32 * s).round().max(1.0) as i32;
+    let ph = (cfg.height as f32 * s).round().max(1.0) as i32;
+    let size = Size::new(pw, ph);
+    handler.set_scale(s);
+    // 截图后端随 `renderer` 走：`--screenshot --renderer gpu` 出 GPU 图，使 29 个
+    // example 都能做软硬整页比对，而不必为每条差异手写单元测试。
+    let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
+    handler.set_active_renderer(off.active());
+    off.frame(handler, size, cfg.bg);
+    // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
+    if let Some((lx, ly)) = cfg.screenshot_rclick {
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pos,
+            MouseButton::Right,
+        ));
+        off.frame(handler, size, cfg.bg);
+    }
+    // 可选：依次合成左键单击（Down+Up），捕获下拉展开等。多个 `--click` 按序回放，
+    // 用于验证需要连续点击才能到达的状态（如复选菜单连点多个开关而菜单不关）。
+    let trace_hits = std::env::var("WINDUI_HITS").is_ok_and(|v| v != "0");
+    for &(lx, ly) in &cfg.screenshot_clicks {
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pos,
+            MouseButton::Left,
+        ));
+        report_hit(handler.as_ref(), (lx, ly), trace_hits);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            pos,
+            MouseButton::Left,
+        ));
+        off.frame(handler, size, cfg.bg);
+    }
+    // 可选：合成一次左键拖拽（Down→Move→Up），捕获划选高亮等拖出才成立的状态。
+    // Up 之后再出一帧：宿主对 Up 置 needs_relayout，选区须活过这次重排才算真成立。
+    if let Some((x0, y0, x1, y1)) = cfg.screenshot_drag {
+        let pt = |lx: i32, ly: i32| {
+            Point::new(
+                (lx as f32 * s).round() as i32,
+                (ly as f32 * s).round() as i32,
+            )
+        };
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pt(x0, y0),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            pt(x1, y1),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            pt(x1, y1),
+            MouseButton::Left,
+        ));
+        off.frame(handler, size, cfg.bg);
+    }
+    // 可选：按序合成键盘输入（--type / --key）。走 `handler.on_key`——与真实按键**同一条
+    // 通路**（焦点裁决、Tab 兜底、控件回调都照常），不是旁路。每条之后出一帧，让重排与
+    // 响应式重建落地，下一次按键才作用在新树上。
+    for k in &cfg.screenshot_keys {
+        match k {
+            ScreenshotKey::Text(t) => {
+                for ch in t.chars() {
+                    handler.on_key(KeyEvent {
+                        key: crate::event::Key::Char(ch),
+                        pressed: true,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                        meta: false,
+                    });
+                }
+            }
+            ScreenshotKey::Key(ev) => {
+                handler.on_key(*ev);
+            }
+        }
+        off.frame(handler, size, cfg.bg);
+    }
+    // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
+    if let Some((lx, ly)) = cfg.screenshot_hover {
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            pos,
+            MouseButton::Left,
+        ));
+        // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        off.frame(handler, size, cfg.bg);
+    }
+    if let Some(ms) = cfg.screenshot_anim_at {
+        // 取中间帧：把时钟钉在最后一次交互那帧之后第 `ms` 毫秒。过渡都在那帧的 paint 里
+        // 以当时的时钟起步，故这一帧画出的正是"过渡开始后 ms 毫秒"——与机器快慢无关。
+        crate::anim::pin_clock(Some(crate::anim::clock_ms() + ms));
+        off.frame(handler, size, cfg.bg);
+        crate::anim::pin_clock(None);
+    } else {
+        // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
+        // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
+        // 避免无限循环——末帧相位非零即可在截图显现。
+        for _ in 0..4 {
+            if !handler.wants_animation() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            off.frame(handler, size, cfg.bg);
+        }
+    }
+    // 性能基准（WINDUI_BENCH=N）：首帧已暖（字体/阴影缓存已建），再渲染 N 帧打印稳态帧耗时。
+    if let Ok(spec) = std::env::var("WINDUI_BENCH") {
+        let n: u32 = spec.parse().unwrap_or(30);
+        let mut total = 0.0f32;
+        for i in 0..n {
+            let t = std::time::Instant::now();
+            off.frame(handler, size, cfg.bg);
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            total += ms;
+            eprintln!("[windui] bench frame {i}: {ms:.2} ms");
+        }
+        eprintln!(
+            "[windui] bench 平均: {:.2} ms / 帧（{} 帧，全窗重绘）",
+            total / n.max(1) as f32,
+            n
+        );
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    off.pixmap().save_png(path).expect("保存 PNG 失败");
+    eprintln!("[windui] 截屏已保存: {}", path.display());
+    // 合成交互期间开出的子窗（`--click` 点到"打开设置…"之类）各自再出一张。
+    // 不做这一步，多窗口界面的视觉回归就只能看到主窗，子窗永远没人验。
+    shoot_child_windows(cfg, handler, path);
+}
+
+/// 给 `ctx.open_window` 开出的子窗各截一张，文件名在主图基础上加序号
+/// （`out.png` → `out-1.png`、`out-2.png`…）。
+///
+/// 只走一层：子窗**再**开的窗口不再跟进。截图是给视觉回归用的，一层已经覆盖
+/// "点开设置页看看长什么样"这个实际需求，递归下去只会让产物文件难以对应。
+fn shoot_child_windows(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, base: &Path) {
+    // 离屏路径没有"已有窗口"，故 `is_open` 恒假；同一串 `--click` 里重复请求的同键窗口
+    // 由宿主的批内去重挡下，回报成 `Focus` 后在这里丢弃。**出几张图因此与真跑开几个
+    // 窗口一致**——否则截图里出两张、实际只开一个，视觉回归比对的就不是实际界面了。
+    let children: Vec<_> = handler
+        .take_new_windows(&|_| false)
+        .into_iter()
+        .filter_map(|w| match w {
+            NewWindow::Create(cfg, h) => Some((cfg, h)),
+            NewWindow::Focus(_) => None,
+        })
+        .collect();
+    if children.is_empty() {
+        return;
+    }
+    let s = cfg.screenshot_scale.max(0.1);
+    for (i, (wcfg, mut whandler)) in children.into_iter().enumerate() {
+        let pw = (wcfg.width as f32 * s).round().max(1.0) as i32;
+        let ph = (wcfg.height as f32 * s).round().max(1.0) as i32;
+        let size = Size::new(pw, ph);
+        whandler.set_scale(s);
+        // 渲染后端跟主窗一致，与窗口路径下由 `AppHost.renderer` 决定子窗后端同理。
+        let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
+        whandler.set_active_renderer(off.active());
+        off.frame(&mut whandler, size, wcfg.bg);
+        // 同主窗：收敛型动画多推几帧以捕获稳定终态。
+        for _ in 0..4 {
+            if !whandler.wants_animation() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            off.frame(&mut whandler, size, wcfg.bg);
+        }
+        let out = child_screenshot_path(base, i + 1);
+        off.pixmap().save_png(&out).expect("保存子窗 PNG 失败");
+        eprintln!(
+            "[windui] 子窗截屏已保存: {}（标题：{}）",
+            out.display(),
+            wcfg.title
+        );
+    }
+}
+
+/// `out.png` + 序号 1 → `out-1.png`。无扩展名时补 `png`。
+///
+/// 用序号而非窗口标题：标题可以带路径分隔符、冒号、换行，做文件名要先净化一遍，
+/// 而净化后的名字反而不好和源码里的调用点对上。标题另行打印在日志里。
+fn child_screenshot_path(base: &Path, idx: usize) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("screenshot"));
+    let ext = base
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("png"));
+    base.with_file_name(format!("{stem}-{idx}.{ext}"))
+}
+
+/// 一条全局热键绑定：组合 + 回调。
+///
+/// 回调拿到的 [`HotkeyCtx`](crate::event::HotkeyCtx) **不持有窗口句柄**，只能声明
+/// 窗口操作意图——回调在平台层持有窗口状态借用期间执行，直接调用 OS 窗口 API 会
+/// 同步重入消息处理并造成 `&mut` 别名（见 `AGENTS.md` 铁律 6）。
+pub struct HotkeyBinding {
+    pub hotkey: crate::event::Hotkey,
+    pub callback: Box<dyn FnMut(&mut crate::event::HotkeyCtx)>,
+}
+
+/// 窗口配置（平台无关）。由 `App` 构建器组装，交各平台后端的 `run` 消费。
+/// 一次指针事件的命中结果，供离屏截图路径诊断"这一下点到哪儿了"。
+///
+/// 存在的理由：合成点击**不命中任何可交互节点时是完全无声的**——不报错、不 panic，
+/// 截出来的图和没点一样。于是"坐标写错了"与"框架丢了这次点击"在现象上无法区分，
+/// 只能靠反复猜坐标。见 [`run_offscreen`]。
+#[derive(Debug, Clone, Copy)]
+pub struct PointerHit {
+    /// 命中的节点（`None` = 落在空白处，没有任何节点接住）。
+    pub node: Option<crate::core::NodeId>,
+    /// 命中节点的绝对矩形（逻辑坐标）。`node` 为 `None` 时是零矩形。
+    pub bounds: crate::geometry::Rect,
+    /// 事件是否被某个控件**消费**。命中了节点但未消费，说明点在了非交互区域上。
+    pub consumed: bool,
+}
+
+/// 截屏前合成的一次键盘输入。
+///
+/// `Text` 逐字符合成 [`Key::Char`]——**不经平台键码映射**，因为 `Key::Char` 本就是逻辑
+/// 字符（`TextInput` 直接吃它）。故 `--type 中文` 也能工作，无需 IME。
+#[derive(Debug, Clone)]
+pub enum ScreenshotKey {
+    /// 一段文本，逐字符输入。
+    Text(String),
+    /// 一个具名键（Enter / Escape / Tab / Up / Down / ...），可带修饰键。
+    Key(KeyEvent),
+}
+
+/// 客户端装饰标题栏（见 [`AppHandler::decoration`]）。
+pub struct Decoration {
+    /// 画标题栏、处理其上指针事件的宿主。尺寸 = 窗口内容宽 × [`Self::height`]。
+    pub handler: Box<dyn AppHandler>,
+    /// 标题栏高度（逻辑像素）。
+    pub height: i32,
+    /// 改标题（窗口标题变了时平台层调用）。不触发重画通知：调用方随后自己让标题栏整条重画。
+    pub set_title: Box<dyn Fn(&str)>,
+    /// 窗口激活 / 失活：失活时标题与按钮转淡。同上，重画由调用方安排。
+    pub set_active: Box<dyn Fn(bool)>,
+}
+
+pub struct WindowConfig {
+    pub title: String,
+    pub width: i32,
+    pub height: i32,
+    pub bg: Color,
+    /// 窗口居中显示。
+    pub centered: bool,
+    /// 指定窗口初始位置（**屏幕坐标**，可为负——多显示器时虚拟屏原点常常是负的）。
+    /// `None` 交给系统决定（`CW_USEDEFAULT`）。
+    ///
+    /// 允许用户调整窗口大小（默认 true）。
+    pub resizable: bool,
+    /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
+    pub screenshot: Option<PathBuf>,
+    /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
+    pub screenshot_scale: f32,
+    /// 截屏前合成一次右键按下（逻辑坐标），用于验证右键菜单等交互视觉。
+    pub screenshot_rclick: Option<(i32, i32)>,
+    /// 截屏前依次回放的左键单击（逻辑坐标，各合成 Down+Up），用于验证下拉展开等交互视觉。
+    /// 多个点按序回放，可捕获需连续点击才能到达的状态（如复选菜单连点多个开关）。
+    pub screenshot_clicks: Vec<(i32, i32)>,
+    /// 截屏前合成一次悬停（逻辑坐标 Move）并等待超过提示延时，用于验证 tooltip 等悬停视觉。
+    pub screenshot_hover: Option<(i32, i32)>,
+    /// 截屏前合成一次左键拖拽 `(x0, y0, x1, y1)`（逻辑坐标 Down→Move→Up），用于验证
+    /// 划选高亮、拖动排序这类"只有拖出去才成立"的视觉——单击（`screenshot_clicks`）
+    /// 到不了这些状态。
+    pub screenshot_drag: Option<(i32, i32, i32, i32)>,
+    /// 截屏前合成的键盘输入，按序回放。
+    ///
+    /// 与 `screenshot_clicks` 同为可重复参数，但两者**各自成序**——键盘与指针的相对
+    /// 先后无法表达（`--click A --type x --click B` 里两次点击都发生在打字之前）。
+    /// 够用于「点进某页 → 在输入框打字」这类场景；需要严格交错时拆成多次截图。
+    pub screenshot_keys: Vec<ScreenshotKey>,
+    /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
+    pub tray: Option<Tray>,
+    /// 全局热键绑定（空=不注册）。窗口创建后注册，窗口销毁时自动注销。
+    pub hotkeys: Vec<HotkeyBinding>,
+    /// 启动即隐藏：窗口创建后不显示，交由托盘或全局热键唤起。
+    ///
+    /// 无托盘图标也无热键时启用此项，用户将**永远看不到窗口**——故 `App::start_hidden`
+    /// 在 debug 期对该组合 panic 提示误用。
+    pub start_hidden: bool,
+    /// 零窗口常驻：**不建主窗**直接进消息循环，窗口全关也不退出（见 `App::run_resident`）。
+    ///
+    /// 与 `start_hidden` 是两码事：那个仍然建了窗口、只是不显示，按物理像素分配的
+    /// 后备缓冲一直挂着；这个连窗口都没有，界面按需建、关掉即销毁，渲染资源随
+    /// `WindowState` 的 drop 归还。
+    ///
+    /// 只对主窗那次 `run` 有意义（子窗的配置里恒为 false）。
+    pub resident: bool,
+    /// 无标题栏窗口（自定义标题栏）：客户区铺满整窗，保留系统级吸附/阴影/缩放。
+    pub frameless: bool,
+    /// **CurSeen 补丁 095**：建窗即用 `WS_POPUP` 样式（Windows）。
+    ///
+    /// 与 `frameless` 分工见 [`WindowRequest::popup`](crate::event::WindowRequest::popup)：
+    /// 那个只抹非客户区，这个换掉整个窗口样式族，从而解除系统最小/最大跟踪尺寸收口。
+    /// 要"窗口尺寸精确等于内容尺寸"的窗口（贴图窗）用它。
+    pub popup: bool,
+    /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
+    /// 非 `frameless` 窗口上无意义——那时系统标题栏自己带原生菜单。
+    pub system_menu: bool,
+    /// 强制动效档位：None=随系统（见 [`reduced_motion`](Self::reduced_motion)）；Some=强制。
+    pub motion: Option<crate::anim::MotionLevel>,
+    /// 系统要求减弱动效（"显示动画"关 / "减弱动态效果"开）时落到的档位，默认
+    /// [`MotionLevel::Reduced`](crate::anim::MotionLevel::Reduced)。
+    pub reduced_motion: crate::anim::MotionLevel,
+    /// 截屏取中间帧：合成交互之后把帧时钟拨到其后第 N 毫秒再截（`--anim-at N`）。
+    pub screenshot_anim_at: Option<u64>,
+    /// 渲染后端选择。默认 [`Renderer::Software`]。
+    pub renderer: Renderer,
+    /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
+    pub min_width: i32,
+    pub min_height: i32,
+    /// 单例键（见 `crate::event::WindowRequest::single`）。`None` = 不去重。
+    ///
+    /// 只对 `ctx.open_window` 开出的子窗有意义：主窗本就唯一，`App` 不提供这个设置。
+    pub single: Option<String>,
+    /// 归属于发起它的窗口（见 `crate::event::WindowRequest::owned`）。同样只对子窗有意义：
+    /// 平台建窗时把发起窗口填作 owner（Windows）/ parent（macOS）。
+    pub owned: bool,
+    /// 模态（见 `crate::event::WindowRequest::modal`），隐含 `owned`。
+    pub modal: bool,
+    /// 窗口/应用图标（`None` = 用系统默认，Windows 下即窗口类从 exe 资源取的那个）。
+    ///
+    /// 存的是**源**而非位图：平台层要按当前 DPI 决定光栅化到多少像素（Windows 150%
+    /// 分层透明窗口（`feature = "layered"`）：使用 `UpdateLayeredWindow` 呈现
+    /// 透明内容，窗口始终置顶、无系统边框。
+    #[cfg(feature = "layered")]
+    pub layered: bool,
+    /// 初始鼠标穿透状态（需 `layered = true`）：穿透时点击直接穿透窗口。
+    #[cfg(feature = "layered")]
+    pub click_through: bool,
+    /// 工具窗口（`WS_EX_TOOLWINDOW`）：不进任务栏、不进 Alt-Tab。托盘常驻类应用的
+    /// 透明覆盖层、隐藏主窗等用它避免任务栏出现多余按钮。不影响绘制与交互。
+    pub tool_window: bool,
+    /// CurSeen 补丁 012：覆盖层不抢键盘焦点（`WS_EX_NOACTIVATE`）。
+    ///
+    /// 透明覆盖层是整屏的，如果它拿到键盘焦点，所有键盘消息都落到覆盖层的画布上（忽略），
+    /// 下方的控制面板/文字输入窗就收不到按键。加上这个扩展样式后，点击覆盖层不会激活它，
+    /// 焦点留在下面的窗口。
+    pub no_activate: bool,
+    /// 缩放要 24/48，200% 要 32/64），且 DPI 变了要重画。见 [`crate::icon::IconSource`]。
+    ///
+    /// 落点两平台不同：Windows 是 `WM_SETICON`（标题栏/Alt-Tab/任务栏），
+    /// macOS 没有窗口级图标，落到应用 Dock 图标上。
+    pub icon: Option<crate::icon::IconSource>,
+    /// 窗口外框左上角的屏幕位置（`None` = 系统默认 / 按 `centered`）。设了就以它为准，
+    /// `centered` 不再生效。
+    ///
+    /// 单位与原点是**平台原生的屏幕坐标**，各平台口径见 `App::position`。
+    pub position: Option<(i32, i32)>,
+    /// 不在任务栏占按钮，各平台落地见 `App::skip_taskbar`。
+    pub skip_taskbar: bool,
+    /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
+    pub window_outline: WindowOutline,
+    /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
+    pub ime_interrupt: ImeInterrupt,
+    /// 输入法组合串由框架内联绘制（见 `App::ime_inline`）。应用级：子窗沿用主窗的设置。
+    pub ime_inline: bool,
+}
+
+/// 输入法组合中（拼音还没选词）在窗口里按下鼠标时，未上屏的串怎么办（`App::ime_interrupt`）。
+///
+/// 各家输入法自己的做法不一：微软拼音把编码原样上屏，有的输入法让组合跟着新光标走，有的直接
+/// 取消。框架默认替它们统一成 [`Commit`](Self::Commit)，与 Chrome / Firefox 一致。
+///
+/// 目前只在 Windows 生效。按下鼠标之外的焦点转移（程序里移走焦点）一律取消组合——上屏的字没有
+/// 可靠的落点。少数输入法（微软拼音）在框架收到点击之前就已自己上屏，`Cancel` / `Ime` 对它们
+/// 不起作用。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImeInterrupt {
+    /// 先让输入法把当前的串上屏到原来的位置，再处理这次点击。
+    #[default]
+    Commit,
+    /// 丢掉未上屏的串，再处理这次点击。
+    Cancel,
+    /// 框架不干预，由输入法自己决定（上屏、取消，或让组合跟着新光标走）。点到别的控件上
+    /// 致使焦点换人时，仍取消这次组合。
+    Ime,
+}
+
+/// 无边框窗口自画 1px 外框的取色策略（`App::window_outline` / `Window::window_outline`）。
+///
+/// 只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
+/// win32 `win10_outline_color`）与 Linux 的无边框窗口；Windows 11 与 macOS 的边框是系统画的，
+/// 不受影响。最大化时各平台本就不画。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum WindowOutline {
+    /// 各平台默认：Windows 10 仿 Windows 11（失活 `#AAAAAA`、激活且系统开了「在标题栏和
+    /// 窗口边框上显示强调色」时取强调色）；Linux 取主题的 `palette.border`。
+    #[default]
+    Auto,
+    /// 取当前主题的 `palette.border`（换主题当帧跟上），不分激活态。
+    Theme,
+    /// 固定颜色。
+    Color(Color),
+    /// 不画。
+    Off,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            title: "windui".into(),
+            width: 800,
+            height: 600,
+            bg: Color::hex(0xF8FAFC),
+            centered: false,
+            resizable: true,
+            screenshot: None,
+            screenshot_scale: 1.0,
+            screenshot_rclick: None,
+            screenshot_clicks: Vec::new(),
+            screenshot_hover: None,
+            screenshot_drag: None,
+            screenshot_keys: Vec::new(),
+            tray: None,
+            hotkeys: Vec::new(),
+            start_hidden: false,
+            resident: false,
+            frameless: false,
+            popup: false,
+            system_menu: true,
+            motion: None,
+            reduced_motion: crate::anim::MotionLevel::Reduced,
+            screenshot_anim_at: None,
+            renderer: Renderer::default(),
+            min_width: 0,
+            min_height: 0,
+            single: None,
+            owned: false,
+            #[cfg(feature = "layered")]
+            layered: false,
+            #[cfg(feature = "layered")]
+            click_through: false,
+            tool_window: false,
+            no_activate: false,
+            modal: false,
+            icon: None,
+            position: None,
+            skip_taskbar: false,
+            window_outline: WindowOutline::Auto,
+            ime_interrupt: ImeInterrupt::Commit,
+            ime_inline: false,
+        }
+    }
+}
+
+/// 窗口**实际在用**的渲染后端：[`Renderer`] 是"想要什么"，这个是"落成了什么"。
+///
+/// [`Renderer::Auto`] 在 GPU 设备建不起来时回退软光栅，运行中设备丢失且重建失败也会降级，
+/// 两者都只在 stderr 留一行——应用要在「关于」页或诊断信息里如实显示，就从
+/// [`EventCtx::active_renderer`](crate::core::EventCtx::active_renderer) 读这个值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ActiveRenderer {
+    /// tiny-skia 软件光栅。
+    #[default]
+    Software,
+    /// Direct2D（Windows，`d2d` feature）。
+    Direct2D,
+    /// wgpu 跑在 Metal 上（macOS，`gpu` 后端）。
+    Metal,
+}
+
+impl ActiveRenderer {
+    /// 是否为 GPU 后端。
+    pub fn is_gpu(self) -> bool {
+        !matches!(self, ActiveRenderer::Software)
+    }
+
+    /// 供显示的简短名称（不随语言变化：是技术名词，与版本号同列）。
+    pub fn name(self) -> &'static str {
+        match self {
+            ActiveRenderer::Software => "Software (tiny-skia)",
+            ActiveRenderer::Direct2D => "Direct2D",
+            ActiveRenderer::Metal => "Metal (wgpu)",
+        }
+    }
+}
+
+/// 渲染后端的选择方式。
+///
+/// 两条后端并非替代关系。GPU 路径各平台不同但语义一致：Windows 走 Direct2D
+/// （ClearType 子像素混合由 D2D 直接完成，是更正统的一条）；macOS 走 wgpu/Metal
+/// （`gpu` feature，几何用 SDF shader、文字仍由 Core Text 光栅、GPU 只合成，
+/// 见 `render/gpu`）。软光栅则在没有可用 GPU、或内存紧张时兜底。
+///
+/// ```no_run
+/// # use windui::prelude::*;
+/// App::new("demo", 800, 600)
+///     .renderer(Renderer::Auto)      // GPU 优先，建不起来自动回退
+///     .content(Element::label("hi"))
+///     .run();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Renderer {
+    /// GPU 优先，设备建不起来时**自动回退**软件光栅。
+    ///
+    /// 回退是静默的（只在 stderr 留一行说明），适合发布给最终用户——机器上有没有
+    /// 可用 GPU 不该由使用方操心。
+    Auto,
+    /// 强制软件光栅（tiny-skia）。
+    ///
+    /// 内存敏感场景用这个：GPU 路径要额外持有 swapchain、设备上下文与若干缓存位图。
+    /// 当前的默认值——GPU 路径的验证还在补齐中，默认切换会在后续版本进行。
+    #[default]
+    Software,
+    /// 强制 GPU，设备建不起来时**报错终止**而非回退。
+    ///
+    /// 用于测试与排障：静默回退会让"我在验证 GPU 行为"这件事失去意义——两张软渲染
+    /// 的截图看起来当然一致。要的是"拿不到 GPU 就告诉我"，而不是悄悄换一条路。
+    Gpu,
+}
+
+impl Renderer {
+    /// 是否应当尝试 GPU 后端。
+    ///
+    /// 调用者：Windows + d2d feature（D2D 后端）与 macOS + gpu feature（wgpu 后端）。
+    /// 两者都关掉的平台没有可尝试的 GPU 后端，只有 `requires_gpu` 仍需判断
+    /// （`Renderer::Gpu` 在那里无从满足，须报错）。
+    #[cfg_attr(
+        not(any(all(windows, feature = "d2d"), all(target_os = "macos", gpu_backend))),
+        allow(dead_code)
+    )]
+    pub(crate) fn wants_gpu(self) -> bool {
+        matches!(self, Renderer::Auto | Renderer::Gpu)
+    }
+
+    /// GPU 建不起来时是否必须报错（而非回退软件）。
+    pub(crate) fn requires_gpu(self) -> bool {
+        matches!(self, Renderer::Gpu)
+    }
+}
+
+/// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
+pub trait AppHandler {
+    fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size);
+    fn on_pointer(&mut self, _ev: PointerEvent) -> bool {
+        false
+    }
+    fn on_key(&mut self, _ev: KeyEvent) -> bool {
+        false
+    }
+    /// 是否请求关闭窗口（事件处理后由平台查询）。
+    fn wants_close(&self) -> bool {
+        false
+    }
+    /// 用户请求关闭窗口（点击 × 按钮或 WM_CLOSE）时调用。
+    /// 返回 true 允许关闭，false 取消（如弹出"未保存"提示后需重绘，平台会自行 Invalidate）。
+    fn on_close_request(&mut self) -> bool {
+        true
+    }
+    /// 当前是否处于指针捕获态。平台据此调用 OS 的 SetCapture/ReleaseCapture，
+    /// 保证拖出窗口时仍能收到移动/抬起消息。
+    ///
+    /// macOS 无需对应的 OS 调用——`mouseDown:` 之后的 `mouseDragged:`/`mouseUp:` 由 AppKit
+    /// 隐式续派发给同一 view（拖出窗口外照送），后端只镜像本值以门控 `on_capture_lost`。
+    fn capture_active(&self) -> bool {
+        false
+    }
+    /// OS 抢走指针捕获（Alt+Tab 等）时调用，让逻辑捕获方收尾（如复位拖动态）。
+    /// 返回 true 表示需要重绘。win32 由 `WM_CAPTURECHANGED` 触发，macOS 由
+    /// `windowDidResignKey:` 触发（切走应用/原生模态框接管时抬起事件不再送达）。
+    fn on_capture_lost(&mut self) -> bool {
+        false
+    }
+    /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
+    fn set_scale(&mut self, _scale: f32) {}
+    /// 平台建好（或降级替换了）呈现后端后告知宿主实际落成的后端，见 [`ActiveRenderer`]。
+    /// 未调用时宿主按 [`ActiveRenderer::Software`] 回答——平台层默认的正是软后端。
+    fn set_active_renderer(&mut self, _r: ActiveRenderer) {}
+
+    /// 窗口**从隐藏态**被唤起（托盘点击 / 全局热键 / `WindowOp::Show`）后调用。
+    /// 返回是否需要重绘。
+    ///
+    /// 只在隐藏→可见的**跃迁**上触发，已经可见时再 Show 不算——否则常驻工具每按一次
+    /// 热键都会重置一遍界面状态。
+    ///
+    /// 三个唤起入口里只有「控件请求」经过宿主（`take_window_op`），托盘与热键都是平台层
+    /// 直接执行的。所以这条通知必须由平台发起，宿主自己推不出来。
+    fn on_window_shown(&mut self) -> bool {
+        false
+    }
+
+    /// 要求下一帧走整帧重绘（跳过局部重绘）。
+    ///
+    /// 截图路径每帧都调：出来的图必须是完整画面，不该取决于"这一帧恰好只有光标脏"。
+    fn request_full_frame(&mut self) {}
+
+    /// 下一帧**预计**只更新这块（**物理像素**）。`None` = 预计整帧。
+    ///
+    /// 平台据此把窗口失效区收窄（win32 `InvalidateRect`），系统随后给出的
+    /// `WM_PAINT` 就只覆盖这块。仅是预测：宿主渲染时仍可能升级为整帧，届时由
+    /// [`Self::last_frame_damage`] 报告实情。
+    fn pending_damage(&self) -> Option<crate::geometry::Rect> {
+        None
+    }
+
+    /// 上一帧实际更新的区域（**物理像素**）。`None` = 整帧都更新了。
+    ///
+    /// 契约：返回的区域内每个像素都必须是本帧**重新画过**的（`None` 即整窗每个像素）。
+    /// 平台会对这块做不可逆的收尾（Linux 无边框窗口的外框混合与圆角淡出），报大了，
+    /// 没重画的像素会被再收尾一次——外框越叠越深、圆角越来越淡。没画任何东西就报空矩形。
+    ///
+    /// 平台据此把「R/B 交换 + 上传到设备」收窄到这块：两者都是与脏区大小无关的整窗
+    /// 遍历，520×700 的窗口每帧就是 36 万像素读改写 + 36 万像素上传。光标闪烁只脏
+    /// 4×32，却要为此付整窗的账。`render` 之后调用才有意义。
+    fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
+        None
+    }
+
+    /// 用户在**客户区之外**按下（标题栏、边框、系统按钮）：收起菜单这类浮层。返回是否
+    /// 需要重绘。
+    ///
+    /// 客户区的指针事件走 `on_pointer`，点外收起菜单在那条路上；非客户区的按下压根不
+    /// 进 `on_pointer`（win32 是 `WM_NCLBUTTONDOWN`，系统拿去拖窗），菜单就一直开着。
+    /// 窗口失活也走同一收尾（宿主在 `on_window_activated(false)` 里自己调）。
+    fn on_dismiss_overlays(&mut self) -> bool {
+        false
+    }
+
+    /// 窗口激活态变化（前台/后台）。返回是否需要重绘。
+    ///
+    /// 宿主据此把光标转为静态：失活窗口的插入符在两个系统上本就不闪，而且后台窗口
+    /// 没有任何理由按刷新率出帧——不接这条通知，切走之后光标会一直闪着烧 CPU。
+    /// 只有平台知道激活态，宿主推不出来（与 [`Self::on_window_shown`] 同理）。
+    fn on_window_activated(&mut self, _active: bool) -> bool {
+        false
+    }
+
+    /// **诊断用**：最近一次指针事件的命中结果（`None` = 尚无事件或实现未提供）。
+    ///
+    /// 只服务离屏截图路径的合成点击——见 [`run_offscreen`] 里对它的用法。默认实现回
+    /// `None`，故非 `UiHost` 的 handler（如 `RenderOnly`）无需关心。
+    fn last_pointer_hit(&self) -> Option<PointerHit> {
+        None
+    }
+
+    /// 当前清屏色。`None` = 沿用 [`WindowConfig::bg`]（窗口创建时那份）。
+    ///
+    /// 平台**每帧查询**而不缓存：运行期换主题（[`ThemeHandle::set`](crate::app::ThemeHandle::set)）
+    /// 会改变底色，而创建时抄下的那份不会跟着变。此前正是如此——切暗色后控件前景转暗、
+    /// 窗口底色仍停在亮色，浅色文字画在浅色底上几乎看不见。
+    ///
+    /// 构建期的 `App::theme` 那条路不受影响（它当场同步了 `WindowConfig::bg`），本方法
+    /// 补的是运行期那条。
+    fn bg(&self) -> Option<Color> {
+        None
+    }
+
+    /// 无边框窗口外框色（Linux 后端在窗口四边描 1px，见 `platform::linux::host::paint_rim`）。
+    /// `None` = 不描。由宿主按**自己的**主题给出，而不是让平台层读线程局部的当前主题——
+    /// 同线程多窗口时那份是"上一个渲染的窗口"的。
+    fn frame_outline(&self) -> Option<Color> {
+        None
+    }
+
+    /// 请宿主自己在窗口四边画 1px 外框，颜色由平台给（`None` = 不画）。
+    ///
+    /// Win10 上无边框窗口没有任何边框：普通窗口那条 1px 边是 DWM 画在非客户区里的，
+    /// 无边框窗口把非客户区整个消掉了（Win11 的 DWM 则把边框画在客户区之上，不受影响）；
+    /// 剩下的阴影又会被「在窗口下显示阴影」关掉（性能选项、远程桌面、部分精简版系统），
+    /// 窗口就与桌面连成一片。颜色由平台按系统规则定（Win10 仿 Win11：灰色，激活且开了
+    /// 「在标题栏和窗口边框上显示强调色」时用强调色），不取应用主题——要与系统其余窗口的边一致。
+    /// 由宿主在绘制阶段画——软 / GPU 两个后端、整窗 / 局部帧
+    /// 都经它，而局部帧每次在新铺的底上重画，不存在重复叠加。外框画在所有内容与浮层
+    /// **之上**，占掉客户区最外一圈物理像素（贴边的标题栏、关闭按钮悬停底色上会压一条线，
+    /// 与 Win11 DWM 边框盖在客户区上同一取舍）。平台在最大化 / 还原、激活 / 失活、系统
+    /// 强调色变化时重设；默认空实现（Linux 走平台层的 `paint_rim`）。
+    fn set_window_outline(&mut self, _color: Option<Color>) {}
+
+    /// 焦点文本控件的光标位置（**物理像素**，相对客户区左上角）+ 高度：`(x, y_top, height)`。
+    /// 平台层据此定位输入法候选窗。无文本焦点时返回 None。
+    fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        None
+    }
+
+    /// 焦点文本控件的矩形（**物理像素**，相对客户区左上角）：`(x, y, w, h)`。无文本焦点返回 None。
+    ///
+    /// 输入法的「可编辑区域」：win32 填进 `COMPOSITIONFORM::rcArea`。win32 目前用 `CFS_POINT`
+    /// 定位合成窗，按文档不读这个矩形，属预留（改成 `CFS_RECT` 按矩形折行时用）。
+    fn ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+
+    /// 焦点文本控件实际用的字族：自己设了 `font_family` 用自己的，否则用主题默认字族；
+    /// 都没有为 `None`（平台默认）。
+    ///
+    /// **仅 win32 用**：那边合成串由系统输入法自己画（`ImmSetCompositionFontW`），字族得
+    /// 由我们告诉它，否则合成串与上屏后的文字不是一款字体。自绘合成串的平台走控件自己的样式。
+    fn ime_font_family(&self) -> Option<String> {
+        None
+    }
+
+    /// 输入法组合态开始/结束（拼音等未上屏文字合成中）时由平台层调用，转发给
+    /// 当前焦点控件（见 `Widget::set_composing`）。返回 true 表示需要重绘。
+    ///
+    /// **仅 win32 默认模式走这条**：那边合成串由系统 IME 自己画（`ImmSetCompositionWindow`），
+    /// 上层只需知道「合成中」以便藏起自绘光标、消除双光标。需要自绘合成串的平台
+    /// （macOS、Linux，以及开了 `App::ime_inline` 的 win32）走 [`Self::set_ime_preedit`]。
+    ///
+    /// 契约：`true` 作用于当前焦点；`false` 要作用到**进入合成时的那个控件**——合成中焦点
+    /// 可能被程序移走，宿主自己记住它（平台层不必关心）。
+    fn set_ime_composing(&mut self, _composing: bool) -> bool {
+        false
+    }
+
+    /// 输入法合成串变化时由平台层调用，转发给当前焦点控件（见 `Widget::set_preedit`）。
+    /// 返回 true 表示需要重绘。
+    ///
+    /// 与 [`Self::set_ime_composing`] 互斥：**由系统画合成串时（win32 默认模式）永不调用本方法**，
+    /// 否则系统画一份、控件自绘一份，屏幕上会出现双份合成串。win32 开了 `App::ime_inline` 后
+    /// 改走本方法、不再调 `set_ime_composing`。
+    ///
+    /// 契约：非空合成串作用于当前焦点；**清空**（空 `text`）要作用到合成串所在的控件——合成中
+    /// 焦点可能被程序移走，宿主自己记住它，平台层照常发清空即可。
+    fn set_ime_preedit(&mut self, _pe: &crate::event::Preedit) -> bool {
+        false
+    }
+
+    /// 焦点文本控件的当前选区（**字符**索引，`(start, end)` 且 `start <= end`）。
+    /// 无选区时返回光标处的空范围；无文本焦点返回 `None`。
+    ///
+    /// 供输入法查询上下文（macOS `selectedRange`）。返回错误的值不会崩，只会让
+    /// 部分输入法的候选联想与重转换失准，故值必须真实反映控件状态。
+    fn ime_selection(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// 造一条客户端装饰（CSD）标题栏：合成器不给窗口画边框时（GNOME 的 Wayland 会话），由平台层
+    /// 把它画在内容区上方。标题栏本身也是一个宿主，与本窗口共用主题，换主题照样跟随；
+    /// 它的按钮发出的窗口操作（最小化 / 最大化 / 关闭）由平台层转给本窗口。
+    ///
+    /// `maximizable`：显示最大化按钮。默认 `None`（不支持 CSD 的宿主，平台层就不画标题栏）。
+    fn decoration(&self, _title: &str, _maximizable: bool) -> Option<Decoration> {
+        None
+    }
+
+    /// 焦点文本控件的身份与内容类型（多行 / 密码）。无文本焦点返回 `None`。
+    ///
+    /// 供输入法协议区分「焦点换到了另一个输入框」（Wayland text-input-v3 要求此时重新
+    /// `enable`，输入法据此换上下文）与设内容提示（密码框不联想）。目前只有 Wayland 后端用；
+    /// win32 / macOS / X11 可据此做同样的事（见 `docs/LINUX_PORTING.md` §8.3「后续可接」）。
+    fn ime_field(&self) -> Option<crate::event::ImeField> {
+        None
+    }
+
+    /// 焦点文本控件的**已提交**正文（不含未上屏的合成串）。无文本焦点返回空串。
+    ///
+    /// 供输入法读取上下文（macOS `attributedSubstringForProposedRange:`，用于重转换与
+    /// 联想），以及把字符索引换算成 UTF-16 码元。密码框返回空串——不把密码交给输入法。
+    fn ime_text(&self) -> String {
+        String::new()
+    }
+
+    /// 本帧是否有控件请求持续动画。平台层据此在阻塞空闲与按帧驱动之间切换。
+    fn wants_animation(&self) -> bool {
+        false
+    }
+
+    /// 下一帧**最早**什么时候才需要（距上一帧的毫秒数）。`0` = 下一帧就要（按刷新率）。
+    /// 仅在 [`Self::wants_animation`] 为真时有意义。
+    ///
+    /// 平台把唤醒推迟到 `max(帧间隔, 这个值)`：帧间隔是上界（不超刷新率），这个值是下界
+    /// （不早于画面真会变的那一刻）。有了它，帧驱动才分得清"连续动画"和"定时动画"——
+    /// 方波光标每 530ms 才翻一次面，此前 31 帧画出来的像素与上一帧完全相同，却照样把
+    /// 唤醒→遍历→光栅→上传跑一遍。
+    ///
+    /// **只管帧驱动这条路**：事件（按键、鼠标）走各自的 `InvalidateRect`/`setNeedsDisplay`
+    /// 立即重绘，不受这里节流，所以推迟唤醒不会让界面对输入变迟钝。
+    fn next_frame_delay_ms(&self) -> u32 {
+        0
+    }
+
+    /// 取走运行期热键操作队列（`HotkeyHandle` 的改绑/启停意图）。平台在意图
+    /// 消费点（与窗口操作同点）调用并对 `HotkeyState` 落地。默认无操作。
+    fn take_hotkey_ops(&mut self) -> Vec<(usize, crate::event::HotkeyOp)> {
+        Vec::new()
+    }
+
+    /// 注册的定时器间隔（平台据此 SetTimer/NSTimer）。无则空。
+    fn intervals(&self) -> Vec<std::time::Duration> {
+        Vec::new()
+    }
+
+    /// 第 `idx` 个定时器到点：调对应回调。返回 true 表示需重绘。
+    fn on_interval_fired(&mut self, _idx: usize) -> bool {
+        false
+    }
+
+    /// 当前指针悬停位置期望的光标形状。平台层据此应答 OS 光标查询
+    /// （win32 `WM_SETCURSOR`）。默认箭头。
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Arrow
+    }
+
+    /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）沿 `axis` 平移 `d` 物理像素
+    /// （正 = 手指下移 / 右移），滚动手指下能沿该轴滚动的容器。返回 true 表示需要重绘。
+    ///
+    /// 一次手势只沿一个轴：平台层越过拖动阈值时按位移较大的一边锁定。**仅 win32 后端调用**
+    /// （触摸屏拖动滚动）；macOS 触控板的两指滑动是滚轮事件，走 `PointerKind::Wheel` /
+    /// `HWheel` 而非本方法。
+    fn on_pan(&mut self, _pos: Point, _axis: crate::spec::Axis, _d: i32) -> bool {
+        false
+    }
+
+    /// `pos`（**物理像素**）下有没有能沿 `axis` 滚动的容器。平台锁定触摸方向时据此回落：
+    /// 位移较大的那一轴滚不了、另一轴滚得了，就锁另一轴——只竖滚的页面上偏横向的斜滑
+    /// 照样竖滚，而不是整次手势什么都不动。默认 true（不干预锁轴）。
+    fn can_pan(&self, _pos: Point, _axis: crate::spec::Axis) -> bool {
+        true
+    }
+
+    /// 触摸抬起时按释放速度启动惯性滑动（fling）。`pos` 为**物理像素**（相对客户区）、
+    /// `v` 为手指沿锁定轴 `axis` 的速度（**物理像素/ms**）。返回 true 表示已启动（平台据此触发首帧）。
+    ///
+    /// **仅 win32 后端调用**：`WM_TOUCH` 只给位置不给动量，惯性必须自算。macOS 后端
+    /// 刻意不调本方法，触控板的动量由系统在 `scrollWheel:` 里续发（见
+    /// `platform/macos/window.rs::on_wheel`）——那不是漏实现，别去移植 win32 那套状态机。
+    fn start_fling(&mut self, _pos: Point, _axis: crate::spec::Axis, _v: f32) -> bool {
+        false
+    }
+
+    /// 取消进行中的惯性滑动（新触摸按下/点击/滚轮打断时）。返回 true 表示需要重绘。
+    /// 同 [`start_fling`](Self::start_fling)，**仅 win32 后端调用**；macOS 的动量由系统
+    /// 在用户重新触摸触控板时自行中止，无需框架介入。
+    fn cancel_fling(&mut self) -> bool {
+        false
+    }
+
+    /// 文件拖放到窗口：`pos` 为落点（**物理像素**，相对客户区），`paths` 为文件路径。
+    /// 返回 true 表示需要重绘。
+    fn on_drop_files(&mut self, _pos: Point, _paths: Vec<std::path::PathBuf>) -> bool {
+        false
+    }
+
+    /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在窗口拖动区
+    /// （自定义标题栏）。平台据此在 `WM_NCHITTEST` 返回 HTCAPTION 实现拖动。
+    fn window_drag_at(&self, _pos: Point) -> bool {
+        false
+    }
+
+    /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在交互控件（窗口按钮等）上。
+    /// 平台据此在 `WM_NCHITTEST` 把该点强制判为 HTCLIENT，优先于缩放边框/拖动区。
+    fn interactive_at(&self, _pos: Point) -> bool {
+        false
+    }
+
+    /// 区域级 `WM_NCHITTEST` 钩子（CurSeen 补丁 083-b）。
+    ///
+    /// `pos` 为**物理像素**、相对客户区。返回 `Some` 时直接决定本次命中的结果：
+    /// [`NcHit::Client`] 归本窗口、[`NcHit::Transparent`] 穿通给下层；返回 `None`
+    /// 时交框架默认逻辑（无边框缩放边 / 拖动区 / HTCLIENT）。默认对既有窗口零影响。
+    fn nchit_at(&self, _pos: Point) -> Option<crate::event::NcHit> {
+        None
+    }
+
+    /// 区域级光标钩子（CurSeen 补丁 083-b）。`pos` 为**物理像素**、相对客户区。
+    ///
+    /// 返回 `Some(shape)` 优先于 [`Self::cursor`]（按指针位置现算每块区域该用什么光标）；
+    /// 返回 `None` 走既有 `cursor()`。需在 `WM_NCHITTEST` 已把该点判为 HTCLIENT、
+    /// 窗口确实收到鼠标时（`WM_SETCURSOR`）才会被问。
+    fn cursor_at(&self, _pos: Point) -> Option<CursorShape> {
+        None
+    }
+
+    /// 取出并清除待执行的窗口操作（自定义标题栏按钮触发）。平台在事件分发后轮询。
+    fn take_window_op(&mut self) -> Option<WindowOp> {
+        None
+    }
+
+    /// 最小化是否应该改为隐藏窗口（见 [`App::hide_on_minimize`]）。
+    ///
+    /// 平台在**最小化已经发生之后**问（win32 是 `WM_SIZE` 的 `SIZE_MINIMIZED`），
+    /// 而不是拦下最小化请求：最小化的来源不止自绘标题栏那颗按钮，还有系统标题栏、
+    /// 任务栏点击、Win+Down、Alt+Space 菜单——拦请求只堵得住第一种，而"收进托盘"
+    /// 是应用级语义，哪条路进来都该一样。
+    ///
+    /// [`App::hide_on_minimize`]: crate::app::App::hide_on_minimize
+    fn hide_on_minimize(&self) -> bool {
+        false
+    }
+
+    /// 窗口标题若与上次推送的不同，返回新标题（平台随即调 `SetWindowTextW` /
+    /// `setTitle:`）。**拉取式**：宿主不记"要不要改"，每次问都现算一遍当前标题。
+    ///
+    /// 为什么是拉取而不是像 `WindowOp` 那样排一条意图：标题的来源是
+    /// [`TextContent`](crate::ui::TextContent)，它可能绑在信号上、也可能是条待翻译消息
+    /// （[`t!`](crate::t)）。这两种都**不经过任何显式调用**就会变——换语言只动线程局部的
+    /// 译文目录，写信号只动信号运行时，谁都不会顺手去排一条"改标题"的意图。排队式
+    /// 就得在每个可能改变它的地方补一次通知，漏一处的症状是"换了语言标题还是旧的"。
+    ///
+    /// 平台在**事件分发后与出帧后**都要问一次：语言可以在点击回调里换（事件路径），
+    /// 也可以在 `on_interval`/`on_message` 里换（帧路径）。
+    fn take_window_title(&mut self) -> Option<String> {
+        None
+    }
+
+    /// 窗口状态/能力发生变化时推送最新快照（最大化、最小化、能否最大化…）。
+    ///
+    /// **单向推送而非让宿主回查**：查询要么把窗口句柄交给核心（违反平台缝合），要么让
+    /// `EventCtx` 背上一个平台回调——两者都比"平台在状态变了的那一刻说一声"更重。
+    ///
+    /// 平台应在**状态真正变化时**（win32 的 `WM_SIZE`）与**建窗完成后**各推一次；后者不能
+    /// 省，否则首次事件分发读到的还是配置推导出的初始值。未推送的平台上宿主沿用
+    /// 由建窗配置推导的初始快照——那是保守但正确的能力位，不是谎报。
+    fn on_window_state(&mut self, _st: crate::event::WindowState) {}
+
+    /// 系统外观偏好变了（亮 ↔ 暗）。返回是否需要重绘。
+    ///
+    /// 平台只在**主题这一项**变化时调它。Windows 上所有系统设置的变更共用一条
+    /// `WM_SETTINGCHANGE`，不筛的话用户改字体、区域、鼠标速度都会把界面重建一遍。
+    fn on_system_theme_changed(&mut self, _dark: bool) -> bool {
+        false
+    }
+
+    /// 取出并清除待执行的原生文件对话框请求。平台在事件分发**完全返回**（OS 侧鼠标
+    /// 捕获已同步）之后才调用，避免在事件回调栈内重入阻塞式模态对话框。
+    ///
+    /// 默认实现取 [`crate::app::take_deferred`] 的队列（已废弃的自由函数
+    /// `app::defer_blocking` 排入的闭包）——自定义 handler 不覆盖本方法也能让老代码里
+    /// 排入的延迟闭包跑起来（覆盖时记得回退到它，见 `UiHost`）。
+    /// 走 `ctx.defer_blocking` 的请求不经这条队列，由宿主自己的 `pending_dialog` 交付。
+    fn take_dialog_request(&mut self) -> Option<DialogRequest> {
+        crate::app::take_deferred()
+    }
+
+    /// 取出并清除待创建的子窗口（`EventCtx::open_window` 排入）。平台在事件分发
+    /// **完全返回**后调用，与 [`take_window_op`](Self::take_window_op) 同点。
+    ///
+    /// 交出的是**配置 + 已经建好的宿主**，而不是控件树：宿主的构造需要主题句柄等应用层
+    /// 上下文，平台层既拿不到也不该认识它。平台只需按 `WindowConfig` 建窗、把 handler
+    /// 挂上去——与 `run` 收到的那一份是同一种东西。
+    ///
+    /// 返回的 `WindowConfig` 只描述**这一个窗口**：托盘、全局热键、单实例这些应用级配置
+    /// 一律为空，平台不得据此重复安装（它们在 `run` 那次已经装好，见 win32 的 `AppHost`）。
+    ///
+    /// `is_open` 由平台提供，回答"这个单例键（`Window::single`）当前是否已有窗口"。
+    /// 判定必须发生在**构建内容之前**，故只能由宿主在这里问平台，而不是平台拿到结果再
+    /// 过滤：`WindowRequest::content` 是个闭包，宿主一旦把它跑起来就已经白搭了一整棵
+    /// 控件树，闭包里的副作用也跟着执行了一遍。
+    fn take_new_windows(&mut self, _is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
+        Vec::new()
+    }
+}
+
+/// [`AppHandler::take_new_windows`] 的一项：建一个新窗口，或激活已有的同键单例窗口。
+pub enum NewWindow {
+    /// 建一个新窗口，并把这个 handler 挂上去。
+    ///
+    /// 配置装箱：`WindowConfig` 三百多字节，而 `Focus` 只有一个 `String`——不装箱的话
+    /// 每个 `Focus` 也要按最大变体占位。
+    Create(Box<WindowConfig>, Box<dyn AppHandler>),
+    /// 已有同键窗口（`Window::single`）：把它激活到前台，本次不建窗。
+    ///
+    /// 内容闭包**没有被运行**。平台按键去登记表里找那个窗口；找不到就什么都不做
+    /// （窗口在判定与执行之间关掉了，属于正常竞态，不是错误）。
+    Focus(String),
+}
+
+// ── 拖出到外部程序 ───────────────────────────────────────────────────────────
+
+/// [`drag_files`] 的结果：接收方对拖出的文件执行了什么。
+///
+/// 接收方（资源管理器等）对文件列表**自己完成**复制 / 移动，本方不必再动文件；
+/// 返回值只用于事后刷新或统计。`None` = 没落到任何地方、按了 Esc、或平台不支持。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragEffect {
+    None,
+    Copy,
+    Move,
+    Link,
+}
+
+// ── 文件 / 目录选择对话框 ────────────────────────────────────────────────────
+
+/// 在调用 `pick_*` / `save_file` 前，将当前活跃窗口句柄注入 rfd 对话框。
+///
+/// Windows：读取 wnd_proc 入口处写入的 thread-local HWND，用 `IFileDialog::Show(hwnd)`
+/// 把主窗口设为父窗口，确保对话框阻塞主窗口（父窗口被 EnableWindow(FALSE) 禁用直到关闭）。
+///
+/// macOS：rfd 内部以 `NSOpenPanel.runModal()` 运行，系统保证浮层正确置顶，无需注入。
+#[cfg(windows)]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    use raw_window_handle::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
+    };
+    use std::num::NonZeroIsize;
+
+    let hwnd_val = win32::active_hwnd();
+    let Some(nz) = NonZeroIsize::new(hwnd_val) else {
+        return d;
+    };
+    struct W(NonZeroIsize);
+    impl HasWindowHandle for W {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            Ok(unsafe {
+                WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(self.0)))
+            })
+        }
+    }
+    impl HasDisplayHandle for W {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            Ok(unsafe {
+                DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
+            })
+        }
+    }
+    d.set_parent(&W(nz))
+}
+
+#[cfg(target_os = "macos")]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    d
+}
+
+/// Linux：门户对话框按窗口标识定父窗口，而本后端的窗口句柄尚未对外暴露（见
+/// `native_window_handle`），暂不注入——对话框照常弹出，只是不挂在主窗口上。
+#[cfg(target_os = "linux")]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    d
+}
+
+/// 系统原生文件 / 目录选择对话框，链式配置后调 `pick_*` / `save_file` 弹出。
+///
+/// 框架自动将当前窗口注入为对话框父窗口，无需手动传递句柄：
+/// - **Windows**：`IFileDialog::Show(hwnd)` — 主窗口在对话框期间被禁用，点击不会穿透
+/// - **macOS**：`NSOpenPanel` 以浮层面板形式出现，系统保证 z 序
+///
+/// # 示例
+/// ```no_run
+/// use windui::prelude::*;
+///
+/// // 单文件
+/// let file = PickDialog::new().title("打开图片").filter("图片", &["png", "jpg"]).pick_file();
+///
+/// // 保存
+/// let dest = PickDialog::new().title("另存为").file_name("report.pdf").save_file();
+/// ```
+///
+/// # 没弹出来 vs. 用户取消
+///
+/// 两者都返回 `None`。要区分时，在拿到 `None` 后（同一线程、下一次弹框前）问
+/// [`PickDialog::last_pick_failed`]。目前只有 Linux 会判出「没弹出来」：xdg 门户不可用、
+/// zenity 也没装时 rfd 静默返回 `None`，这里先试 kdialog，仍不行才记为失败。
+pub struct PickDialog {
+    dialog: rfd::FileDialog,
+    /// 配置副本，供 kdialog 兜底（rfd 的配置不对外可读）。
+    #[cfg(target_os = "linux")]
+    spec: linux::file_dialog::Spec,
+}
+
+/// 弹框种类（Linux 兜底按它拼 kdialog 参数）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PickKind {
+    File,
+    Files,
+    Folder,
+    Folders,
+    Save,
+}
+
+thread_local! {
+    /// 本线程最近一次 `pick_*` / `save_file` 是否「没弹出来」。
+    static LAST_PICK_FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+impl Default for PickDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PickDialog {
+    pub fn new() -> Self {
+        Self {
+            dialog: rfd::FileDialog::new(),
+            #[cfg(target_os = "linux")]
+            spec: Default::default(),
+        }
+    }
+
+    /// 本线程最近一次 `pick_*` / `save_file` 返回 `None` 是因为对话框根本没弹出来（而非用户
+    /// 取消）。应用据此提示用户装文件选择组件，取消时则保持静默。
+    ///
+    /// 每次弹框开始时复位。仅 Linux 可能为 `true`，其它平台恒 `false`。
+    pub fn last_pick_failed() -> bool {
+        LAST_PICK_FAILED.with(Cell::get)
+    }
+
+    /// 设置对话框标题栏文字。
+    pub fn title(mut self, title: impl AsRef<str>) -> Self {
+        self.dialog = self.dialog.set_title(title.as_ref());
+        #[cfg(target_os = "linux")]
+        {
+            self.spec.title = Some(title.as_ref().to_string());
+        }
+        self
+    }
+
+    /// 添加文件类型过滤器（`pick_file` / `pick_files` / `save_file` 生效；目录选择忽略）。
+    /// 可链式调用多次以添加多个过滤项。
+    pub fn filter(mut self, name: impl AsRef<str>, extensions: &[impl AsRef<str>]) -> Self {
+        let exts: Vec<&str> = extensions.iter().map(|s| s.as_ref()).collect();
+        self.dialog = self.dialog.add_filter(name.as_ref(), &exts);
+        #[cfg(target_os = "linux")]
+        self.spec.filters.push((
+            name.as_ref().to_string(),
+            exts.iter().map(|e| e.to_string()).collect(),
+        ));
+        self
+    }
+
+    /// 设置初始目录。
+    pub fn directory(mut self, path: impl AsRef<Path>) -> Self {
+        self.dialog = self.dialog.set_directory(path.as_ref());
+        #[cfg(target_os = "linux")]
+        {
+            self.spec.directory = Some(path.as_ref().to_path_buf());
+        }
+        self
+    }
+
+    /// 预填文件名输入框（`save_file` 场景常用）。
+    pub fn file_name(mut self, name: impl AsRef<str>) -> Self {
+        self.dialog = self.dialog.set_file_name(name.as_ref());
+        #[cfg(target_os = "linux")]
+        {
+            self.spec.file_name = Some(name.as_ref().to_string());
+        }
+        self
+    }
+
+    /// 弹框并记下「没弹出来」与否。`via_rfd` 走 rfd，结果统一成路径列表（单选包成一项），
+    /// 这样单选的 `None` 与多选的 `Some(vec![])`（rfd 在门户回非 0 response 时给的就是它）
+    /// 走同一条判定；`from_paths` 再把路径折成本方法的返回形态。
+    fn run<T>(
+        self,
+        kind: PickKind,
+        via_rfd: impl FnOnce(rfd::FileDialog) -> Option<Vec<PathBuf>>,
+        from_paths: impl FnOnce(Vec<PathBuf>) -> Option<T>,
+    ) -> Option<T> {
+        LAST_PICK_FAILED.with(|f| f.set(false));
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = kind;
+            via_rfd(self.into_dialog()).and_then(from_paths)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use linux::file_dialog::{self as fd, Outcome};
+            let spec = self.spec.clone();
+            let start = std::time::Instant::now();
+            let r = fd::non_empty(via_rfd(self.into_dialog()));
+            if r.is_some() || !fd::looks_failed(start.elapsed()) {
+                return r.and_then(from_paths);
+            }
+            log::warn!(
+                "文件选择框 {kind:?} 在 {:?} 内返回空，判为没弹出来（门户不可用且无 zenity？），改试 kdialog",
+                start.elapsed()
+            );
+            match fd::run_kdialog(&spec, kind) {
+                Outcome::Picked(paths) => from_paths(paths),
+                Outcome::Cancelled => None,
+                Outcome::Failed(why) => {
+                    log::warn!("kdialog 兜底也失败：{why}；文件选择框弹不出来");
+                    LAST_PICK_FAILED.with(|f| f.set(true));
+                    None
+                }
+            }
+        }
+    }
+
+    fn into_dialog(self) -> rfd::FileDialog {
+        debug_assert!(
+            !in_event_dispatch(),
+            "PickDialog::pick_file()/pick_files()/pick_folder()/pick_folders()/save_file() \
+             不能在控件事件回调（on_click/on_event）里直接调用——此时 OS 鼠标捕获尚未同步，\
+             会与对话框自身的模态消息泵抢鼠标输入，反复开关几次就会让鼠标彻底失灵。回调里请改用 \
+             EventCtx::request_pick_file()/request_pick_files()/request_pick_folder()/\
+             request_pick_folders()/request_save_file()，多步流程用 EventCtx::defer_blocking()。"
+        );
+        inject_parent(self.dialog)
+    }
+
+    /// 打开**单文件**选择对话框；用户取消返回 `None`。
+    pub fn pick_file(self) -> Option<PathBuf> {
+        self.run(PickKind::File, |d| d.pick_file().map(|p| vec![p]), first)
+    }
+
+    /// 打开**多文件**选择对话框；用户取消返回 `None`。
+    pub fn pick_files(self) -> Option<Vec<PathBuf>> {
+        self.run(PickKind::Files, |d| d.pick_files(), Some)
+    }
+
+    /// 打开**单目录**选择对话框；用户取消返回 `None`。
+    pub fn pick_folder(self) -> Option<PathBuf> {
+        self.run(
+            PickKind::Folder,
+            |d| d.pick_folder().map(|p| vec![p]),
+            first,
+        )
+    }
+
+    /// 打开**多目录**选择对话框；用户取消返回 `None`。
+    pub fn pick_folders(self) -> Option<Vec<PathBuf>> {
+        self.run(PickKind::Folders, |d| d.pick_folders(), Some)
+    }
+
+    /// 打开**保存文件**对话框；用户取消返回 `None`。
+    pub fn save_file(self) -> Option<PathBuf> {
+        self.run(PickKind::Save, |d| d.save_file().map(|p| vec![p]), first)
+    }
+}
+
+/// 单选入口取路径列表的第一项。
+fn first(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().next()
+}
+
+/// 由 `EventCtx::request_pick_file` 等方法产生，经 `DispatchResult` 上交宿主。
+///
+/// **不要**在控件事件回调里直接调用 `PickDialog::pick_file()` 等同步方法——那会在事件
+/// 分发的调用栈深处同步进入模态对话框自己的消息泵，而此时本窗口的 OS 鼠标捕获
+/// （`SetCapture`）可能还未来得及释放，导致对话框与主窗口抢鼠标输入，多次开关后
+/// 会让内部捕获状态与 OS 实际状态错位，表现为鼠标彻底失灵。应改用 `EventCtx` 上的
+/// `request_*` 方法：把对话框配置和拿到结果后的延续回调打包成请求，交给宿主在事件
+/// 分发彻底返回、OS 输入状态已同步之后再真正弹出。
+pub enum DialogRequest {
+    PickFile(PickDialog, Box<dyn FnOnce(Option<PathBuf>)>),
+    PickFiles(PickDialog, Box<dyn FnOnce(Option<Vec<PathBuf>>)>),
+    PickFolder(PickDialog, Box<dyn FnOnce(Option<PathBuf>)>),
+    PickFolders(PickDialog, Box<dyn FnOnce(Option<Vec<PathBuf>>)>),
+    SaveFile(PickDialog, Box<dyn FnOnce(Option<PathBuf>)>),
+    /// 逃生舱：任意一段包含若干阻塞式原生调用的流程（如"选文件→校验→选目录→确认"，
+    /// 中间还要穿插 `MessageBoxW` 之类的系统模态框）。当单个 `PickFile`/`SaveFile`
+    /// 装不下这种多步序列时用这个——闭包在事件分发完全返回之后运行，此时已不在
+    /// 事件回调栈内，闭包内可以放心直接同步调用任意数量的阻塞式原生 API。
+    Custom(Box<dyn FnOnce()>),
+}
+
+impl DialogRequest {
+    /// 真正执行阻塞的原生对话框调用并触发延续回调。调用方须保证此时事件分发已
+    /// 完全返回（OS 鼠标捕获等已同步），不会与对话框自身的模态消息泵冲突。
+    pub fn run(self) {
+        match self {
+            DialogRequest::PickFile(d, cb) => cb(d.pick_file()),
+            DialogRequest::PickFiles(d, cb) => cb(d.pick_files()),
+            DialogRequest::PickFolder(d, cb) => cb(d.pick_folder()),
+            DialogRequest::PickFolders(d, cb) => cb(d.pick_folders()),
+            DialogRequest::SaveFile(d, cb) => cb(d.save_file()),
+            DialogRequest::Custom(f) => f(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    /// 默认必须是软光栅。
+    ///
+    /// 单独钉住是因为改默认值是一次**行为变更**，会把所有未显式选择的应用一起切到
+    /// GPU 上。它该由一次明确的版本决策来做，而不是谁顺手改了 `#[default]` 就生效。
+    #[test]
+    fn default_is_software() {
+        assert_eq!(Renderer::default(), Renderer::Software);
+        assert_eq!(WindowConfig::default().renderer, Renderer::Software);
+    }
+
+    /// 三个变体在"要不要试 GPU"和"失败能不能回退"两个维度上的取值。
+    #[test]
+    fn wants_and_requires_gpu_truth_table() {
+        assert!(Renderer::Auto.wants_gpu(), "Auto 应尝试 GPU");
+        assert!(!Renderer::Auto.requires_gpu(), "Auto 失败应可回退");
+
+        assert!(!Renderer::Software.wants_gpu(), "Software 不应尝试 GPU");
+        assert!(!Renderer::Software.requires_gpu());
+
+        assert!(Renderer::Gpu.wants_gpu());
+        assert!(
+            Renderer::Gpu.requires_gpu(),
+            "Gpu 失败必须报错——静默回退会让基于它的验证拿两张软渲染图得出'软硬一致'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod child_screenshot_path_tests {
+    use super::child_screenshot_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn appends_index_before_extension() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("out.png"), 1),
+            PathBuf::from("out-1.png")
+        );
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("out.png"), 2),
+            PathBuf::from("out-2.png")
+        );
+    }
+
+    /// 目录必须保留：主图与子窗图要落在同一处，视觉回归才好一起比对。
+    #[test]
+    fn keeps_parent_directory() {
+        let got = child_screenshot_path(&PathBuf::from("artifacts/multi.png"), 1);
+        assert_eq!(got, PathBuf::from("artifacts/multi-1.png"));
+    }
+
+    /// 无扩展名时补 png，而不是产出一个没有后缀的文件。
+    #[test]
+    fn defaults_extension_to_png() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("shot"), 3),
+            PathBuf::from("shot-3.png")
+        );
+    }
+
+    /// 文件名里本就带点号时，只在**最后**一个扩展名前插序号。
+    #[test]
+    fn splits_at_last_extension() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("v1.2.png"), 1),
+            PathBuf::from("v1.2-1.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_guard_tests {
+    use super::*;
+
+    #[test]
+    fn event_dispatch_guard_tracks_state_and_clears_on_drop() {
+        assert!(!in_event_dispatch());
+        let guard = EventDispatchGuard::enter();
+        assert!(in_event_dispatch());
+        drop(guard);
+        assert!(!in_event_dispatch());
+    }
+
+    // debug_assert! 在 release 构建里被剔除——只在 debug_assertions 开启时验证 panic，
+    // 避免 release 测试构建真的跑进 into_dialog() 之后的阻塞 rfd 调用。
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "不能在控件事件回调")]
+    fn pick_dialog_panics_when_called_inside_event_dispatch() {
+        let _guard = EventDispatchGuard::enter();
+        // debug_assert! 在 into_dialog() 里先触发 panic，不会真正调用阻塞的 rfd 接口。
+        let _ = PickDialog::new().pick_folder();
+    }
+}
+
+#[cfg(test)]
+mod motion_level_tests {
+    use super::*;
+    use crate::anim::MotionLevel;
+
+    fn cfg(motion: Option<MotionLevel>, reduced: MotionLevel, screenshot: bool) -> WindowConfig {
+        WindowConfig {
+            motion,
+            reduced_motion: reduced,
+            screenshot: screenshot.then(|| std::path::PathBuf::from("x.png")),
+            ..WindowConfig::default()
+        }
+    }
+
+    /// 默认随系统：系统不要求减弱时全开，要求时落到应用的减弱策略（默认 Reduced）。
+    #[test]
+    fn follows_system_through_the_reduce_policy() {
+        let d = WindowConfig::default();
+        assert_eq!(
+            d.reduced_motion,
+            MotionLevel::Reduced,
+            "默认策略应为 Reduced"
+        );
+        assert_eq!(resolve_motion_level(&d, || false), MotionLevel::Full);
+        assert_eq!(resolve_motion_level(&d, || true), MotionLevel::Reduced);
+        let off = cfg(None, MotionLevel::Off, false);
+        assert_eq!(resolve_motion_level(&off, || true), MotionLevel::Off);
+        assert_eq!(resolve_motion_level(&off, || false), MotionLevel::Full);
+    }
+
+    /// 强制档位压过系统，且不必去查系统（Linux 上查一次是一个子进程）。
+    #[test]
+    fn forced_level_wins_without_querying_system() {
+        for level in [MotionLevel::Full, MotionLevel::Reduced, MotionLevel::Off] {
+            let c = cfg(Some(level), MotionLevel::Reduced, false);
+            assert_eq!(
+                resolve_motion_level(&c, || panic!("强制档位下不应查询系统")),
+                level
+            );
+        }
+        assert!(motion_forced_off(&cfg(
+            Some(MotionLevel::Off),
+            MotionLevel::Reduced,
+            false
+        )));
+        assert!(
+            !motion_forced_off(&cfg(None, MotionLevel::Off, false)),
+            "随系统落到 Off 不算应用强制关死：光标闪烁仍走系统插入符设置"
+        );
+    }
+
+    /// 截屏路径恒全开：终态稳定，且 `--anim-at` 取得到位移类过渡的中间帧。
+    #[test]
+    fn screenshot_runs_full_motion() {
+        let c = cfg(None, MotionLevel::Off, true);
+        assert_eq!(resolve_motion_level(&c, || true), MotionLevel::Full);
+    }
+}
+
+/// 触摸拖动的方向锁定：从按下点起的总位移 `(dx, dy)` 有一边越过 `threshold`（物理像素）时，
+/// 锁到位移较大的那一轴；相等时竖向优先（竖向滚动最常见）。未越阈值返回 `None`（仍可能是点击）。
+///
+/// 平台层在越阈值那一刻调用一次，此后整个手势只沿这一轴平移与惯性，斜着拖不会两个方向一起滚。
+///
+/// `can_pan` 回答手指下有没有能沿某轴滚动的容器（见 [`AppHandler::can_pan`]）：较大一边
+/// 滚不了而另一边滚得了时改锁另一边。
+#[cfg_attr(not(windows), allow(dead_code))] // 目前只有 win32 自己判触摸拖动
+pub(crate) fn touch_lock_axis(
+    dx: i32,
+    dy: i32,
+    threshold: i32,
+    can_pan: impl Fn(crate::spec::Axis) -> bool,
+) -> Option<crate::spec::Axis> {
+    use crate::spec::Axis;
+    let (ax, ay) = (dx.abs(), dy.abs());
+    if ax < threshold && ay < threshold {
+        return None;
+    }
+    let (first, other) = if ax > ay {
+        (Axis::Horizontal, Axis::Vertical)
+    } else {
+        (Axis::Vertical, Axis::Horizontal)
+    };
+    if !can_pan(first) && can_pan(other) {
+        Some(other)
+    } else {
+        Some(first)
+    }
+}
+
+#[cfg(test)]
+mod touch_lock_tests {
+    use super::touch_lock_axis;
+    use crate::spec::Axis;
+
+    #[test]
+    fn locks_to_the_dominant_axis_once_past_threshold() {
+        let any = |_| true;
+        assert_eq!(
+            touch_lock_axis(5, -8, 12, any),
+            None,
+            "未越阈值：可能是点击"
+        );
+        assert_eq!(touch_lock_axis(-13, 4, 12, any), Some(Axis::Horizontal));
+        assert_eq!(touch_lock_axis(9, 12, 12, any), Some(Axis::Vertical));
+        assert_eq!(
+            touch_lock_axis(15, -20, 12, any),
+            Some(Axis::Vertical),
+            "斜拖取较大一边"
+        );
+        assert_eq!(
+            touch_lock_axis(14, 14, 12, any),
+            Some(Axis::Vertical),
+            "相等时竖向优先"
+        );
+    }
+
+    /// 较大一边滚不了、另一边滚得了：改锁另一边；两边都滚不了时仍锁较大一边。
+    #[test]
+    fn falls_back_to_the_other_axis_when_dominant_cannot_scroll() {
+        let only_v = |a| a == Axis::Vertical;
+        assert_eq!(touch_lock_axis(20, 13, 12, only_v), Some(Axis::Vertical));
+        assert_eq!(
+            touch_lock_axis(20, 13, 12, |_| false),
+            Some(Axis::Horizontal)
+        );
+    }
+}

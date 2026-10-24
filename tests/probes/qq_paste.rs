@@ -531,11 +531,16 @@ unsafe fn run_variants() -> Out {
         // G = 同一全文、纯文本（html=None）——隔离"html 字节是否惹祸"。
         // 判读：F 落空而 G 到货 ⇒ 真实 CF_HTML 字节在 TIM 上被判死（修复=写回前重建头/安检）；
         //       F、G 都落空 ⇒ 差异在条目数据本身（CJK/多行/长度），与 html 无关。
-        let f_text = std::fs::read_to_string(r"E:\tmp\AI.Agent\CurSeen\temp\probe_f_text.txt")
-            .expect("probe: 真实条目全文");
-        let f_html =
-            std::fs::read(r"E:\tmp\AI.Agent\CurSeen\build\temp\clipboard\texts\f95a1805b647b539.html")
-                .expect("probe: 真实落盘 CF_HTML");
+        let f_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "\\..\\temp\\probe_f_text.txt"
+        ))
+        .expect("probe: 真实条目全文");
+        let f_html = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "\\..\\build\\temp\\clipboard\\texts\\f95a1805b647b539.html"
+        ))
+        .expect("probe: 真实落盘 CF_HTML");
         println!(
             "F/G 数据：text={} 字节 html={} 字节",
             f_text.len(),
@@ -563,7 +568,13 @@ unsafe fn run_variants() -> Out {
         let after_g = shot(target).unwrap_or_default();
         out.g_real_plain = diff_bytes(&after_f, &after_g);
         println!("G real-text plain {g} 差异字节={}", out.g_real_plain);
-        unsafe { shot_save(target, r"E:\tmp\AI.Agent\CurSeen\temp\qq_after_G.bmp", &after_g) };
+        unsafe {
+            shot_save(
+                target,
+                concat!(env!("CARGO_MANIFEST_DIR"), "\\..\\temp\\qq_after_G.bmp"),
+                &after_g,
+            )
+        };
 
         // ── 二轮矩阵（2026-10-07）：拆 G 落空的因子 ──
         // H = 单行 CJK 纯文本（write_text_and_html(None)）→ CJK 因子
@@ -571,7 +582,7 @@ unsafe fn run_variants() -> Out {
         // J = 多行 CJK 真实全文，切回后等 2000ms 再发键        → 时序因子（G 是 120ms）
         // K = 单行 ASCII 纯文本（生产写侧同款、晚位次）        → 屏蔽格式/位次因子
         //   （K 若落空而 A 到货 ⇒ 问题在生产写侧形状或时序，不在内容）
-        let shots = r"E:\tmp\AI.Agent\CurSeen\temp";
+        let shots = concat!(env!("CARGO_MANIFEST_DIR"), "\\..\\temp");
 
         let h = stamp("H");
         curseen_ui::platform::clipboard_html::write_text_and_html(&format!("{h} 中文单行测试"), None);

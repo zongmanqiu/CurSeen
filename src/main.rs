@@ -20,6 +20,9 @@ fn main() {
     //   见 `platform::crash` 的模块文档。
     curseen_ui::platform::crash::install();
     log::info!("CurSeen v{} 启动", env!("CARGO_PKG_VERSION"));
+    // ★ 启动环境摘要（总纲 §10）：用户能给我们的只有一份日志，缺了版本 / 系统 /
+    //   显示器 / 权限级别这四项，一半的「在我机器上好的」问题无从下手。
+    curseen_ui::platform::win_util::log_env_banner();
 
     // 管理员权限启动 = **用户配置项**（2026-10-07 拍板）：设置页「系统」卡的勾选项
     // （`general.admin_launch`），勾了才提权，出厂不勾 = 普通权限（启动链路干净、

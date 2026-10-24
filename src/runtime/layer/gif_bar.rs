@@ -351,7 +351,7 @@ impl BarCanvas {
                 (cx - r * 0.55, cy + r),
                 (cx + r * 0.90, cy),
             ];
-            canvas.fill_polygon(&pts, &WPaint::fill(color(START_GREEN, 255)));
+            canvas.fill_polygon(&[&pts], &WPaint::fill(color(START_GREEN, 255)));
         }
     }
 

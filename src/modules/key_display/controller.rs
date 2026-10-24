@@ -611,6 +611,35 @@ mod tests {
         assert!(!c.has_any_mod());
     }
 
+    /// ★ 修饰键单独按下**不生成条目**（2026-10-24 定案）。
+    ///
+    /// 用户问过"Shift/Alt 要不要像普通键那样单键显示"。决定：不显示。单独按修饰键
+    /// 不构成操作，回显要看的是快捷键结果；按住态另有虚拟键盘可视化。这里有两条断言：
+    /// 单按不出条目、但状态确实记下了（紧接着的组合键要带上前缀）。
+    #[test]
+    fn a_modifier_alone_never_creates_an_item_but_still_prefixes_the_next_key() {
+        let s = make_settings();
+        let mut c = KeyController::new(&s);
+        // Ctrl / Alt / Shift / LWin
+        for vk in [0x11_u16, 0x12, 0x10, 0x5B] {
+            c.on_key_pressed(vk, 1.0, &s);
+            assert!(
+                c.active.is_none(),
+                "修饰键 {vk:#x} 单独按下不该生成条目（用户 2026-10-24 定案）"
+            );
+            c.on_key_released(vk);
+        }
+        // 状态仍然有效：Ctrl 按住 + C → 组合键带前缀。
+        c.on_key_pressed(0x11, 2.0, &s);
+        c.on_key_pressed(0x43, 3.0, &s);
+        let text = c
+            .active
+            .as_ref()
+            .map(KeyItem::display_text)
+            .unwrap_or_default();
+        assert_eq!(text, "Ctrl + C");
+    }
+
     #[test]
     fn merge_interval_timeout() {
         let mut c = KeyController::new(&make_settings());

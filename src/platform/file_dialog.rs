@@ -114,6 +114,9 @@ fn dir_ptr(dir: &[u16]) -> PCWSTR {
     if dir.is_empty() {
         PCWSTR::null()
     } else {
+        // SAFETY: `dir` 非空（上面判过），`as_ptr()` 指向调用方持有的、以 NUL 结尾的
+        // `Vec<u16>`；`PCWSTR` 只是把地址交给系统临时读一下，不取得所有权，
+        // 也不延长生命周期——调用方必须保证在使用期间它活着（见 `dir_wide` 的文档）。
         PCWSTR::from_raw(dir.as_ptr())
     }
 }
@@ -172,10 +175,13 @@ fn pick_open(
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner_hwnd(owner),
+        // SAFETY: 下面几个 `from_raw` 借的都是本函数栈上的 `Vec<u16>`（`filter` / `buf` /
+        // `title` / `dir`），它们在 `ofn` 之后才离开作用域，而 `GetOpenFileNameW` 是同步
+        // 调用、返回后不再持有 —— 借用在整个使用期间有效。`nMaxFile` 如实写 `BUF_LEN`。
         lpstrFilter: PCWSTR::from_raw(filter.as_ptr()),
         lpstrFile: PWSTR::from_raw(buf.as_mut_ptr()),
         nMaxFile: BUF_LEN as u32,
-        lpstrTitle: PCWSTR::from_raw(title.as_ptr()),
+        lpstrTitle: PCWSTR::from_raw(title.as_ptr()), // SAFETY: 同上（栈上缓冲）
         lpstrInitialDir: dir_ptr(&dir),
         Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         ..Default::default()
@@ -228,10 +234,15 @@ fn pick_save(
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner_hwnd(owner),
+        // SAFETY: 同 `pick_open`——借的全是本函数栈上的 `Vec<u16>`（`filter` / `buf` /
+        // `title` / `def_ext` / `dir`），`GetSaveFileNameW` 同步返回后不再持有它们；
+        // `nMaxFile` 如实写 `BUF_LEN`，系统不会写越界。
         lpstrFilter: PCWSTR::from_raw(filter.as_ptr()),
         lpstrFile: PWSTR::from_raw(buf.as_mut_ptr()),
         nMaxFile: BUF_LEN as u32,
-        lpstrTitle: PCWSTR::from_raw(title.as_ptr()),
+        lpstrTitle: PCWSTR::from_raw(title.as_ptr()), // SAFETY: 同上（栈上缓冲）
+        // SAFETY: 同上；额外一条——`def_ext` 在上面已 `chain([0u16])` 补了终止符，
+        // 缺了它系统会一直读到堆上相邻内存（2026-10-08 实测出现 `.mdz` 乱码后缀）。
         lpstrDefExt: PCWSTR::from_raw(def_ext.as_ptr()),
         lpstrInitialDir: dir_ptr(&dir),
         Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,

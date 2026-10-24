@@ -524,30 +524,34 @@ impl Runtime {
 
     /// 把鼠标输入门同步到跨线程原子（构造后与每帧对账调用）。
     pub(crate) fn sync_input_gate(&self) {
-        MOUSE_INPUT_NEEDED.store(self.mouse_input_needed(), Ordering::Relaxed);
+        let mouse_needed = self.mouse_input_needed();
+        MOUSE_INPUT_NEEDED.store(mouse_needed, Ordering::Relaxed);
         // 滚轮门与钩子的吞事件开关同源：任一放大镜开着就启用。
         // 关掉放大镜的下一帧这里立即恢复 false，Ctrl+滚轮立刻还给下层应用。
         // 缩放滚轮的武装开关与钩子同源：任一放大镜在屏上即武装。放大镜关着时
         // Ctrl+Win+滚轮 毫无干预（它在系统里本就没有默认行为）。
-        crate::platform::input::mouse::set_zoom_wheel_armed(
-            self.config.pip_running() || self.config.fullscreen_running(),
-        );
+        let zoom_wheel = self.config.pip_running() || self.config.fullscreen_running();
+        crate::platform::input::mouse::set_zoom_wheel_armed(zoom_wheel);
         // 滚轮回显门：击键回显开着**且**处于「全部」模式时才让钩子转发普通滚轮
         // （show_mouse 由 display_mode 派生——独立开关已删，见
         // `key_display::settings::from_config`。关掉任意一项，下一帧就把
         // "每滚一格唤醒一帧"的开销还回去）。虚拟键盘当前方案里有滚轮键帽
         // （`WheelUp`/`WheelDown`）时同样武装 —— 否则滚轮键帽永远收不到事件。
         // wants_wheel 由 vk 的 tick 每帧刷新（构造 VkConfig 是顺手的事），最多滞后一帧。
-        crate::platform::input::mouse::set_mouse_echo_armed(
-            (self.config.key_display.enabled && self.config.key_display.display_mode == "all")
-                || (self.config.virtual_keyboard.enabled && self.vk.wants_wheel()),
-        );
+        let mouse_echo = (self.config.key_display.enabled
+            && self.config.key_display.display_mode == "all")
+            || (self.config.virtual_keyboard.enabled && self.vk.wants_wheel());
+        crate::platform::input::mouse::set_mouse_echo_armed(mouse_echo);
         // ★ 虚拟键盘的鼠标门：方案里含鼠标键帽就要收按下/抬起，**与鼠标穿透无关**
         //   （穿透只管"点键帽注不注入按键"，高亮是另一回事）。
         //   与 `wants_wheel` 同款：由 vk 的 tick 每帧刷新，最多滞后一帧。
-        VK_MOUSE_ARMED.store(
-            self.config.virtual_keyboard.enabled && self.vk.wants_mouse(),
-            Ordering::Relaxed,
+        let vk_mouse = self.config.virtual_keyboard.enabled && self.vk.wants_mouse();
+        VK_MOUSE_ARMED.store(vk_mouse, Ordering::Relaxed);
+        // ★ 鼠标低级钩子按需装卸（2026-10-24）：上面四路里只要有一路真需要鼠标，才让
+        //   系统把鼠标事件派发进本进程。全关时卸载 —— 否则每一次全系统鼠标移动都会
+        //   调用我们的回调（即便桥接层随后把事件丢掉），正是用户说的"没开功能却在跑"。
+        crate::platform::input::hook::set_mouse_hook_enabled(
+            mouse_needed || zoom_wheel || mouse_echo || vk_mouse,
         );
     }
 
@@ -961,6 +965,50 @@ mod tests {
         rt.config.key_display.display_mode = "no_mouse".into();
         rt.sync_input_gate();
         assert!(!armed(), "都关时不应武装");
+    }
+
+    /// ★ 鼠标低级钩子按需装卸（2026-10-24，用户报「什么功能都没开，鼠标类功能却像在跑」）：
+    /// 期望态 = 四路鼠标消费者的并集。只钉「全关 → 不装」会漏掉另一端（门写死 false
+    /// 也全绿），所以四路各开一次、再逐路关回去。
+    #[test]
+    fn mouse_hook_is_wanted_only_while_a_mouse_consumer_is_on() {
+        let _guard = INPUT_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let wanted = crate::platform::input::hook::mouse_hook_wanted;
+        let mut rt = Runtime::new(Config::default());
+        rt.sync_input_gate();
+        assert!(!wanted(), "出厂全关：不该让系统把每一次鼠标移动都派发进来");
+
+        // ① 击键回显「全部」= 回显鼠标按键/滚轮 → 要装。
+        rt.config.key_display.enabled = true;
+        rt.config.key_display.display_mode = "all".into();
+        rt.sync_input_gate();
+        assert!(wanted(), "回显「全部」要吃鼠标 → 要装");
+        // ② 改成「排除鼠标」→ 立刻还回去。
+        rt.config.key_display.display_mode = "no_mouse".into();
+        rt.sync_input_gate();
+        assert!(!wanted(), "排除鼠标模式不该留着钩子");
+        rt.config.key_display.enabled = false;
+
+        // ③ 放大镜在屏（只有它在屏时滚轮缩放才武装）→ 要装。
+        rt.config.magnifier_pip.enabled = true;
+        rt.config.magnifier_pip.active = true;
+        rt.sync_input_gate();
+        assert!(wanted(), "放大镜在屏 → 滚轮缩放要吃鼠标");
+        rt.config.magnifier_pip.active = false;
+        rt.config.magnifier_pip.enabled = false;
+        rt.sync_input_gate();
+        assert!(!wanted(), "放大镜关掉 → 还回去");
+
+        // ④ 虚拟键盘方案含鼠标键帽 → 要装（与「鼠标穿透」无关）。
+        rt.config.virtual_keyboard.enabled = true;
+        rt.config.virtual_keyboard.layout = "wasd_gaming".to_string();
+        rt.frame(); // 让 vk 解析方案、刷新 wants_mouse
+        rt.sync_input_gate();
+        assert!(wanted(), "WASD 板要鼠标键帽高亮 → 要装");
+        rt.config.virtual_keyboard.enabled = false;
+        rt.frame();
+        rt.sync_input_gate();
+        assert!(!wanted(), "虚拟键盘关掉 → 还回去");
     }
 
     /// ★★ 虚拟键盘的鼠标门：**只看方案里有没有鼠标键帽，不看「鼠标穿透」**

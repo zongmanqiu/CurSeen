@@ -12,6 +12,11 @@ import subprocess
 import sys
 import time
 
+# 报告里含 © 等非 GBK 字符：GBK 控制台（默认中文 Windows）下 print 直接炸，
+# 而报告本身早已写 UTF-8 文件——stdout 统一改 UTF-8，不再依赖调用方设 PYTHONIOENCODING。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TOOLS))
 # `.cargo/config.toml` 把 target-dir 设成 "../temp/target"。但 main 可能是 reparse 点，
@@ -38,6 +43,73 @@ def md5(p):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def version_info(path):
+    """读 PE 的版本资源（VERSIONINFO），返回 (是否完整, 说明)。
+
+    为什么部署要查这个（总纲 §11.1 / §16）：**没有厂商、描述、版本号的"三无 exe"
+    是杀软云查杀的重点关照对象**，而版本资源是在 `build.rs` 里现编的 —— 机器上没有
+    `rc.exe`、或者有人改坏了 `build.rs`，构建照样成功、exe 照样能跑，只是悄悄变成了
+    三无文件，等到用户报"被 360 拦截"才被发现。把它做成部署期断言，就是这个失败
+    模式唯一的提前暴露点。
+
+    判据：`CompanyName` / `FileDescription` / `FileVersion` / `LegalCopyright` 四个
+    **必填字段**都非空才算完整（总纲 §11.1 的必填清单）。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:  # 非 Windows / 极简环境：无法校验，明确报 unknown 而不是假装通过
+        return None, "unknown（无法加载 ctypes）"
+
+    try:
+        ver = ctypes.WinDLL("version", use_last_error=True)
+    except OSError:
+        return None, "unknown（无 version.dll）"
+    ver.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+    ver.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    ver.GetFileVersionInfoW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    ver.GetFileVersionInfoW.restype = wintypes.BOOL
+    ver.VerQueryValueW.argtypes = [
+        ctypes.c_void_p, wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+    ver.VerQueryValueW.restype = wintypes.BOOL
+
+    dummy = wintypes.DWORD(0)
+    size = ver.GetFileVersionInfoSizeW(path, ctypes.byref(dummy))
+    if size == 0:
+        return False, "missing（exe 里根本没有版本资源：build.rs 没编成，或机器上没有 rc.exe）"
+    buf = (ctypes.c_char * size)()
+    if not ver.GetFileVersionInfoW(path, 0, size, buf):
+        return False, "missing（GetFileVersionInfoW 失败）"
+
+    # 语言/代码页由 VarFileInfo\Translation 给出（本仓固定 0804/04b0 = 简体中文 + UTF-16LE），
+    # 但照读一遍比写死稳：改了 .rc 的语言块这里也不会失效。
+    ptr = ctypes.c_void_p()
+    plen = wintypes.UINT(0)
+    lang = "080404b0"
+    if ver.VerQueryValueW(buf, r"\VarFileInfo\Translation",
+                          ctypes.byref(ptr), ctypes.byref(plen)) and plen.value >= 4:
+        arr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint16))
+        lang = "%04x%04x" % (arr[0], arr[1])
+
+    got = {}
+    for field in ("CompanyName", "FileDescription", "FileVersion", "LegalCopyright"):
+        p = ctypes.c_void_p()
+        n = wintypes.UINT(0)
+        key = "\\StringFileInfo\\%s\\%s" % (lang, field)
+        if ver.VerQueryValueW(buf, key, ctypes.byref(p), ctypes.byref(n)) and n.value:
+            s = ctypes.wstring_at(p, n.value - 1)  # n 含结尾 NUL
+        else:
+            s = ""
+        got[field] = s.strip()
+    empty = [k for k, v in got.items() if not v]
+    detail = " ".join(f"{k}={got[k]!r}" for k in got)
+    if empty:
+        return False, f"incomplete（缺 {', '.join(empty)}） {detail}"
+    return True, detail
 
 
 def place_file(src, dst):
@@ -79,6 +151,7 @@ def place_file(src, dst):
 
 
 lines = []
+ver_ok = None          # None = 未校验（源缺失 / 环境不支持）；False = 三无 exe，不放行
 tk = subprocess.run(["taskkill", "/F", "/IM", "curseen.exe"], capture_output=True, text=True, errors="replace")
 lines.append(f"taskkill exit={tk.returncode} out={(tk.stdout or '').strip()} err={(tk.stderr or '').strip()}")
 # 非提权 shell 杀不掉提权的实例（Access denied），此时靠 place_file 的原子改名顶上。
@@ -102,6 +175,14 @@ else:
         errors="replace",
     ).stdout.strip()
     lines.append(f"BUILD_TIME={_bt}")
+    # 版本资源（VERSIONINFO）断言：见 version_info() 的注释。缺了它 build/ 里的 exe
+    # 是"三无文件"——杀软误报的头号来源，且平时看不出来。
+    ver_ok, ver_detail = version_info(DST)
+    lines.append(f"VERINFO={'ok' if ver_ok else ('未知' if ver_ok is None else 'MISSING')}"
+                 f"  {ver_detail}")
+    if ver_ok is False:
+        lines.append("   → 排查：build.rs 的 compile_version_resource 是否成功？"
+                     "（机器上找不到 rc.exe 时会静默跳过，只在 cargo warning 里留一句）")
 
     # PDB 归档：用户侧崩溃的 .dmp 要配**同一次构建**的 PDB 才能精确到行。
     # `temp/target/release/curseen.pdb` 每次重编都被覆盖，若不在这里钉一份，
@@ -182,5 +263,6 @@ with open(OUT, "w", encoding="utf-8") as f:
     f.write("\n".join(lines))
 print("\n".join(lines))
 
-# 只有 exe 就位 **且** 许可就位，才算一个能分发的 build/。
-sys.exit(0 if lic_ok else 1)
+# 只有 exe 就位 **且** 许可就位 **且** 版本资源完整，才算一个能分发的 build/。
+# （VERINFO 为 None = 环境不支持校验，不算失败；为 False = 三无 exe，不放行。）
+sys.exit(0 if (lic_ok and ver_ok is not False) else 1)

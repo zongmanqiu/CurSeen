@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// 运行期配置（便携版：配置落在程序目录）。
 /// 与 `config_pipeline_e2e.rs` 同一份——那条是绘制链路，这条是对账收敛。
-const SHIPPED_CONFIG: &str = r"E:\tmp\AI.Agent\CurSeen\build\config.json";
+const SHIPPED_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "\\..\\build\\config.json");
 
 /// 收集两份 JSON 里取值不同的叶子路径（够定位到字段，不做数组逐项对齐以外的智能匹配）。
 fn diff_paths(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {

@@ -930,7 +930,7 @@ impl DrawingController {
                 let Some(shot) = crate::platform::screenshot::grab(region).ok() else {
                     return;
                 };
-                let Some(bmp) = crate::core::backdrop::shot_to_bitmap(&shot) else {
+                let Some(bmp) = crate::core::backdrop::shot_to_bitmap_owned(shot) else {
                     return;
                 };
                 (std::rc::Rc::new(bmp), region)
@@ -1461,6 +1461,7 @@ fn mosaic_block(rect: &Rect) -> f32 {
 /// 这件纯本地的事，`pub(crate)` 供同 crate 的 `Runtime` 调用。
 ///
 /// 位图是**非预乘 RGBA8、行优先**——与 `png` crate 的 Rgba8 直通编码一致。
+/// 落点是用户看不到的内部回溯目录，编码走 `Fastest`（与 `temp/screenshot/` 同口径）。
 pub(crate) fn save_annotation_png(
     bitmap: &crate::core::image::RgbaBitmap,
 ) -> Option<std::path::PathBuf> {
@@ -1468,12 +1469,7 @@ pub(crate) fn save_annotation_png(
     let dir = annotations_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("标注_{}.png", timestamp_name()));
-    let file = std::fs::File::create(&path).ok()?;
-    let mut enc = png::Encoder::new(file, bitmap.w, bitmap.h);
-    enc.set_color(png::ColorType::Rgba);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().ok()?;
-    writer.write_image_data(&bitmap.rgba).ok()?;
+    crate::platform::screenshot::save_png_rgba_fast(bitmap, &path).ok()?;
     Some(path)
 }
 
