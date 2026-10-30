@@ -1,0 +1,162 @@
+{
+  "id": "MFCMouseEffect",
+  "name": "MFCMouseEffect",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "default": "ripple",
+  "effects": [
+    {
+      "id": "ripple",
+      "name": "Ripple",
+      "kind": "click",
+      "file": "ripple.lua"
+    },
+    {
+      "id": "star",
+      "name": "Star",
+      "kind": "click",
+      "file": "star.lua"
+    },
+    {
+      "id": "text",
+      "name": "Text",
+      "kind": "click",
+      "file": "text.lua"
+    },
+    {
+      "id": "meteor",
+      "name": "Meteor Shower",
+      "kind": "trail",
+      "file": "meteor.lua"
+    },
+    {
+      "id": "streamer",
+      "name": "Neon Streamer",
+      "kind": "trail",
+      "file": "streamer.lua"
+    },
+    {
+      "id": "electric",
+      "name": "Cyber Electric",
+      "kind": "trail",
+      "file": "electric.lua"
+    },
+    {
+      "id": "tubes",
+      "name": "Sci-Fi Tubes",
+      "kind": "trail",
+      "file": "tubes.lua"
+    },
+    {
+      "id": "particle",
+      "name": "Particle",
+      "kind": "trail",
+      "file": "particle.lua"
+    },
+    {
+      "id": "line",
+      "name": "Line",
+      "kind": "trail",
+      "file": "line.lua"
+    },
+    {
+      "id": "arrow",
+      "name": "Arrow",
+      "kind": "scroll",
+      "file": "arrow.lua"
+    },
+    {
+      "id": "helix",
+      "name": "3D Helix",
+      "kind": "scroll",
+      "file": "helix.lua"
+    },
+    {
+      "id": "twinkle",
+      "name": "Stardust Stream",
+      "kind": "scroll",
+      "file": "twinkle.lua"
+    },
+    {
+      "id": "charge",
+      "name": "Energy Charge",
+      "kind": "hold",
+      "file": "charge.lua"
+    },
+    {
+      "id": "lightning",
+      "name": "Lightning",
+      "kind": "hold",
+      "file": "lightning.lua"
+    },
+    {
+      "id": "hex",
+      "name": "Hex Shield",
+      "kind": "hold",
+      "file": "hex.lua"
+    },
+    {
+      "id": "tech_ring",
+      "name": "Tech Ring (3D)",
+      "kind": "hold",
+      "file": "tech_ring.lua"
+    },
+    {
+      "id": "hologram",
+      "name": "Hologram (3D)",
+      "kind": "hold",
+      "file": "hologram.lua"
+    },
+    {
+      "id": "hold_neon3d",
+      "name": "Neon HUD (3D)",
+      "kind": "hold",
+      "file": "hold_neon3d.lua"
+    },
+    {
+      "id": "hold_fluxfield_cpu",
+      "name": "FluxField HUD CPU",
+      "kind": "hold",
+      "file": "hold_fluxfield_cpu.lua"
+    },
+    {
+      "id": "glow",
+      "name": "Glow",
+      "kind": "hover",
+      "file": "glow.lua"
+    },
+    {
+      "id": "tubes_hover",
+      "name": "Helix Suspension",
+      "kind": "hover",
+      "file": "tubes_hover.lua"
+    },
+    {
+      "id": "focus_ring",
+      "name": "Focus Ring",
+      "kind": "cursor",
+      "file": "focus_ring.lua"
+    },
+    {
+      "id": "signal_ring",
+      "name": "Signal Ring",
+      "kind": "cursor",
+      "file": "signal_ring.lua"
+    },
+    {
+      "id": "soft_orb",
+      "name": "Soft Orb",
+      "kind": "cursor",
+      "file": "soft_orb.lua"
+    },
+    {
+      "id": "halo_orb",
+      "name": "Halo Orb",
+      "kind": "cursor",
+      "file": "halo_orb.lua"
+    }
+  ],
+  "description": "参考与致谢：github/sqmw/MFCMouseEffect",
+  "upstream": "MFCMouseEffect",
+  "category": "mouse"
+}

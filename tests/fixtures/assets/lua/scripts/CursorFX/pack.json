@@ -1,0 +1,264 @@
+{
+  "id": "CursorFX",
+  "name": "CursorFX",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "default": "fire",
+  "effects": [
+    {
+      "id": "blob",
+      "name": "blob",
+      "kind": "cursor",
+      "file": "blob.lua"
+    },
+    {
+      "id": "clock",
+      "name": "clock",
+      "kind": "cursor",
+      "file": "clock.lua"
+    },
+    {
+      "id": "crosshair",
+      "name": "crosshair",
+      "kind": "cursor",
+      "file": "crosshair.lua"
+    },
+    {
+      "id": "emoji",
+      "name": "emoji",
+      "kind": "cursor",
+      "file": "emoji.lua"
+    },
+    {
+      "id": "f1car",
+      "name": "f1car",
+      "kind": "cursor",
+      "file": "f1car.lua"
+    },
+    {
+      "id": "ghost",
+      "name": "ghost",
+      "kind": "cursor",
+      "file": "ghost.lua"
+    },
+    {
+      "id": "gun-pistol",
+      "name": "gun-pistol",
+      "kind": "cursor",
+      "file": "gun-pistol.lua"
+    },
+    {
+      "id": "gun-rifle",
+      "name": "gun-rifle",
+      "kind": "cursor",
+      "file": "gun-rifle.lua"
+    },
+    {
+      "id": "gun-shotgun",
+      "name": "gun-shotgun",
+      "kind": "cursor",
+      "file": "gun-shotgun.lua"
+    },
+    {
+      "id": "gun-sniper",
+      "name": "gun-sniper",
+      "kind": "cursor",
+      "file": "gun-sniper.lua"
+    },
+    {
+      "id": "orb",
+      "name": "orb",
+      "kind": "cursor",
+      "file": "orb.lua"
+    },
+    {
+      "id": "pixel",
+      "name": "pixel",
+      "kind": "cursor",
+      "file": "pixel.lua"
+    },
+    {
+      "id": "ribbon",
+      "name": "ribbon",
+      "kind": "cursor",
+      "file": "ribbon.lua"
+    },
+    {
+      "id": "ring",
+      "name": "ring",
+      "kind": "cursor",
+      "file": "ring.lua"
+    },
+    {
+      "id": "rocket",
+      "name": "rocket",
+      "kind": "cursor",
+      "file": "rocket.lua"
+    },
+    {
+      "id": "spotlight",
+      "name": "spotlight",
+      "kind": "cursor",
+      "file": "spotlight.lua"
+    },
+    {
+      "id": "textflag",
+      "name": "textflag",
+      "kind": "cursor",
+      "file": "textflag.lua"
+    },
+    {
+      "id": "bubbles",
+      "name": "bubbles",
+      "kind": "trail",
+      "file": "bubbles.lua"
+    },
+    {
+      "id": "emojirain",
+      "name": "emojirain",
+      "kind": "trail",
+      "file": "emojirain.lua"
+    },
+    {
+      "id": "fire",
+      "name": "fire",
+      "kind": "trail",
+      "file": "fire.lua"
+    },
+    {
+      "id": "neon",
+      "name": "neon",
+      "kind": "trail",
+      "file": "neon.lua"
+    },
+    {
+      "id": "petals",
+      "name": "petals",
+      "kind": "trail",
+      "file": "petals.lua"
+    },
+    {
+      "id": "rainbow",
+      "name": "rainbow",
+      "kind": "trail",
+      "file": "rainbow.lua"
+    },
+    {
+      "id": "snow",
+      "name": "snow",
+      "kind": "trail",
+      "file": "snow.lua"
+    },
+    {
+      "id": "sparkles",
+      "name": "sparkles",
+      "kind": "trail",
+      "file": "sparkles.lua"
+    },
+    {
+      "id": "stars",
+      "name": "stars",
+      "kind": "trail",
+      "file": "stars.lua"
+    },
+    {
+      "id": "animals",
+      "name": "animals",
+      "kind": "click",
+      "file": "animals.lua"
+    },
+    {
+      "id": "birds",
+      "name": "birds",
+      "kind": "click",
+      "file": "birds.lua"
+    },
+    {
+      "id": "bubbles_click",
+      "name": "bubbles",
+      "kind": "click",
+      "file": "bubbles_click.lua"
+    },
+    {
+      "id": "butterflies",
+      "name": "butterflies",
+      "kind": "click",
+      "file": "butterflies.lua"
+    },
+    {
+      "id": "confetti",
+      "name": "confetti",
+      "kind": "click",
+      "file": "confetti.lua"
+    },
+    {
+      "id": "emojiburst",
+      "name": "emojiburst",
+      "kind": "click",
+      "file": "emojiburst.lua"
+    },
+    {
+      "id": "fireworks",
+      "name": "fireworks",
+      "kind": "click",
+      "file": "fireworks.lua"
+    },
+    {
+      "id": "gunshot",
+      "name": "gunshot",
+      "kind": "click",
+      "file": "gunshot.lua"
+    },
+    {
+      "id": "hearts",
+      "name": "hearts",
+      "kind": "click",
+      "file": "hearts.lua"
+    },
+    {
+      "id": "ink",
+      "name": "ink",
+      "kind": "click",
+      "file": "ink.lua"
+    },
+    {
+      "id": "notes",
+      "name": "notes",
+      "kind": "click",
+      "file": "notes.lua"
+    },
+    {
+      "id": "ripple",
+      "name": "ripple",
+      "kind": "click",
+      "file": "ripple.lua"
+    },
+    {
+      "id": "shockwave",
+      "name": "shockwave",
+      "kind": "click",
+      "file": "shockwave.lua"
+    },
+    {
+      "id": "stars_click",
+      "name": "stars",
+      "kind": "click",
+      "file": "stars_click.lua"
+    },
+    {
+      "id": "textburst",
+      "name": "textburst",
+      "kind": "click",
+      "file": "textburst.lua"
+    },
+    {
+      "id": "waves",
+      "name": "waves",
+      "kind": "click",
+      "file": "waves.lua"
+    }
+  ],
+  "description": "参考与致谢：github/devkancheti4-design/cursorfx",
+  "upstream": "CursorFX",
+  "category": "mouse"
+}

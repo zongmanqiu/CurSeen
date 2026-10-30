@@ -40,8 +40,13 @@ impl LuaEffect {
 
         let name: String = core
             .engine
-            .get_effect_name()
-            .unwrap_or_else(|_| script_id.to_string());
+            .lua()
+            .globals()
+            .get::<Option<String>>("name")
+            .ok()
+            .flatten()
+            .or_else(|| core.engine.get_effect_name().ok())
+            .unwrap_or_else(|| script_id.to_string());
 
         // 从 schema() 的默认值构造 EffectDefaults，供首次加载时用默认值喂 Lua。
         let defaults_cache = match core.engine.call_schema() {
@@ -103,6 +108,27 @@ impl TrailEffect for LuaEffect {
     fn on_press(&mut self, x: f32, y: f32, t: f32) {
         self.core.set_elapsed(t);
         self.core.press(x, y);
+    }
+
+    fn on_mouse_up(&mut self, button: crate::core::events::MouseButton, x: f32, y: f32, t: f32) {
+        self.core.set_elapsed(t);
+        let name = match button {
+            crate::core::events::MouseButton::Left => "left",
+            crate::core::events::MouseButton::Right => "right",
+            crate::core::events::MouseButton::Middle => "middle",
+            crate::core::events::MouseButton::X1 => "x1",
+            crate::core::events::MouseButton::X2 => "x2",
+        };
+        self.core.release(name, x, y);
+    }
+
+    fn on_wheel(&mut self, delta: i32, horizontal: bool, x: f32, y: f32, t: f32) {
+        self.core.set_elapsed(t);
+        self.core.wheel(delta, horizontal, x, y);
+    }
+
+    fn wants_wheel(&self) -> bool {
+        self.core.wants_wheel()
     }
 
     fn step(&mut self, dt: f32, ctx: &mut EffectCtx) {

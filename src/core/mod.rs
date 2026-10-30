@@ -25,3 +25,5 @@ pub mod state;
 pub mod temp_usage;
 pub mod text_metrics;
 pub mod tick;
+/// UI 线程消息总线的进程级入口（脚本模态窗走它，见模块头）。
+pub mod ui_bus;

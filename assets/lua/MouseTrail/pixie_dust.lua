@@ -80,12 +80,12 @@ function draw(ctx, params)
   if rb == nil then rb = (params.color_mode ~= "fixed") end
   local cm = rb and "rainbow" or "fixed"
   local rs = params.rainbow_speed or 0.5
-  local fr, fg, fb = hex_to_rgb(params.fixed_color or "#FF0000")
+  local fr, fg, fb, fa = hex_to_rgb(params.fixed_color or "#FF0000")
   for i = 1, #parts do
     local p = parts[i]
     local la = clamp(p.life / p.maxlife, 0, 1)
     if la > 0 then
-      local alpha_f = la * p.opacity
+      local alpha_f = la * p.opacity * fa / 255
       if alpha_f > 0 then
         local sz = p.size * la
         if sz >= 0.3 then

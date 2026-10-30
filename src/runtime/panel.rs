@@ -59,7 +59,10 @@ impl Runtime {
                     self.config_version = self.config_version.wrapping_add(1);
                 }
             }
-            if model.apply_to(&mut self.config) {
+            let applied = model.apply_to(&mut self.config);
+            // 关面板前补一次"更新源"对账：用户切完下拉立刻关窗，250ms 的定时器可能还没跑到。
+            let source_changed = self.sync_store_source();
+            if applied || source_changed {
                 self.config_version = self.config_version.wrapping_add(1);
                 // 与 `sync_panel` 同一条理由：关面板即落盘，那一帧也要画出来（例如刚关掉的
                 // 面板上最后改的悬浮标参数）。
@@ -177,12 +180,34 @@ impl Runtime {
         }
     }
 
+    /// 面板上的"更新源"下拉 → 配置（持久化）。返回是否真的改了。
+    ///
+    /// 信号初值来自 `config.store.source`（`Runtime::new`），所以首帧不会误报改动。
+    /// 切源后按已有清单重算行尾动作与「N 个可下载」：这两处都在建树时按来源定档，
+    /// 不重算的话灰字来源会与按钮状态对不上（不联网，只重放本地已有清单）。
+    fn sync_store_source(&mut self) -> bool {
+        let changed = self.config.store.set_source(self.store.source.get());
+        if changed {
+            let rows = self.store.rows.get();
+            let n = crate::ui::store_state::downloadable_count(&rows, self.store.source.get());
+            // 动作态（检查中/下载中…）由后台事件接管，别被这里的计数覆盖。
+            if !self.store.busy.get() {
+                self.store.status.set(format!("{n} 个可下载"));
+            }
+            self.store.rows.set(rows);
+        }
+        changed
+    }
+
     pub(crate) fn sync_panel(&mut self) {
         // 先把模型取出，避免 `apply_to(&mut self.config)` 与 `self.panel` 同时借用。
         let Some(model) = self.panel.take() else {
             return;
         };
-        if model.apply_to(&mut self.config) {
+        let applied = model.apply_to(&mut self.config);
+        // 在线脚本库的"更新源"下拉也落盘（m40）：用户切了来源，下次开面板/重启还在那一条。
+        let source_changed = self.sync_store_source();
+        if applied || source_changed {
             self.config_version = self.config_version.wrapping_add(1);
             self.panel_dirty = true;
             // ★ 请覆盖层补一帧：改完参数光标多半停在面板上不动，帧门判"光标没移动"返回
@@ -213,7 +238,8 @@ impl Runtime {
     ///
     /// **只在 UI 线程调用**（信号不是 `Send`）。下载完成后这一步会直接起更新脚本并退出
     /// 进程——替换 exe 必须由进程外的脚本来做，本进程已经被加载进内存了。
-    pub fn apply_update_event(&mut self, ev: UpdateEvent) {
+    pub fn apply_update_event(&mut self, ev: UpdateEvent) -> Option<crate::update::UpdatePrompt> {
+        let mut prompt = None;
         match ev {
             UpdateEvent::CheckStarted => {
                 self.update.busy.set(true);
@@ -227,14 +253,25 @@ impl Runtime {
                 self.update.ready.set(false);
                 self.update.status.set(format!("已是最新版本 {latest}"));
             }
-            UpdateEvent::Available { latest, url } => {
+            UpdateEvent::Available {
+                latest,
+                url,
+                sha256,
+                notes,
+            } => {
                 log::info!("检查更新：发现新版本 {latest} -> {url}");
                 self.update.busy.set(false);
                 self.update.ready.set(true);
-                self.update.set_url(url);
+                self.update.set_url(url.clone());
                 self.update
                     .status
-                    .set(format!("发现新版本 {latest}，点「下载并更新」即可"));
+                    .set(format!("发现新版本 {latest}，已打开更新说明"));
+                prompt = Some(crate::update::UpdatePrompt {
+                    latest,
+                    notes,
+                    url,
+                    sha256,
+                });
             }
             UpdateEvent::CheckFailed { error } => {
                 self.update.busy.set(false);
@@ -278,6 +315,7 @@ impl Runtime {
                     .set("更新脚本已启动，程序即将退出…".to_string());
             }
         }
+        prompt
     }
 
     /// 把一次后台的 `temp/` 占用统计落到面板信号上。
@@ -301,6 +339,8 @@ impl Runtime {
                 log::info!("更新脚本已启动，本进程退出让位：{}", bat.display());
                 // 配置先落盘再走：更新脚本排除了 config.json，用户设置不会丢。
                 self.close_panel();
+                // `process::exit` 不跑 `Drop`，这里必须手动还系统指针。
+                crate::platform::hide_cursor::ensure_shown();
                 log::logger().flush();
                 std::process::exit(0);
             }

@@ -70,6 +70,24 @@ pub fn zoom_wheel_armed() -> bool {
     ZOOM_WHEEL_ARMED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 特效脚本是否需要滚轮事件（`on_wheel`）。
+///
+/// 与 `ZOOM_WHEEL_ARMED` 同构：只有在**当前运行的脚本真的声明了 `on_wheel`** 时
+/// 钩子才把普通滚轮镜像到 UI 线程——否则"每滚一格唤醒一帧"的开销白付。由
+/// `Runtime::sync_input_gate` 每帧同步（复合/拖尾脚本对账后）。
+static SCRIPT_WHEEL_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// UI 线程按「是否有脚本要滚轮」同步武装开关。
+pub fn set_script_wheel_armed(on: bool) {
+    SCRIPT_WHEEL_ARMED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 桥接线程 / 钩子读：脚本要滚轮时，普通滚轮事件也要过桥。
+pub fn script_wheel_armed() -> bool {
+    SCRIPT_WHEEL_ARMED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 上一次左键按下是否被虚拟键盘吃掉。
 ///
 /// 抬起要沿用**同一个**判断：按在键帽上、拖到键盘外再松开，那一下抬起同样不能漏给
@@ -246,9 +264,10 @@ pub unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPAR
                 }
                 return LRESULT(1);
             }
-            // 其余滚轮：回显武装时镜像一份给 UI 线程（击键回显显示「滚轮上/下」），
-            // 否则一律不转发 —— 不转发也省掉每滚一格就唤醒 UI 线程一帧的开销。
-            if mouse_echo_armed() {
+            // 其余滚轮：回显武装或脚本要滚轮时镜像一份给 UI 线程（击键回显显示
+            // 「滚轮上/下」/ Scroll 特效），否则一律不转发——不转发也省掉每滚一格
+            // 就唤醒 UI 线程一帧的开销。
+            if mouse_echo_armed() || script_wheel_armed() {
                 if let Some(tx) = HOOK_TX.get() {
                     let _ = tx.send(InputEvent::MouseWheel {
                         delta,
@@ -261,11 +280,11 @@ pub unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPAR
             }
         }
         WM_MOUSEHWHEEL => {
-            // 横向倾斜滚轮：只服务击键回显（「滚轮左/右」），不参与放大镜缩放；
+            // 横向倾斜滚轮：服务击键回显（「滚轮左/右」）与脚本；不参与放大镜缩放；
             // 不吞事件——倾斜滚动照常横移。
             let raw = ms.mouseData;
             let delta = ((raw >> 16) & 0xFFFF) as i16 as i32;
-            if mouse_echo_armed() {
+            if mouse_echo_armed() || script_wheel_armed() {
                 if let Some(tx) = HOOK_TX.get() {
                     let _ = tx.send(InputEvent::MouseWheel {
                         delta,
@@ -313,4 +332,16 @@ pub unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPAR
     }
 
     CallNextHookEx(None, code, wparam, lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 脚本滚轮武装开关的存取（钩子与桥接线程读同一个原子）。
+    #[test]
+    fn script_wheel_arm_round_trips() {
+        super::set_script_wheel_armed(true);
+        assert!(super::script_wheel_armed());
+        super::set_script_wheel_armed(false);
+        assert!(!super::script_wheel_armed());
+    }
 }

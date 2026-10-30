@@ -67,6 +67,24 @@ impl KeysoundCatalog {
         }
     }
 
+    /// 重扫 `assets/lua` 里 `role="keysound"` 的脚本，并把新名字推给信号。
+    pub fn refresh(&self) {
+        let mut reg =
+            crate::scripting::registry_ext::LuaExtRegistry::new(&crate::core::paths::lua_ext_dir());
+        reg.scan();
+        let mut ids = Vec::new();
+        let mut names = Vec::new();
+        let mut schemas = HashMap::new();
+        for s in reg.role_of("keysound") {
+            ids.push(s.id.clone());
+            names.push(s.name.clone());
+            schemas.insert(s.id.clone(), s.params.clone());
+        }
+        *self.ids.borrow_mut() = ids;
+        *self.schemas.borrow_mut() = schemas;
+        self.names.set(names);
+    }
+
     /// 显示名下标 → 配置 id。越界时回退到第一个（保证永远写得出合法 id）。
     pub fn id_at(&self, idx: usize) -> String {
         self.ids.borrow().get(idx).cloned().unwrap_or_default()
@@ -844,6 +862,8 @@ pub const RIPPLE_KEYS: [&str; 5] = BUTTON_KEYS;
 pub struct VkSchemeControls {
     /// 方案 id（= `vk_schemes[i].id`，也是配置里 `params` 的键）。
     pub scheme_id: String,
+    /// 它在 `vk_schemes` 里的下标（控件行的 `visible_when` 用它门控）。
+    pub index: usize,
     /// 该方案的控件行（顺序 = 面板上的顺序）。
     pub items: Vec<VkControlItem>,
 }
@@ -1153,6 +1173,33 @@ fn source_from_index(idx: usize, devices: &[String]) -> Option<&str> {
     }
 }
 
+/// 包卡里的一个可选子脚本。
+///
+/// 包卡（`scripts/<Pack>/`）把目录里的直接 `.lua` 聚合成一张卡；下拉项只带
+/// 展示/参数/宿主所需的最小信息，真正的脚本仍由 `CompanionHost` 按 `id` 加载。
+#[derive(Clone)]
+pub struct LuaPackEffect {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub params: Vec<crate::scripting::ParamDef>,
+}
+
+/// 包卡标题栏下拉的状态。
+///
+/// `current` 是**上一次已重建参数**的子脚本 id；`apply_to` 每帧对比 `selected`，
+/// 发现切换时重填 `card.params`。这样 UI 不必给下拉挂额外回调，沿用现有
+/// `host_signal` 的参数重建机制。
+#[derive(Clone)]
+pub struct LuaExtSelector {
+    pub names: Signal<Vec<String>>,
+    pub selected: Signal<usize>,
+    pub effects: Rc<RefCell<Vec<LuaPackEffect>>>,
+    pub current: Rc<RefCell<String>>,
+    /// 出厂默认子脚本 id；下拉停在它上面时 `pack_selected` 不落盘（保持零冗余）。
+    pub default_id: String,
+}
+
 /// 脚本页（原 Lua 页）一张脚本卡片：标题 = `name`，正文 = description + schema 参数，独立折叠态。
 ///
 /// 每脚本一张卡（不再有下拉/运行按钮）：`expanded` 持久化到 `config.ui.expanded["lua.<id>"]`，
@@ -1161,7 +1208,7 @@ fn source_from_index(idx: usize, devices: &[String]) -> Option<&str> {
 /// ★ 标题开关 2026-09-27 起**所有 role 都有**（用户口径：`scripts/` 下每个脚本都要能
 /// 开关）。语义随 role 走，但控件形状一致：
 /// - `composite`：开关 = **运行**（常驻实例，写 `composite_active`）；
-/// - `image`：开关 = **贴图右键「图片操作」里这一条是否出现**（写 `image_active`）。
+/// - `image`：开关 = **贴图右键「脚本」里这一条是否出现**（写 `image_active`）。
 ///
 /// 两种都是"勾了就有可见/可运行的效果"，不是装饰——这是 2026-09-26 那句"没有副作用
 /// 就不许画控件"的同一把尺子，只是结论翻了个面：给手动动作配一个只管入口的开关，
@@ -1175,11 +1222,15 @@ pub struct LuaExtCard {
     pub name: String,
     pub description: String,
     pub role: String,
+    /// 脚本页分组（`mouse`/`picture`/`text`/`ai`/…）；空 = 老脚本不分类。
+    pub category: String,
     pub expanded: Signal<bool>,
     /// 标题左侧的开关信号。初值 = [`crate::core::config::LuaExtSettings::role_is_active`]，
     /// 写回 `set_role_active`——**按 `role` 落到对应的列表**，调用方不必自己 match。
     pub toggle: Signal<bool>,
     pub params: Signal<Vec<EffectParamCell>>,
+    /// `Some` = 包卡（一张卡聚合 `scripts/<Pack>/` 下多个子脚本）；`None` = 普通单脚本卡。
+    pub selector: Option<LuaExtSelector>,
 }
 
 impl LuaExtCard {
@@ -1196,6 +1247,74 @@ impl LuaExtCard {
     /// 「脚本开关」段 **必须**走它——两处各自手写谓词就会慢慢走偏（一边收录一边漏）。
     pub fn is_script_card(&self) -> bool {
         self.id.starts_with("scripts/") && self.role.as_str() != "keysound"
+    }
+}
+
+/// `scripts/<Pack>/<effect>` → `Some("scripts/<Pack>")`；其余（顶层单脚本）→ `None`。
+///
+/// ★ 包内脚本按“前两段路径”聚合，不要求额外的 `pack.json`；目录本身就是卡。
+fn pack_id_of(id: &str) -> Option<String> {
+    let mut parts = id.split('/');
+    let root = parts.next()?;
+    let pack = parts.next()?;
+    if root != "scripts" || pack.is_empty() {
+        return None;
+    }
+    parts.next()?;
+    Some(format!("scripts/{pack}"))
+}
+
+/// 包下拉里的类别中文名（只给重名项做消歧后缀）。
+fn pack_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "cursor" => "光标",
+        "trail" => "拖尾",
+        "click" => "点击",
+        "hover" => "悬浮",
+        "scroll" => "滚轮",
+        "hold" => "长按",
+        _ => "其他",
+    }
+}
+
+/// 读包根的 `pack.json`（可选）。只做元数据/顺序/默认项，不参与权限或加载路径。
+fn read_pack_meta(dir: &std::path::Path, pack_id: &str) -> Option<serde_json::Value> {
+    let name = pack_id.strip_prefix("scripts/")?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let path = dir.join("scripts").join(name).join("pack.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// 普通单脚本卡（非包）。保持原有行为：一脚本一卡、无下拉。
+fn single_lua_card(
+    cfg: &crate::core::config::Config,
+    s: &crate::scripting::ExtSchema,
+) -> LuaExtCard {
+    let stored = cfg.lua_ext.params.get(&s.id).cloned().unwrap_or_default();
+    let cells = s
+        .params
+        .iter()
+        .map(|p| cell_from_param(p, &stored))
+        .collect();
+    let expanded = cfg
+        .ui
+        .expanded
+        .get(&format!("lua.{}", s.id))
+        .copied()
+        .unwrap_or(false);
+    LuaExtCard {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        description: s.description.clone(),
+        role: s.role.clone(),
+        category: s.category.clone(),
+        expanded: signal(expanded),
+        toggle: signal(cfg.lua_ext.role_is_active(&s.role, &s.id)),
+        params: signal(cells),
+        selector: None,
     }
 }
 
@@ -1249,17 +1368,17 @@ pub struct PanelModel {
     /// 每个效果就是一个 `.lua`，所以这就是"全部样式"（内置的四个也不例外）。
     pub clickfx_catalog: EffectCatalog,
     /// ★ 效果下拉的数据源：**首项「关闭」+** `clickfx_catalog.display_names()`。
-    /// 下标契约见 [`RippleKeySignals::combo`]（0=关闭）。波纹效果目录运行期不变
-    /// （面板打开时扫一次），静态 Vec 即可。
-    pub ripple_choices: Vec<String>,
+    /// 下标契约见 [`RippleKeySignals::combo`]（0=关闭）。用信号：`assets/` 变化时
+    /// 目录监听会重扫并换掉整张表，面板不重开也能选到新效果。
+    pub ripple_choices: Signal<Vec<String>>,
 
     // ── 鼠标特效 · 点击声音（单卡：总开关 + 共享音量 + 每键「关闭/文件」）──
     pub sound: Vec<SoundKeySignals>,
     /// 声音目录（`assets/Sounds`）扫描结果：下拉只从这里来，用户丢个 `.wav` 就能选。
     pub sound_catalog: SoundCatalog,
     /// ★ 声音下拉的数据源：**首项「关闭」+** 目录文件名（带扩展名显示）。下标契约
-    /// 同 [`SoundKeySignals::combo`]。
-    pub sound_choices: Vec<String>,
+    /// 同 [`SoundKeySignals::combo`]。同样是信号：`assets/Sounds` 变了就换表。
+    pub sound_choices: Signal<Vec<String>>,
     /// ★ 五键**共享音量**（0..=100，滑条装比例、配置装真实量纲）。
     ///
     /// 2026-09-25 单卡化：每键音量是过度细分（1.0 本就是全局音量），收成一行；
@@ -1274,7 +1393,10 @@ pub struct PanelModel {
 
     // ── Lua 扩展页签 ──
     /// Lua 每脚本一张卡（`assets/lua` 全部脚本，递归扫），顺序 = 注册表字典序。
-    pub lua_ext_cards: Vec<LuaExtCard>,
+    /// 脚本页的卡片表（单脚本卡 + 包卡）。**信号**而不是普通字段（m33）：脚本页的
+    /// 「刷新」按钮要在面板不重建的前提下换掉整张表，`Element::host_signal` 订阅的就是它。
+    /// 其它读者（`apply_to` 的参数 diff、设置页的镜像）一律 `.get()` 拿当前值。
+    pub lua_ext_cards: Signal<Vec<LuaExtCard>>,
 
     // ── 面板卡片展开态（纯界面状态，但同样落盘）──
     /// 键 = [`crate::core::config::CARD_IDS`]，值 = 该卡的展开信号。
@@ -1440,9 +1562,12 @@ pub struct PanelModel {
     pub vk_enabled: Signal<bool>,
     /// 当前可用方案快照（`assets/VirtualKeyboards/` 的扫描结果 + 出厂内嵌兜底）。
     ///
-    /// 面板构建时取一次：方案目录的内容只需要在**打开面板**这一刻一致；用户中途丢进
-    /// 新方案，重开面板即可见（见 `vk_config::scheme_list`）。
+    /// `assets/` 目录监听重扫时整表换掉（见 [`PanelModel::reload_asset_lists`]），
+    /// 下拉选项走 [`PanelModel::vk_scheme_names`] 信号、控件行走 `vk_controls` 信号。
     pub vk_schemes: Vec<SchemeEntry>,
+    /// 方案下拉的显示名（与 [`PanelModel::vk_schemes`] 同序）。信号驱动：
+    /// 往 `assets/VirtualKeyboards/` 丢一个新方案，面板不重开也能在表里看到。
+    pub vk_scheme_names: Signal<Vec<String>>,
     /// 方案下标（指向 [`PanelModel::vk_schemes`]）。
     pub vk_layout: Signal<usize>,
     pub vk_placement: Signal<usize>,
@@ -1456,10 +1581,12 @@ pub struct PanelModel {
     /// [`PanelModel::vk_schemes`] 同序。
     ///
     /// 控件是方案 JSON 声明的（没声明就由 `vk_config::controls_of` 补齐一套预设），
-    /// 所以只能在**打开面板**这一刻按方案逐个建出来 —— 切方案时页面按 `vk_layout`
-    /// 的下标切到对应那一组（见 `ui::pages::key_display`），不等重开面板。
+    /// 按方案逐个建；切方案时页面按 `vk_layout` 的下标切到对应那一组
+    /// （见 `ui::pages::key_display`）。目录监听重扫出新方案时整表换掉，页面经
+    /// `host_signal` 重建控件行，不等重开面板。
     /// 位置与四向偏移不在这里：它们是全局配置，方案不能干预。
-    pub vk_controls: Vec<VkSchemeControls>,
+    /// 用信号：目录监听重扫出新方案后整批换掉，页面经 `host_signal` 重建控件行。
+    pub vk_controls: Signal<Vec<VkSchemeControls>>,
     /// 鼠标穿透（勾选 = 纯展示；不勾 = 可点击，命中键帽即注入按键）。
     pub vk_click_through: Signal<bool>,
     /// 总在最上（全局 `Config::overlay`，对所有功能生效）。
@@ -1620,7 +1747,345 @@ fn ks_sound_choices() -> Vec<(String, String)> {
         .collect()
 }
 
+/// 扫 `assets/lua` 构建脚本页的全部卡片（单脚本卡 + 包卡），按 id 排序。
+///
+/// ★ 从 [`PanelModel::from_config`] 里抽出来（m33）：**面板打开时**调一次，脚本页的
+///   「刷新」按钮再调一次（见 [`PanelModel::reload_lua_cards`]）——两处必须是同一份构建，
+///   否则"刷新出来的东西"和"重启后看到的"会悄悄不一样。
+pub(crate) fn build_lua_cards(cfg: &Config, dir: &std::path::Path) -> Vec<LuaExtCard> {
+    // ── Lua 扩展页签：扫描 `assets/lua`。
+    //   `scripts/<Pack>/` 下的直接 `.lua` 聚合成**一张包卡**；其余脚本仍一脚本一卡。
+    let mut lua_ext_catalog = crate::scripting::registry_ext::LuaExtRegistry::new(dir);
+    lua_ext_catalog.scan();
+    let mut lua_cards: Vec<LuaExtCard> = Vec::new();
+    let mut packs: std::collections::BTreeMap<String, Vec<crate::scripting::ExtSchema>> =
+        std::collections::BTreeMap::new();
+    for s in lua_ext_catalog.list() {
+        match pack_id_of(&s.id) {
+            Some(pack_id) => packs.entry(pack_id).or_default().push(s.clone()),
+            None => lua_cards.push(single_lua_card(cfg, s)),
+        }
+    }
+    for (pack_id, mut effects) in packs {
+        effects.sort_by(|a, b| a.id.cmp(&b.id));
+        let meta = read_pack_meta(dir, &pack_id);
+        // `single: true` 的官方工具包（OCR/条码/图片体检）只有一个脚本：
+        // 不摆成"一项的下拉"，直接出普通脚本卡。
+        if meta
+            .as_ref()
+            .and_then(|m| m.get("single"))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            for s in effects {
+                lua_cards.push(single_lua_card(cfg, &s));
+            }
+            continue;
+        }
+        // `pack.json.effects` 的顺序/白名单优先；缺清单时按 id 排序。
+        if let Some(list) = meta
+            .as_ref()
+            .and_then(|m| m.get("effects"))
+            .and_then(|v| v.as_array())
+        {
+            let mut ordered = Vec::new();
+            for item in list {
+                let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if let Some(pos) = effects
+                    .iter()
+                    .position(|e| e.id.rsplit('/').next() == Some(id))
+                {
+                    ordered.push(effects.remove(pos));
+                }
+            }
+            ordered.extend(effects);
+            effects = ordered;
+        }
+        let Some(first) = effects.first() else {
+            continue;
+        };
+        let default_id = meta
+            .as_ref()
+            .and_then(|m| m.get("default"))
+            .and_then(|v| v.as_str())
+            .and_then(|id| {
+                effects
+                    .iter()
+                    .find(|e| e.id.rsplit('/').next() == Some(id))
+                    .map(|e| e.id.clone())
+            })
+            .unwrap_or_else(|| first.id.clone());
+        let selected_id = cfg
+            .lua_ext
+            .pack_selected
+            .get(&pack_id)
+            .cloned()
+            .unwrap_or_else(|| default_id.clone());
+        let selected_idx = effects
+            .iter()
+            .position(|e| e.id == selected_id)
+            .unwrap_or(0);
+        let current_id = effects
+            .get(selected_idx)
+            .map(|e| e.id.clone())
+            .unwrap_or_default();
+        let stored = cfg
+            .lua_ext
+            .params
+            .get(&current_id)
+            .cloned()
+            .unwrap_or_default();
+        let cells = effects
+            .get(selected_idx)
+            .map(|e| {
+                e.params
+                    .iter()
+                    .map(|p| cell_from_param(p, &stored))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // 同一包里的 `bubbles` / `stars` 原始名确实重复（拖尾 + 点击各一份）。
+        // 只对**重名项**追加类别后缀，唯一名保持原样——标题仍是原名。
+        let names = effects
+            .iter()
+            .map(|e| {
+                let dup = effects.iter().filter(|o| o.name == e.name).count() > 1;
+                if dup {
+                    format!("{} ({})", e.name, pack_kind_label(&e.kind))
+                } else {
+                    e.name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let metas = effects
+            .iter()
+            .map(|e| LuaPackEffect {
+                id: e.id.clone(),
+                name: e.name.clone(),
+                kind: e.kind.clone(),
+                params: e.params.clone(),
+            })
+            .collect::<Vec<_>>();
+        let active = effects
+            .iter()
+            .any(|e| cfg.lua_ext.composite_active.iter().any(|x| x == &e.id));
+        let expanded = cfg
+            .ui
+            .expanded
+            .get(&format!("lua.{pack_id}"))
+            .copied()
+            .unwrap_or(false);
+        let pack_name = meta
+            .as_ref()
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| pack_id.rsplit('/').next().unwrap_or(&pack_id).to_string());
+        let description = meta
+            .as_ref()
+            .and_then(|m| m.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let category = meta
+            .as_ref()
+            .and_then(|m| m.get("category"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        lua_cards.push(LuaExtCard {
+            id: pack_id.clone(),
+            name: pack_name,
+            description,
+            role: "pack".to_string(),
+            category,
+            expanded: signal(expanded),
+            toggle: signal(active),
+            params: signal(cells),
+            selector: Some(LuaExtSelector {
+                names: signal(names),
+                selected: signal(selected_idx),
+                effects: Rc::new(RefCell::new(metas)),
+                current: Rc::new(RefCell::new(current_id)),
+                default_id,
+            }),
+        });
+    }
+    // 分类卡片先排（mouse → picture → text → ai），未知分类按分类名排，
+    // **没有 category 的老脚本最后**、组内仍按原来的 id 顺序。
+    fn rank(category: &str) -> u8 {
+        match category {
+            "mouse" => 0,
+            "picture" => 1,
+            "text" => 2,
+            "ai" => 3,
+            "" => 5,
+            _ => 4,
+        }
+    }
+    fn card_key(c: &LuaExtCard) -> (u8, &str, &str) {
+        let r = rank(&c.category);
+        (
+            r,
+            if r == 4 { c.category.as_str() } else { "" },
+            c.id.as_str(),
+        )
+    }
+    lua_cards.sort_by(|a, b| card_key(a).cmp(&card_key(b)));
+
+    lua_cards
+}
+
+/// 两张卡能不能"沿用旧实例"（见 [`PanelModel::reload_lua_cards`]）：id 相同、且**外形**
+/// 一致——名字/角色/说明、参数格的 key 序列、包卡的下拉候选。外形变了就得重建。
+fn same_card_shape(old: &LuaExtCard, new: &LuaExtCard) -> bool {
+    if old.id != new.id
+        || old.name != new.name
+        || old.role != new.role
+        || old.description != new.description
+        || old.category != new.category
+    {
+        return false;
+    }
+    let (old_cells, new_cells) = (old.params.get(), new.params.get());
+    let old_keys: Vec<&str> = old_cells.iter().map(|c| c.key()).collect();
+    let new_keys: Vec<&str> = new_cells.iter().map(|c| c.key()).collect();
+    if old_keys != new_keys {
+        return false;
+    }
+    match (&old.selector, &new.selector) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.names.get() == b.names.get(),
+        _ => false,
+    }
+}
+
 impl PanelModel {
+    /// 重扫脚本目录并把卡片表换掉（m33：脚本页「刷新」按钮的后半段）。
+    ///
+    /// 与 [`build_lua_cards`] 是同一份构建 ⇒ "刷新出来的"与"重开面板看到的"必然一致。
+    /// **只换列表**：配置与正在运行的实例一个都不碰；新脚本按 `cfg` 现值初始化卡片。
+    /// 返回条目数（包卡也算）。
+    pub fn reload_lua_cards(&self, cfg: &Config, dir: &std::path::Path) -> usize {
+        let fresh = build_lua_cards(cfg, dir);
+        let n = fresh.len();
+        // ★ 同 id 且"形状没变"的卡片**复用旧实例**（m33 审查修）：设置页那列脚本开关
+        //   镜像行是**面板打开时**绑的旧卡片 `toggle` 信号。整表替换会让那些行绑在
+        //   **孤儿信号**上——拨了开关看着有反应，`apply_to` 却读不到它，配置没人写。
+        //   复用之后旧句柄仍指向当前卡片，镜像行照常生效。
+        //   形状变了（schema 加参数 / 改名 / 换角色 / 包的子项变了）就不复用：那类改动
+        //   本来就要重建参数格，宁可视作"这张卡需要重开面板"。
+        let old = self.lua_ext_cards.get();
+        let merged: Vec<LuaExtCard> = fresh
+            .into_iter()
+            .map(|new| match old.iter().find(|o| same_card_shape(o, &new)) {
+                Some(o) => o.clone(),
+                None => new,
+            })
+            .collect();
+        self.lua_ext_cards.set(merged);
+        n
+    }
+
+    /// 目录监听用：重扫所有**从 `assets/` 扫出来**的列表，并尽量保住当前选中项。
+    ///
+    /// 覆盖：拖尾 / 悬浮标 / 点击效果 / 点击声音 / 键音脚本 / 虚拟键盘方案。
+    /// 脚本卡由 [`Self::reload_lua_cards`] 单独换（它有自己的"形状没变就复用"规则）。
+    ///
+    /// ★ 选中项按 **id** 重新定位，不按下标：新增文件可能插到旧项前面，按下标会
+    ///   悄悄把用户选中的效果换掉。被删掉的项：拖尾/悬浮标沿用 `index_of_or_keep`
+    ///   （下拉里标「脚本缺失」），点击效果/声音回「关闭」，键音回第一项。
+    pub fn reload_asset_lists(&mut self, cfg: &Config) {
+        let trail_id = self.catalog.id_at(self.trail_effect.get());
+        self.catalog.refresh();
+        self.trail_effect
+            .set(self.catalog.index_of_or_keep(&trail_id));
+
+        let hover_id = self.hover_catalog.id_at(self.hover_type.get());
+        self.hover_catalog.refresh();
+        self.hover_type
+            .set(self.hover_catalog.index_of_or_keep(&hover_id));
+
+        let ripple_ids: Vec<String> = self
+            .ripple
+            .iter()
+            .map(|k| {
+                let combo = k.combo.get();
+                if combo == 0 {
+                    String::new()
+                } else {
+                    self.clickfx_catalog.id_at(combo - 1)
+                }
+            })
+            .collect();
+        self.clickfx_catalog.refresh();
+        let mut ripple_choices = vec!["关闭".to_string()];
+        ripple_choices.extend(self.clickfx_catalog.display_names());
+        self.ripple_choices.set(ripple_choices);
+        for (k, id) in self.ripple.iter().zip(ripple_ids) {
+            if id.is_empty() {
+                k.combo.set(0);
+                continue;
+            }
+            let idx = self.clickfx_catalog.index_of(&id);
+            let kept = self.clickfx_catalog.id_at(idx) == id;
+            k.combo.set(if kept { idx + 1 } else { 0 });
+        }
+
+        let sound_ids: Vec<String> = self
+            .sound
+            .iter()
+            .map(|k| {
+                let combo = k.combo.get();
+                if combo == 0 {
+                    String::new()
+                } else {
+                    self.sound_catalog.id_at(combo - 1)
+                }
+            })
+            .collect();
+        self.sound_catalog.refresh();
+        let mut sound_choices = vec!["关闭".to_string()];
+        sound_choices.extend(self.sound_catalog.display_names());
+        self.sound_choices.set(sound_choices);
+        for (k, id) in self.sound.iter().zip(sound_ids) {
+            if id.is_empty() {
+                k.combo.set(0);
+                continue;
+            }
+            let idx = self.sound_catalog.index_of(&id);
+            let kept = self.sound_catalog.id_at(idx) == id;
+            k.combo.set(if kept { idx + 1 } else { 0 });
+        }
+
+        let ks_id = self.ksound_catalog.id_at(self.ksound_script.get());
+        self.ksound_catalog.refresh();
+        let ks_idx = self.ksound_catalog.index_of(&ks_id);
+        self.ksound_script
+            .set(if self.ksound_catalog.id_at(ks_idx) == ks_id {
+                ks_idx
+            } else {
+                0
+            });
+
+        let old_vk = self
+            .vk_schemes
+            .get(self.vk_layout.get())
+            .map(|e| e.id.clone());
+        let schemes = crate::modules::virtual_keyboard::vk_config::scheme_list();
+        let vk_idx = old_vk
+            .and_then(|id| schemes.iter().position(|e| e.id == id))
+            .unwrap_or(0);
+        self.vk_schemes = schemes;
+        self.vk_scheme_names
+            .set(self.vk_schemes.iter().map(|e| e.label.clone()).collect());
+        self.vk_layout.set(vk_idx);
+        self.vk_controls
+            .set(Self::vk_controls_for(&self.vk_schemes, cfg));
+    }
+
     /// 用当前配置初始化全部信号。
     pub fn from_config(cfg: &Config) -> Self {
         let t = &cfg.trail;
@@ -1665,7 +2130,7 @@ impl PanelModel {
                 (*id, signal(v))
             })
             .collect();
-        let hover_type_idx = hover_catalog.index_of(&t.hover_type);
+        let hover_type_idx = hover_catalog.index_of_or_keep(&t.hover_type);
         let hover_type_id = hover_catalog.id_at(hover_type_idx);
         let hover_stored = t
             .hover_params
@@ -1680,7 +2145,7 @@ impl PanelModel {
         let pens = &d.pens;
 
         // 选中特效的 id 与参数初始化：从目录 schema + 当前配置取值构造动态 UI 单元。
-        let effect_idx = catalog.index_of(&t.trail_effect);
+        let effect_idx = catalog.index_of_or_keep(&t.trail_effect);
         let effect_id = catalog.id_at(effect_idx);
         let module_ts = crate::modules::trail::settings::from_config(&cfg.trail);
         let pm = module_ts.effect_param_map(&effect_id);
@@ -1712,6 +2177,7 @@ impl PanelModel {
         // ★ 顺手把每个方案的控件组也建出来（外观 / 配色两卡的内容）：控件是方案声明的，
         //   只能在"知道有哪些方案"之后按方案逐个建。
         let vk_schemes = crate::modules::virtual_keyboard::vk_config::scheme_list();
+        let vk_scheme_names = vk_schemes.iter().map(|e| e.label.clone()).collect();
         let vk_layout_idx = idx_of_schemes(&vk_schemes, &cfg.virtual_keyboard.layout);
         let vk_controls = Self::vk_controls_for(&vk_schemes, cfg);
         // 降噪单一下拉（`off`/`weak`/`medium`/`strong`）。`Config::load()` 里的
@@ -1720,41 +2186,8 @@ impl PanelModel {
         // 神经网络降噪，当时只是预留名称），这里直接用迁移后的取值即可。
         let denoise_init = cfg.record.mic_denoise.as_str();
 
-        // ── Lua 扩展页签：扫描 `assets/lua`，每脚本建一张卡（标题 + 说明 + schema 参数）──
-        let mut lua_ext_catalog =
-            crate::scripting::registry_ext::LuaExtRegistry::new(&crate::core::paths::lua_ext_dir());
-        lua_ext_catalog.scan();
-        let mut lua_ext_cards: Vec<LuaExtCard> = lua_ext_catalog
-            .list()
-            .iter()
-            .map(|s| {
-                let stored = cfg.lua_ext.params.get(&s.id).cloned().unwrap_or_default();
-                let cells: Vec<EffectParamCell> = s
-                    .params
-                    .iter()
-                    .map(|p| cell_from_param(p, &stored))
-                    .collect();
-                // 折叠态：`config.ui.expanded["lua.<id>"]`，无则**折叠**（2026-09-26 晚用户
-                // 口径：面板初始所有卡片都折叠，脚本卡不再特殊）。
-                let expanded = cfg
-                    .ui
-                    .expanded
-                    .get(&format!("lua.{}", s.id))
-                    .copied()
-                    .unwrap_or(false);
-                // 标题开关初值：**每个 role 都有**，判定只有 `role_is_active` 一个入口。
-                LuaExtCard {
-                    id: s.id.clone(),
-                    name: s.name.clone(),
-                    description: s.description.clone(),
-                    role: s.role.clone(),
-                    expanded: signal(expanded),
-                    toggle: signal(cfg.lua_ext.role_is_active(&s.role, &s.id)),
-                    params: signal(cells),
-                }
-            })
-            .collect();
-        lua_ext_cards.sort_by(|a, b| a.id.cmp(&b.id));
+        // ── Lua 扩展页签：扫描 `assets/lua`（构建逻辑在 `build_lua_cards`，刷新时复用同一份）。
+        let lua_ext_cards = build_lua_cards(cfg, &crate::core::paths::lua_ext_dir());
 
         let m = Self {
             trail_enabled: signal(t.trail_enabled),
@@ -1773,9 +2206,11 @@ impl PanelModel {
             hover_catalog,
             clickfx_catalog: clickfx_catalog.clone(),
             // 下拉首项「关闭」+ 目录效果名（下标契约：combo 0=关闭，1..=choices[i-1]）。
-            ripple_choices: std::iter::once("关闭".to_string())
-                .chain(clickfx_catalog.display_names())
-                .collect(),
+            ripple_choices: signal(
+                std::iter::once("关闭".to_string())
+                    .chain(clickfx_catalog.display_names())
+                    .collect(),
+            ),
 
             ripple: RIPPLE_KEYS
                 .iter()
@@ -1842,13 +2277,15 @@ impl PanelModel {
             )),
             sound_master: signal(t.sound_enabled),
             // 下拉首项「关闭」+ 目录文件名（带扩展名显示）。
-            sound_choices: std::iter::once("关闭".to_string())
-                .chain(sound_catalog.display_names())
-                .collect(),
+            sound_choices: signal(
+                std::iter::once("关闭".to_string())
+                    .chain(sound_catalog.display_names())
+                    .collect(),
+            ),
             sound_catalog,
 
             // ── Lua 扩展页签 ──
-            lua_ext_cards,
+            lua_ext_cards: signal(lua_ext_cards),
             card_expanded,
             no_expand: signal(false),
 
@@ -2009,6 +2446,7 @@ impl PanelModel {
             vk_enabled: signal(cfg.virtual_keyboard.enabled),
             // 方案目录扫描（目录即来源）：下拉里就是这里扫到的东西。
             vk_schemes,
+            vk_scheme_names: signal(vk_scheme_names),
             vk_layout: signal(vk_layout_idx),
             vk_placement: signal(idx_of(PLACEMENTS, &cfg.virtual_keyboard.placement)),
             // ☆ 收敛读端（与击键回显同款）：取方位对应侧。
@@ -2050,7 +2488,7 @@ impl PanelModel {
                     cfg.virtual_keyboard.bottom_offset
                 }
             )),
-            vk_controls,
+            vk_controls: signal(vk_controls),
             vk_click_through: signal(cfg.virtual_keyboard.click_through),
             vk_always_on_top: signal(cfg.overlay.always_on_top),
             vk_fullscreen_avoid: signal(cfg.overlay.avoid_fullscreen),
@@ -2180,7 +2618,8 @@ impl PanelModel {
     fn vk_controls_for(schemes: &[SchemeEntry], cfg: &Config) -> Vec<VkSchemeControls> {
         schemes
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(index, e)| {
                 let mut s = cfg.virtual_keyboard.clone();
                 s.layout = e.id.clone();
                 let vc = crate::modules::virtual_keyboard::vk_config::VkConfig::load(&s);
@@ -2194,6 +2633,7 @@ impl PanelModel {
                     .collect();
                 VkSchemeControls {
                     scheme_id: e.id.clone(),
+                    index,
                     items,
                 }
             })
@@ -2326,7 +2766,7 @@ impl PanelModel {
     /// `keep = Some(&目标sig)` 时跳过该信号（正在给它写新值的场景）；
     /// `keep = None` 时全清（固定字段捕获的场景）。
     fn clear_conflicting_script_hotkeys(&self, norm: &str, keep: Option<&Signal<String>>) {
-        for card in &self.lua_ext_cards {
+        for card in self.lua_ext_cards.get() {
             for cell in card.params.get() {
                 if let EffectParamCell::Hotkey { sig, .. } = &cell {
                     if keep.is_some_and(|k| *k == *sig) {
@@ -2458,15 +2898,81 @@ impl PanelModel {
         }
 
         // ── Lua 扩展脚本卡片：每帧 diff 每张卡的参数写回 `config.lua_ext.params[id]`，
-        //   折叠态写回 `config.ui.expanded["lua.<id>"]`。不再有"选中脚本 + 运行按钮"。
-        for card in &self.lua_ext_cards {
+        //   折叠态写回 `config.ui.expanded["lua.<id>"]`。包卡额外处理下拉选择与
+        //   `composite_active`：实际运行的是“当前子脚本 id”，不是包 id。
+        for card in self.lua_ext_cards.get() {
             if card.id.is_empty() {
                 continue;
             }
+            let (param_id, on) = if let Some(sel) = &card.selector {
+                let effect = {
+                    let effects = sel.effects.borrow();
+                    let idx = sel.selected.get().min(effects.len().saturating_sub(1));
+                    let Some(effect) = effects.get(idx).cloned() else {
+                        continue;
+                    };
+                    effect
+                };
+                let child_id = effect.id.clone();
+                if *sel.current.borrow() != child_id {
+                    *sel.current.borrow_mut() = child_id.clone();
+                    // ★ 2026-10-26 用户口径：包卡换子脚本 = 恢复该脚本的**出厂默认**，
+                    //   只保留“当前脚本”的设定。与内置鼠标特效卡片「切换即刷新」一致：
+                    //   先清掉本包所有子脚本的参数，再用空表重建 schema 默认。
+                    let prefix = format!("{}/", card.id);
+                    cfg.lua_ext.params.retain(|id, _| !id.starts_with(&prefix));
+                    let cells = effect
+                        .params
+                        .iter()
+                        .map(|p| cell_from_param(p, &HashMap::new()))
+                        .collect::<Vec<_>>();
+                    card.params.set(cells);
+                    changed = true;
+                }
+                // ★ 出厂固定点：下拉停在第一项时**不落盘**（缺键 = 默认第一项）。
+                //   否则任何 `Config::default()` 的 `from_config → apply_to` 都会因
+                //   包卡首次出现而写出一条 `pack_selected`，把"没动过"判成改动。
+                let stored_sel = cfg.lua_ext.pack_selected.get(&card.id).cloned();
+                let is_default = child_id == sel.default_id;
+                if stored_sel.as_deref() != Some(child_id.as_str()) {
+                    if is_default && stored_sel.is_none() {
+                        // 缺键就是出厂默认项，保持零冗余。
+                    } else if is_default {
+                        cfg.lua_ext.pack_selected.remove(&card.id);
+                        changed = true;
+                    } else {
+                        cfg.lua_ext
+                            .pack_selected
+                            .insert(card.id.clone(), child_id.clone());
+                        changed = true;
+                    }
+                }
+                let on = card.toggle.get();
+                let before = cfg.lua_ext.composite_active.clone();
+                let effect_ids = sel
+                    .effects
+                    .borrow()
+                    .iter()
+                    .map(|e| e.id.clone())
+                    .collect::<Vec<_>>();
+                cfg.lua_ext
+                    .composite_active
+                    .retain(|x| !effect_ids.iter().any(|id| id == x));
+                if on && !cfg.lua_ext.composite_active.iter().any(|x| x == &child_id) {
+                    cfg.lua_ext.composite_active.push(child_id.clone());
+                }
+                if cfg.lua_ext.composite_active != before {
+                    changed = true;
+                }
+                (child_id, on)
+            } else {
+                (card.id.clone(), card.toggle.get())
+            };
+
             let mut stored = cfg
                 .lua_ext
                 .params
-                .get(&card.id)
+                .get(&param_id)
                 .cloned()
                 .unwrap_or_default();
             let mut card_changed = false;
@@ -2519,7 +3025,7 @@ impl PanelModel {
                 }
             }
             if card_changed {
-                cfg.lua_ext.params.insert(card.id.clone(), stored);
+                cfg.lua_ext.params.insert(param_id.clone(), stored);
                 changed = true;
             }
             // 折叠态：与出厂默认（折叠）不同才落盘；回到默认则移除键。
@@ -2534,11 +3040,9 @@ impl PanelModel {
                 }
                 changed = true;
             }
-            // 标题开关（2026-09-27 起所有 role 都有）：写回按 role 落到各自的列表
-            // （composite → 运行列表，image → 菜单可见性）。空列表不落盘由字段级
-            // skip_serializing_if 保证。
-            let on = card.toggle.get();
-            if cfg.lua_ext.role_is_active(&card.role, &card.id) != on {
+            // 普通脚本：标题开关按 role 落到各自列表。包卡在上面的分支里已经
+            // 按“当前子脚本 id”维护 `composite_active`，这里不能再按包 id 写一次。
+            if card.selector.is_none() && cfg.lua_ext.role_is_active(&card.role, &card.id) != on {
                 cfg.lua_ext.set_role_active(&card.role, &card.id, on);
                 changed = true;
             }
@@ -3320,7 +3824,7 @@ impl PanelModel {
         // 其余方案的历史取值一概不写（读盘时 `Config::migrate_vk_layout` 也会把残留的
         // 非当前键清掉）。写全量会把"当时的默认值"钉死在配置里，也不符合"只记一套"。
         let mut params: BTreeMap<String, BTreeMap<String, ParamValue>> = BTreeMap::new();
-        if let Some(sc) = self.vk_controls.iter().find(|sc| sc.scheme_id == vkl) {
+        if let Some(sc) = self.vk_controls.get().iter().find(|sc| sc.scheme_id == vkl) {
             let mut m: BTreeMap<String, ParamValue> = BTreeMap::new();
             for it in &sc.items {
                 let cur = match it.sig {
@@ -3788,6 +4292,120 @@ impl PanelModel {
 mod tests {
 
     use super::*;
+
+    /// ★ m33：刷新 = **重扫目录 + 换掉卡片表**，而且
+    ///   ① 刚放进目录的脚本能出现（这是按钮存在的理由）；
+    ///   ② 配置一字不动（"正在跑"的实例表还在）；
+    ///   ③ 新卡片按配置现值初始化（已经打开的开关刷新后仍然是开的）。
+    ///
+    /// 用临时目录而不是 `assets/lua`：判据要能证明"扫描的是**传进来那个目录**"——
+    /// 拿真资产测的话，即使实现忽略参数、只会扫出厂目录，这一格也会绿。
+    #[test]
+    fn reload_lua_cards_picks_up_new_scripts_without_touching_config() {
+        let root = std::env::temp_dir().join(format!("curseen_refresh_{}", std::process::id()));
+        let scripts = root.join("scripts");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("demo.lua"),
+            "name = \"演示\"
+role = \"image\"
+menu = \"演示\"
+function run(ctx) return \"ok\" end
+",
+        )
+        .unwrap();
+
+        let mut cfg = crate::core::config::Config::default();
+        // 一个"正在跑"的复合实例：刷新不许把它从配置里抹掉。
+        cfg.lua_ext.composite_active = vec!["scripts/running_now".to_string()];
+        // 已经勾开的 image 脚本：刷新后新卡片的开关必须还是开的（按现值初始化）。
+        cfg.lua_ext.image_active = vec!["scripts/demo".to_string()];
+
+        let m = PanelModel::from_config(&cfg);
+        let before_running = cfg.lua_ext.composite_active.clone();
+
+        let n = m.reload_lua_cards(&cfg, &root);
+        assert_eq!(n, 1, "临时目录里只有一个脚本");
+        let cards = m.lua_ext_cards.get();
+        let demo = cards
+            .iter()
+            .find(|c| c.id == "scripts/demo")
+            .expect("刷新后应出现刚放进目录的脚本");
+        assert!(demo.is_script_card(), "scripts/ 下的脚本应出卡");
+        assert!(demo.toggle.get(), "开关初值必须按配置现值来（不是恒关）");
+
+        std::fs::write(
+            scripts.join("second.lua"),
+            "name = \"第二个\"
+function run(ctx) return \"ok\" end
+",
+        )
+        .unwrap();
+        assert_eq!(m.reload_lua_cards(&cfg, &root), 2);
+
+        assert_eq!(
+            cfg.lua_ext.composite_active, before_running,
+            "刷新不许改运行列表"
+        );
+        assert_eq!(cfg.lua_ext.image_active, vec!["scripts/demo".to_string()]);
+
+        // ★★ 审查修（m33）：设置页那列镜像行绑的是**面板打开时**的旧卡片信号。
+        //   刷新必须**沿用旧实例**（外形没变时），否则那些行绑到孤儿信号上——
+        //   拨开关看着有反应、`apply_to` 却读不到。
+        let demo_old = m
+            .lua_ext_cards
+            .get()
+            .iter()
+            .find(|c| c.id == "scripts/demo")
+            .cloned()
+            .expect("刷新后应有 demo 卡");
+        m.reload_lua_cards(&cfg, &root);
+        demo_old.toggle.set(false); // 模拟"另一页的镜像行拨了一下"
+        let demo_now = m
+            .lua_ext_cards
+            .get()
+            .into_iter()
+            .find(|c| c.id == "scripts/demo")
+            .expect("demo 卡还在");
+        assert!(
+            !demo_now.toggle.get(),
+            "外形没变时必须复用旧卡片实例，否则旧句柄（镜像行）写不进当前卡片"
+        );
+
+        // 形状变了（schema 多一格）⇒ 不复用：卡片要重建，新参数才出得来。
+        std::fs::write(
+            scripts.join("demo.lua"),
+            "name = \"演示\"
+role = \"image\"
+menu = \"演示\"
+             function schema() return { { key = \"extra\", label = \"多一格\", type = \"bool\", default = true } } end
+             function run(ctx) return \"ok\" end
+",
+        )
+        .unwrap();
+        m.reload_lua_cards(&cfg, &root);
+        let demo_new = m
+            .lua_ext_cards
+            .get()
+            .into_iter()
+            .find(|c| c.id == "scripts/demo")
+            .expect("demo 卡还在");
+        assert_eq!(
+            demo_new.params.get().len(),
+            1,
+            "schema 变了必须重建卡片（新参数要出现）"
+        );
+        let before = demo_new.toggle.get();
+        demo_old.toggle.set(!before); // 旧句柄拨到反相
+        assert_eq!(
+            demo_new.toggle.get(),
+            before,
+            "形状变过之后旧句柄就该失效（这是刻意接受的代价：镜像行要重开面板才恢复）"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// ★ 快捷键**互斥**（2026-09-28 用户口径）：一把键只能挂一个功能，后配的赢。
     ///
@@ -4393,14 +5011,17 @@ mod tests {
         //   （扫不到脚本 = 环境不对，`assets/lua` 没解析到——这时直接红，
         //   而不是悄悄退化成"零张卡、全通过"的假绿。）
         assert!(
-            !m.lua_ext_cards.is_empty(),
+            !m.lua_ext_cards.get().is_empty(),
             "脚本卡列表空了——`assets/lua` 没扫到，这条用例会退化成假绿"
         );
         assert!(
-            m.lua_ext_cards.iter().any(|c| c.role == "image"),
-            "内置 image 脚本（`图片信息 / 平均颜色`）没扫到，这条用例遍历范围不对"
+            m.lua_ext_cards
+                .get()
+                .iter()
+                .any(|c| c.id == "KeySound/class_sound"),
+            "内置音效脚本没扫到，这条用例遍历范围不对"
         );
-        for card in &m.lua_ext_cards {
+        for card in m.lua_ext_cards.get() {
             assert!(
                 !card.toggle.get(),
                 "脚本「{}」（role={}）出厂不应是开着",
@@ -4414,18 +5035,33 @@ mod tests {
     /// composite → `composite_active`，互不得串（串了就变成"勾了没反应"或"关了还在跑"）。
     #[test]
     fn script_card_toggles_write_to_the_list_of_their_own_role() {
+        // 图片体检 / OCR 迁到 CurSeen-Scripts 后，内置已经没有 image 脚本；这条判据
+        // 只关心"开关按 role 落到各自的表"，所以用两枚临时脚本造出 image + composite。
+        let dir = std::env::temp_dir().join(format!("curseen_cards_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/demo_image.lua"),
+            "role = \"image\"\nname = \"图片演示\"\nmenu = \"图片演示\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scripts/demo_composite.lua"),
+            "role = \"composite\"\nname = \"复合演示\"\n",
+        )
+        .unwrap();
         let cfg = Config::default();
         let m = PanelModel::from_config(&cfg);
-        let image_card = m
-            .lua_ext_cards
+        m.lua_ext_cards.set(build_lua_cards(&cfg, &dir));
+        let cards = m.lua_ext_cards.get();
+        let image_card = cards
             .iter()
             .find(|c| c.role == "image")
-            .expect("内置 image 脚本没扫到，这条用例退化成假绿");
-        let composite_card = m
-            .lua_ext_cards
+            .expect("临时 image 脚本没扫到，这条用例退化成假绿");
+        let composite_card = cards
             .iter()
             .find(|c| c.role == "composite")
-            .expect("出厂应有一个复合脚本（composite_demo）");
+            .expect("临时 composite 脚本没扫到");
 
         let mut back = cfg.clone();
         assert!(
@@ -4477,7 +5113,7 @@ mod tests {
     fn ksound_params_are_per_script_and_survive_restart() {
         let mut cfg = Config::default();
         cfg.key_sound.enabled = true;
-        cfg.key_sound.script = "scripts/unified_sound".into();
+        cfg.key_sound.script = "KeySound/unified_sound".into();
         let m = PanelModel::from_config(&cfg);
         // 统一音效 = 「音效」file 浏览 + 「长按连发出声」bool，共 2 个参数。
         let keys: Vec<String> = m
@@ -4502,12 +5138,12 @@ mod tests {
         assert_eq!(
             back.key_sound
                 .params
-                .get("scripts/unified_sound")
+                .get("KeySound/unified_sound")
                 .and_then(|p| p.get("repeat_sound")),
             Some(&json!(false))
         );
         // 切到分类音效：单元重建为它自己的 schema（5 个音效 + 连发开关，共 6 个，键名不同）。
-        let idx = m.ksound_catalog.index_of("scripts/class_sound");
+        let idx = m.ksound_catalog.index_of("KeySound/class_sound");
         m.ksound_script.set(idx);
         let mut back2 = back.clone();
         assert!(m.apply_to(&mut back2), "换脚本应产生配置变更");
@@ -4549,7 +5185,7 @@ mod tests {
         let mut back3 = back2.clone();
         assert!(m.apply_to(&mut back3), "挑音效应产生配置变更");
         assert_eq!(
-            back3.key_sound.params["scripts/class_sound"]["letter_sound"],
+            back3.key_sound.params["KeySound/class_sound"]["letter_sound"],
             json!("thock.wav")
         );
         // 重启模拟：用落盘后的配置重建面板——当前脚本已是「分类音效」，参数单元
@@ -4574,7 +5210,7 @@ mod tests {
             "重启后仍应停在分类音效自己的参数上：{keys3:?}"
         );
         assert_eq!(
-            back3.key_sound.params["scripts/unified_sound"]["repeat_sound"],
+            back3.key_sound.params["KeySound/unified_sound"]["repeat_sound"],
             json!(false)
         );
     }
@@ -4586,6 +5222,249 @@ mod tests {
         let mut back = cfg.clone();
         assert!(!m.apply_to(&mut back), "未操作控件不该改配置");
         assert_eq!(back, cfg);
+    }
+
+    /// 包卡：`scripts/CursorFX/` 下的平铺 `.lua` 必须聚合成**一张**卡，
+    /// 下拉项按 id 排序，且出厂不动不写 `pack_selected`。
+    #[test]
+    fn cursorfx_pack_is_one_card_with_flat_effects() {
+        let cfg = Config::default();
+        let m = PanelModel::from_config(&cfg);
+        let cards = m.lua_ext_cards.get();
+        let card = cards
+            .iter()
+            .find(|c| c.id == "scripts/CursorFX")
+            .expect("应扫描到 CursorFX 包卡");
+        let sel = card.selector.as_ref().expect("包卡应有下拉选择器");
+        let names = sel.names.get();
+        assert_eq!(names.len(), 42, "CursorFX 应有 42 个子脚本");
+        let effect_names = sel
+            .effects
+            .borrow()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>();
+        for expected in ["fire", "ring", "ripple", "bubbles", "stars"] {
+            assert!(
+                effect_names.iter().any(|n| n == expected),
+                "缺少 {expected}"
+            );
+        }
+        assert!(names.iter().any(|n| n == "bubbles (拖尾)"));
+        assert!(names.iter().any(|n| n == "bubbles (点击)"));
+        assert_eq!(
+            sel.effects
+                .borrow()
+                .get(sel.selected.get())
+                .map(|e| e.name.as_str()),
+            Some("fire"),
+            "pack.json.default 应选中 fire"
+        );
+        assert!(sel.default_id.ends_with("/fire"));
+        assert!(!card.toggle.get(), "包卡应关闭");
+        assert!(
+            card.params.get().len() >= 3,
+            "默认子脚本 fire 的四项参数应已生成"
+        );
+        assert!(
+            !m.lua_ext_cards
+                .get()
+                .iter()
+                .any(|c| c.id.starts_with("scripts/CursorFX/")),
+            "包内子脚本不得各自成卡"
+        );
+        let mut back = cfg.clone();
+        assert!(!m.apply_to(&mut back), "包卡首次出现不应写 pack_selected");
+        assert_eq!(back, cfg);
+    }
+
+    /// MouseEffects 包卡：33 个子脚本聚合为一张卡，默认项是 pack.json 的 aurora，
+    /// 子脚本不得各自成卡。
+    #[test]
+    fn mouseeffects_pack_is_one_card_with_flat_effects() {
+        let cfg = Config::default();
+        let m = PanelModel::from_config(&cfg);
+        let cards = m.lua_ext_cards.get();
+        let card = cards
+            .iter()
+            .find(|c| c.id == "scripts/MouseEffects")
+            .expect("应扫描到 MouseEffects 包卡");
+        let sel = card.selector.as_ref().expect("包卡应有下拉选择器");
+        let names = sel.names.get();
+        assert_eq!(names.len(), 33, "MouseEffects 应有 33 个子脚本");
+        let effect_names = sel
+            .effects
+            .borrow()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>();
+        for expected in ["Aurora", "Firework", "Zoom", "Tesla", "Nebula"] {
+            assert!(
+                effect_names.iter().any(|n| n == expected),
+                "缺少 {expected}"
+            );
+        }
+        assert_eq!(
+            sel.effects
+                .borrow()
+                .get(sel.selected.get())
+                .map(|e| e.name.as_str()),
+            Some("Aurora"),
+            "pack.json.default 应选中 aurora"
+        );
+        assert!(sel.default_id.ends_with("/aurora"));
+        assert!(!card.toggle.get(), "包卡应关闭");
+        assert!(
+            !m.lua_ext_cards
+                .get()
+                .iter()
+                .any(|c| c.id.starts_with("scripts/MouseEffects/")),
+            "包内子脚本不得各自成卡"
+        );
+    }
+
+    /// `single: true` 的工具包（OCR/条码/图片体检）只出一个普通脚本卡，不摆一项的下拉；
+    /// 普通多脚本包仍聚合成包卡。
+    #[test]
+    fn single_pack_renders_a_plain_card_and_multi_pack_still_aggregates() {
+        let root = std::env::temp_dir().join(format!("curseen_single_{}", std::process::id()));
+        let scripts = root.join("scripts");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(scripts.join("Tool")).unwrap();
+        std::fs::create_dir_all(scripts.join("Pack")).unwrap();
+        std::fs::write(
+            scripts.join("Tool/pack.json"),
+            r#"{"id":"Tool","name":"工具","version":"1.0.0","category":"text","single":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scripts.join("Tool/tool.lua"),
+            "name = \"工具\"
+category = \"text\"
+role = \"image\"
+function run(ctx) return \"ok\" end
+",
+        )
+        .unwrap();
+        std::fs::write(
+            scripts.join("Pack/pack.json"),
+            r#"{"id":"Pack","name":"包","version":"1.0.0","default":"one"}"#,
+        )
+        .unwrap();
+        for name in ["one", "two"] {
+            std::fs::write(
+                scripts.join(format!("Pack/{name}.lua")),
+                format!(
+                    "name = \"{name}\"
+kind = \"trail\"
+function run(ctx) return \"ok\" end
+"
+                ),
+            )
+            .unwrap();
+        }
+
+        let cards = build_lua_cards(&crate::core::config::Config::default(), &root);
+        let tool = cards
+            .iter()
+            .find(|c| c.id == "scripts/Tool/tool")
+            .expect("single 包应出普通脚本卡");
+        assert!(tool.selector.is_none(), "普通卡不许带包下拉");
+        assert_eq!(tool.category, "text");
+        assert!(
+            !cards.iter().any(|c| c.id == "scripts/Tool"),
+            "single 包不许再出包卡"
+        );
+        let pack = cards
+            .iter()
+            .find(|c| c.id == "scripts/Pack")
+            .expect("多脚本包仍应聚合");
+        assert_eq!(
+            pack.selector
+                .as_ref()
+                .expect("多脚本包应有下拉")
+                .names
+                .get()
+                .len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 包卡下拉切换 / 开关必须落到“当前子脚本 id”的 `composite_active`，
+    /// 而不是包 id；回到出厂默认项时 `pack_selected` 要清空。
+    #[test]
+    fn cursorfx_pack_switch_and_toggle_drive_composite_active() {
+        let mut cfg = Config::default();
+        cfg.lua_ext.params.insert(
+            "scripts/CursorFX/ring".to_string(),
+            HashMap::from([("size".to_string(), json!(60))]),
+        );
+        cfg.lua_ext.params.insert(
+            "scripts/CursorFX/fire".to_string(),
+            HashMap::from([("rate".to_string(), json!(3.0))]),
+        );
+        let m = PanelModel::from_config(&cfg);
+        let cards = m.lua_ext_cards.get();
+        let card = cards
+            .iter()
+            .find(|c| c.id == "scripts/CursorFX")
+            .expect("应扫描到 CursorFX 包卡");
+        let sel = card.selector.as_ref().expect("包卡应有下拉选择器");
+        let ring_idx = sel
+            .effects
+            .borrow()
+            .iter()
+            .position(|e| e.name == "ring")
+            .expect("缺少 ring");
+        let fire_idx = sel
+            .effects
+            .borrow()
+            .iter()
+            .position(|e| e.name == "fire")
+            .expect("缺少 fire");
+
+        sel.selected.set(ring_idx);
+        let mut back = cfg.clone();
+        assert!(m.apply_to(&mut back), "切换子脚本应写配置");
+        assert_eq!(
+            back.lua_ext.pack_selected.get("scripts/CursorFX"),
+            Some(&"scripts/CursorFX/ring".to_string())
+        );
+        assert!(
+            back.lua_ext.composite_active.is_empty(),
+            "包卡开关仍关着，不应启动"
+        );
+        assert!(
+            !back.lua_ext.params.contains_key("scripts/CursorFX/ring")
+                && !back.lua_ext.params.contains_key("scripts/CursorFX/fire"),
+            "切换子脚本应丢弃本包旧参数，新脚本从 schema 默认起步"
+        );
+
+        card.toggle.set(true);
+        let mut back = cfg.clone();
+        assert!(m.apply_to(&mut back), "打开包卡应启动当前子脚本");
+        assert!(
+            back.lua_ext
+                .composite_active
+                .iter()
+                .any(|id| id == "scripts/CursorFX/ring"),
+            "composite_active 里应是子脚本 id，不是包 id"
+        );
+
+        sel.selected.set(fire_idx);
+        assert!(m.apply_to(&mut back), "切回默认项应更新运行列表");
+        assert!(
+            back.lua_ext.pack_selected.is_empty(),
+            "停在 default 时应清掉 pack_selected"
+        );
+        assert!(
+            back.lua_ext
+                .composite_active
+                .iter()
+                .any(|id| id == "scripts/CursorFX/fire"),
+            "新子脚本应接替运行"
+        );
     }
 
     /// ★★ 每一根数值滑块都必须"存进去什么、原样读回来什么"。
@@ -5173,6 +6052,7 @@ mod tests {
         // 音量拉到 80、总开关不动。
         let pos = m
             .sound_choices
+            .get()
             .iter()
             .position(|n| n.starts_with("mouseclick1"))
             .expect("出厂声音应出现在下拉里");
@@ -5581,14 +6461,148 @@ mod tests {
         assert!(cased.is_empty(), "比较应忽略大小写");
     }
 
+    /// ★ 资产重扫后，所有"从目录扫出来"的下拉都走信号；否则面板不重开就看不到
+    /// 新拖尾 / 新点击效果 / 新声音 / 新虚拟键盘方案。
+    #[test]
+    fn asset_scanned_dropdowns_are_signal_driven() {
+        let vk = include_str!("pages/key_display.rs");
+        assert!(
+            vk.contains(".title_dropdown_signal(m.vk_scheme_names, m.vk_layout)"),
+            "虚拟键盘方案下拉必须绑信号"
+        );
+        assert!(
+            vk.contains("Element::host_signal(m.vk_controls"),
+            "虚拟键盘控件行必须随方案表信号重建"
+        );
+        let trail = include_str!("pages/trail.rs");
+        assert!(
+            trail.contains(".title_dropdown_signal(m.ripple_choices, ks.combo)"),
+            "点击效果下拉必须绑信号"
+        );
+        assert!(
+            trail.contains("card::choice_row_signal("),
+            "点击声音下拉必须绑信号"
+        );
+    }
+
+    /// 重扫不能悄悄换掉用户选中的资产：按 id 重新定位，不按下标。
+    /// 分类排序：有 category 的按 mouse→picture→text→ai→未知分类 先排；
+    /// **没有 category 的老脚本最后**，组内仍按原来的 id 顺序。
+    #[test]
+    fn cards_with_category_group_first_and_uncategorized_keep_id_order() {
+        let dir = std::env::temp_dir().join(format!("curseen_card_order_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let write = |name: &str, body: &str| {
+            std::fs::write(dir.join("scripts").join(name), body).unwrap();
+        };
+        write(
+            "z_unclassified.lua",
+            "role = \"image\"
+name = \"Z\"
+",
+        );
+        write(
+            "a_unclassified.lua",
+            "role = \"image\"
+name = \"A\"
+",
+        );
+        write(
+            "m_mouse.lua",
+            "role = \"image\"
+category = \"mouse\"
+name = \"M\"
+",
+        );
+        write(
+            "p_picture.lua",
+            "role = \"image\"
+category = \"picture\"
+name = \"P\"
+",
+        );
+        write(
+            "t_text.lua",
+            "role = \"image\"
+category = \"text\"
+name = \"T\"
+",
+        );
+        write(
+            "i_ai.lua",
+            "role = \"image\"
+category = \"ai\"
+name = \"I\"
+",
+        );
+        write(
+            "x_custom.lua",
+            "role = \"image\"
+category = \"zzz\"
+name = \"X\"
+",
+        );
+
+        let cards = build_lua_cards(&Config::default(), &dir);
+        let ids: Vec<&str> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "scripts/m_mouse",
+                "scripts/p_picture",
+                "scripts/t_text",
+                "scripts/i_ai",
+                "scripts/x_custom",
+                "scripts/a_unclassified",
+                "scripts/z_unclassified",
+            ],
+            "分类卡片先排，无分类老脚本按 id 排最后"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_asset_lists_keeps_selected_ids() {
+        let cfg = Config::default();
+        let mut m = PanelModel::from_config(&cfg);
+        if m.catalog.display_names().len() > 2 {
+            m.trail_effect.set(2);
+        }
+        if m.hover_catalog.display_names().len() > 1 {
+            m.hover_type.set(1);
+        }
+        let trail = m.catalog.id_at(m.trail_effect.get());
+        let hover = m.hover_catalog.id_at(m.hover_type.get());
+        let vk = m.vk_schemes[m.vk_layout.get()].id.clone();
+        let ks = m.ksound_catalog.id_at(m.ksound_script.get());
+        let ripples: Vec<usize> = m.ripple.iter().map(|k| k.combo.get()).collect();
+        let sounds: Vec<usize> = m.sound.iter().map(|k| k.combo.get()).collect();
+
+        m.reload_asset_lists(&cfg);
+
+        assert_eq!(m.catalog.id_at(m.trail_effect.get()), trail);
+        assert_eq!(m.hover_catalog.id_at(m.hover_type.get()), hover);
+        assert_eq!(m.vk_schemes[m.vk_layout.get()].id, vk);
+        assert_eq!(m.ksound_catalog.id_at(m.ksound_script.get()), ks);
+        assert_eq!(
+            m.ripple.iter().map(|k| k.combo.get()).collect::<Vec<_>>(),
+            ripples
+        );
+        assert_eq!(
+            m.sound.iter().map(|k| k.combo.get()).collect::<Vec<_>>(),
+            sounds
+        );
+    }
+
     #[test]
     fn vk_slider_roundtrip_preserves_the_value() {
         use crate::modules::virtual_keyboard::vk_config::Bind;
 
         let cfg = Config::default();
         let m = PanelModel::from_config(&cfg);
-        let group = m
-            .vk_controls
+        let controls = m.vk_controls.get();
+        let group = controls
             .iter()
             .find(|sc| sc.scheme_id == "ansi_104")
             .expect("出厂 104 方案应在控件列表里");
@@ -5628,8 +6642,8 @@ mod tests {
 
         // 再读回来：滑块位置该在 0.8 附近（漏算读端会变成 79 → 顶格）。
         let m2 = PanelModel::from_config(&back);
-        let g2 = m2
-            .vk_controls
+        let controls2 = m2.vk_controls.get();
+        let g2 = controls2
             .iter()
             .find(|sc| sc.scheme_id == "ansi_104")
             .expect("同上");
@@ -5662,8 +6676,8 @@ mod tests {
 
         let cfg = Config::default();
         let m = PanelModel::from_config(&cfg);
-        let ks = m
-            .vk_controls
+        let controls = m.vk_controls.get();
+        let ks = controls
             .iter()
             .find(|sc| sc.scheme_id == "ansi_104")
             .and_then(|sc| sc.items.iter().find(|it| it.def.bind == Bind::KeySize))
@@ -5730,5 +6744,61 @@ mod tests {
         let mut back3 = back2.clone();
         assert!(!m.apply_to(&mut back3), "对账必须收敛");
         assert_eq!(back3, back2);
+    }
+
+    /// ★ **默认值只准有一个来源**（m17）。界面控件过去各自写一遍"缺键怎么兜"
+    /// （`raw.and_then(as_bool).unwrap_or_else(|| p.default…)`），脚本侧则什么都拿不到，
+    /// 于是同一个 `schema()` 有两种答案。现在两边都走 `ParamDef::value_or_default`。
+    ///
+    /// 这格读的是**产品真入口**（`cell_from_param` = 脚本页/特效页那一片控件的构造函数），
+    /// 比的是"界面显示的初值 == 交棒给脚本的那一份默认值"，逐档类型各一格。
+    /// 两边将来任何一处改动都会在这里翻红——这条判据买的就是"飘"本身。
+    #[test]
+    fn the_ui_initial_value_is_the_default_the_script_gets() {
+        use crate::scripting::ParamType;
+        let empty: HashMap<String, serde_json::Value> = HashMap::new();
+        // 每档各配一个**类型对得上**的 `default`（脚本写了 `default` 的那一档走声明值）。
+        // ★ 刻意不测"default 与声明类型不符"：那种时候 UI 交 `as_xxx().unwrap_or(…)`、
+        //   宿主交那个不符的值——两边都没承诺过，测它等于**当场发明第三条规则**，
+        //   而不是核对现有的一条。
+        let typed: Vec<(ParamType, serde_json::Value)> = vec![
+            (ParamType::Bool, serde_json::json!(true)),
+            (ParamType::Int, serde_json::json!(4)),
+            (ParamType::Float, serde_json::json!(4.5)),
+            (ParamType::Choice, serde_json::json!("zzz")),
+            (ParamType::Color, serde_json::json!("#00FF00")),
+            (ParamType::Sound, serde_json::json!("ding")),
+            (ParamType::Folder, serde_json::json!("D:/x")),
+            (ParamType::Str, serde_json::json!("s")),
+            (ParamType::File, serde_json::json!("D:/x.png")),
+            (ParamType::Hotkey, serde_json::json!("Ctrl+F9")),
+            (ParamType::Image, serde_json::json!("D:/x.png")),
+        ];
+        for (t, declared) in typed {
+            // 两遍：脚本"没写 default"（走类型兜底）与"写了 default"（走声明值）——
+            // 只测后者会漏掉 `default_value()` 里那半条兜底规则。
+            for d in [serde_json::Value::Null, declared] {
+                let p = ParamDef {
+                    key: "k".to_string(),
+                    label: "K".to_string(),
+                    ptype: t,
+                    min: 1.0,
+                    max: 9.0,
+                    step: 0.5,
+                    default: d.clone(),
+                    choices: vec!["7".to_string()],
+                    choice_labels: Vec::new(),
+                    group: String::new(),
+                    alpha: true,
+                };
+                let want = p.value_or_default(None);
+                let cell = cell_from_param(&p, &empty);
+                assert_eq!(
+                    cell.initial(),
+                    &want,
+                    "{t:?} 档（default＝{d:?}）：界面初值与脚本默认值不是同一个来源"
+                );
+            }
+        }
     }
 }

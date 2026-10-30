@@ -20,7 +20,7 @@ pub struct UpdateState {
     pub progress: Signal<f32>,
     /// 检查或下载进行中：按钮置灰，避免并发起两次。
     pub busy: Signal<bool>,
-    /// 已拿到下载地址，可以"下载并更新"。
+    /// 已拿到下载地址，说明窗里的「更新」按钮可用。
     pub ready: Signal<bool>,
     /// 待下载的地址（由 `Available` 事件写入，`start_download` 读取）。
     /// ★ 用 `Signal`：面板 clone 的是同一个单元格，Runtime 之后 `set_url` 写入的值
@@ -37,8 +37,19 @@ impl Default for UpdateState {
 impl UpdateState {
     /// 在 UI 线程创建（`Signal` 是 `!Send`，只能在这儿建）。
     pub fn new() -> Self {
+        // 本地清单是"离线也能知道自己旧不旧"的底账：启动时先给一句人话，
+        // 点「检查更新」再联网替换它。
+        let status = match super::manifest::load_cached()
+            .and_then(|m| super::version::Version::parse(&m.version).map(|v| (m, v)))
+        {
+            Some((_, cached)) if cached > super::version::Version::current() => {
+                format!("本地清单显示 {} 可更新", cached)
+            }
+            Some((_, cached)) => format!("已是最新版本 {cached}"),
+            None => "尚未检查更新".to_string(),
+        };
         Self {
-            status: signal("尚未检查更新".to_string()),
+            status: signal(status),
             progress: signal(-1.0f32),
             busy: signal(false),
             ready: signal(false),
@@ -52,7 +63,7 @@ impl UpdateState {
         self.url.get()
     }
 
-    /// 记录下载地址并放行"下载并更新"按钮（`Runtime::apply_update_event` 在
+    /// 记录下载地址并放行说明窗的「更新」按钮（`Runtime::apply_update_event` 在
     /// `UpdateEvent::Available` 时调用）。
     pub fn set_url(&mut self, url: impl Into<String>) {
         self.url.set(url.into());

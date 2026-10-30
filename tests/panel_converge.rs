@@ -96,8 +96,10 @@ fn panel_converges_on_shipped_config() {
     let Ok(text) = std::fs::read_to_string(SHIPPED_CONFIG) else {
         return; // 产物目录不存在：全新克隆，跳过
     };
-    let Ok(cfg) = serde_json::from_str::<Config>(&text) else {
+    let Ok(mut cfg) = serde_json::from_str::<Config>(&text) else {
         return; // 配置解析不了不是本判据要管的事（加载侧另有门禁）
     };
+    // 与 `Config::load` 同口径：旧键音 id 先迁移，再看面板是否还会自己改配置。
+    cfg.migrate_lua_script_folders();
     assert_converges(&cfg, "用户真实配置");
 }

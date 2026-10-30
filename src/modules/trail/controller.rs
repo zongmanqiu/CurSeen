@@ -293,6 +293,57 @@ impl TrailModule {
         }
     }
 
+    /// 滚轮：更新指针位置并转发给复合脚本 / 拖尾脚本（缺 `on_wheel` 的静默跳过）。
+    ///
+    /// 由 `Runtime` 的输入队列消费点调用；钩子只在有脚本声明 `on_wheel` 时转发普通滚轮
+    /// （见 `platform::input::mouse::set_script_wheel_armed`）。
+    pub fn on_wheel(&mut self, delta: i32, horizontal: bool, x: f32, y: f32) {
+        // 低频事件（人手 ≤5 次/秒），留一条诊断：排查"滚轮特效用不了"时先看有没有这行。
+        log::info!(
+            "[diag] on_wheel delta={} horizontal={} want={}",
+            delta,
+            horizontal,
+            self.any_wheel_wanted()
+        );
+        self.pointer = (x, y);
+        self.companions
+            .on_wheel(delta, horizontal, x, y, self.elapsed, self.screen_wh());
+        if let Some(e) = self.effect.as_mut() {
+            e.on_wheel(delta, horizontal, x, y, self.elapsed);
+        }
+        // 滚轮类效果下一帧要出画；标脏让覆盖层按需续帧。
+        self.dirty = true;
+        self.animating = true;
+    }
+
+    /// 是否有脚本声明了 `on_wheel`（钩子武装判据，供 `Runtime::sync_input_gate` 调用）。
+    pub fn any_wheel_wanted(&self) -> bool {
+        self.companions.any_wheel_wanted() || self.effect.as_ref().is_some_and(|e| e.wants_wheel())
+    }
+
+    /// 鼠标抬起：清按住态，并转发给四类脚本宿主。
+    pub fn on_mouse_up(&mut self, button: MouseButton, x: f32, y: f32) {
+        self.pointer = (x, y);
+        let btn = match button {
+            MouseButton::Left => "left",
+            MouseButton::Right => "right",
+            MouseButton::Middle => "middle",
+            MouseButton::X1 => "x1",
+            MouseButton::X2 => "x2",
+        };
+        self.companions
+            .on_mouse_up(btn, x, y, self.elapsed, self.screen_wh());
+        if let Some(e) = self.effect.as_mut() {
+            e.on_mouse_up(button, x, y, self.elapsed);
+        }
+        for fx in &mut self.click_fx {
+            fx.on_mouse_up(button, x, y);
+        }
+        for fx in &mut self.persistent_fx {
+            fx.on_mouse_up(button, x, y);
+        }
+    }
+
     /// 同步配置。config_version 变化时重建特效。
     fn sync_settings(&mut self, config: &Config, config_version: u64) {
         if config_version == self.last_config_version {
@@ -940,25 +991,31 @@ mod tests {
         assert!((FIXED_DT - 1.0 / 120.0).abs() < 0.0001);
     }
 
-    /// ★ 复合脚本端到端（2026-09-26）：`config.lua_ext.composite_active` 里的脚本
-    /// 常驻运行——**拖尾总开关关闭时**也吃采样、也绘制。复合脚本是与悬浮标并列的
-    /// 独立功能，不归「拖尾效果」卡片管；判据用出厂演示脚本 `scripts/3.composite_demo`
-    /// （真实文件，与用户路径同一套解析）。
+    /// ★ 复合脚本端到端（2026-09-26）：复合脚本**拖尾总开关关闭时**也吃采样、也绘制。
+    /// 复合脚本是与悬浮标并列的独立功能，不归「拖尾效果」卡片管。
+    ///
+    /// 出厂演示脚本 `3.composite_demo` 已按用户口径删除（2026-10-29），这里改跑
+    /// `tests/fixtures/lua/scripts/composite_demo_fixture.lua`——脚本来源变了，
+    /// "常驻实例 + 采样 + 绘制 + 点击环"的链路仍是真实宿主（`CompanionHost::sync_at`
+    /// 与生产 `sync` 只差脚本根目录这一个入参）。
     #[test]
     fn composite_script_runs_even_when_trail_disabled() {
         let mut cfg = Config::default();
         cfg.trail.trail_enabled = false;
         cfg.trail.hover_enabled = false;
-        cfg.lua_ext
-            .composite_active
-            .push("scripts/3.composite_demo".to_string());
 
         let mut m = TrailModule::new();
         m.tick(&tick16(), &cfg, 1);
-        assert!(
-            m.companions().has_scripts(),
-            "配置版本变化后复合脚本应已同步载入"
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assets/lua");
+        m.companions.sync_at(
+            &fixture,
+            &[(
+                "scripts/composite_demo_fixture".to_string(),
+                std::collections::HashMap::new(),
+            )],
         );
+        assert!(m.companions().has_scripts(), "复合脚本应已载入测试夹具");
 
         // 鼠标动起来 → on_move 记点 → dirty；绘制产出指令（demo 画拖尾圆点）。
         m.push_sample(100.0, 100.0, 1000);
@@ -1008,6 +1065,69 @@ mod tests {
             list3.len_all()
         );
         assert!(!m.is_animating(), "点死光后不应续帧");
+    }
+
+    /// ★ MFCMouseEffect 的 Hold / Scroll 走**真实宿主链**（不是直接调引擎）：
+    /// `composite_active` 选中脚本 → 复合宿主注入 `mouse_down`/`wall_ms` → 脚本出画。
+    /// 这条守住用户报的「按住看不到/滚轮看不到」——单测引擎直调会绕过这两个注入点。
+    #[test]
+    fn mfcmouse_hold_and_scroll_run_through_the_real_host() {
+        // Hold：按下 260ms 后才出画，按住 500ms 必有一帧。
+        let mut cfg = Config::default();
+        cfg.trail.trail_enabled = false;
+        cfg.trail.hover_enabled = false;
+        cfg.lua_ext
+            .composite_active
+            .push("scripts/MFCMouseEffect/charge".to_string());
+        let mut m = TrailModule::new();
+        m.set_screen(ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        });
+        m.set_wall_ms(50_000.0);
+        m.tick(&tick16(), &cfg, 1);
+        m.on_click(MouseButton::Left, 300.0, 200.0);
+        m.set_wall_ms(50_500.0);
+        m.tick(&tick16(), &cfg, 1);
+        let mut held = DrawList::new();
+        m.draw(&mut held);
+        assert!(
+            held.len_all() > 0,
+            "Hold 脚本按住 500ms 应出画（真实宿主链）"
+        );
+
+        // Scroll：选中 twinkle → 真实宿主收到 on_wheel → 出画。
+        let mut cfg2 = Config::default();
+        cfg2.trail.trail_enabled = false;
+        cfg2.trail.hover_enabled = false;
+        cfg2.lua_ext
+            .composite_active
+            .push("scripts/MFCMouseEffect/twinkle".to_string());
+        let mut m2 = TrailModule::new();
+        m2.set_screen(ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        });
+        m2.set_wall_ms(60_000.0);
+        m2.tick(&tick16(), &cfg2, 1);
+        assert!(
+            m2.companions().any_wheel_wanted(),
+            "twinkle 应被识别为 on_wheel 脚本；ids={:?}",
+            m2.companions().ids()
+        );
+        m2.on_wheel(120, false, 300.0, 200.0);
+        m2.set_wall_ms(60_100.0);
+        m2.tick(&tick16(), &cfg2, 1);
+        let mut scrolled = DrawList::new();
+        m2.draw(&mut scrolled);
+        assert!(
+            scrolled.len_all() > 0,
+            "Scroll 脚本收到滚轮后应出画（真实宿主链）"
+        );
     }
 
     // ── 快移插值（`interpolate`）的纯几何单测 ──

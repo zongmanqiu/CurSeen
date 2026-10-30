@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use windui::prelude::Sender;
 
 use crate::core::events::{UiMsg, UpdateEvent};
-use crate::update::{checker, downloader, CheckOutcome, Version};
+use crate::update::{downloader, manifest, Version};
 
 /// ★ 检查 / 下载各只允许**一个**在跑（2026-09-30）。
 ///
@@ -51,7 +51,11 @@ impl Drop for BusyGuard {
 /// 发起「检查更新」。立即返回，结果稍后经通道回来。
 ///
 /// 没有发送端（`None`）时不启动线程，返回可读错误而不是 panic。
-pub fn start_check(tx: &Option<Sender<UiMsg>>) -> Result<(), String> {
+pub fn start_check(
+    tx: &Option<Sender<UiMsg>>,
+    urls: [String; 2],
+    source: usize,
+) -> Result<(), String> {
     let tx = tx.clone().ok_or_else(|| "UI 通道尚未就绪".to_string())?;
     // ★ 已经在检查中就啥也不做（重复触发不叠加线程，见 [`BusyGuard`]）。
     let Some(busy) = BusyGuard::take(&CHECK_BUSY) else {
@@ -62,12 +66,14 @@ pub fn start_check(tx: &Option<Sender<UiMsg>>) -> Result<(), String> {
     spawn(move || {
         let _busy = busy; // 搬到工作线程：线程结束才归还。
         let _ = tx.send(UiMsg::Update(UpdateEvent::CheckStarted));
-        let ev = match checker::check(Version::current()) {
-            Ok(CheckOutcome::Available { latest, url }) => UpdateEvent::Available { latest, url },
-            Ok(CheckOutcome::UpToDate { latest }) => UpdateEvent::UpToDate { latest },
-            Ok(CheckOutcome::AvailableNoAsset { latest }) => UpdateEvent::CheckFailed {
-                error: format!("新版本 {latest} 未提供可下载的安装包"),
+        let ev = match manifest::check(&urls, source, Version::current()) {
+            Ok(manifest::Outcome::Available(plan)) => UpdateEvent::Available {
+                latest: plan.latest,
+                url: plan.url,
+                sha256: plan.sha256,
+                notes: plan.notes,
             },
+            Ok(manifest::Outcome::UpToDate { latest }) => UpdateEvent::UpToDate { latest },
             Err(error) => UpdateEvent::CheckFailed { error },
         };
         let _ = tx.send(UiMsg::Update(ev));
@@ -76,7 +82,7 @@ pub fn start_check(tx: &Option<Sender<UiMsg>>) -> Result<(), String> {
 }
 
 /// 发起「下载并安装」。地址由调用方给出（通常取自 [`UpdateState::url`]）。
-pub fn start_download(tx: &Option<Sender<UiMsg>>, url: &str) -> Result<(), String> {
+pub fn start_download(tx: &Option<Sender<UiMsg>>, url: &str, sha256: &str) -> Result<(), String> {
     let tx = tx.clone().ok_or_else(|| "UI 通道尚未就绪".to_string())?;
     if url.is_empty() {
         return Err("没有可用的下载地址".to_string());
@@ -86,6 +92,7 @@ pub fn start_download(tx: &Option<Sender<UiMsg>>, url: &str) -> Result<(), Strin
         return Err("正在下载更新".to_string());
     };
     let url = url.to_string();
+    let expected_sha = sha256.to_ascii_lowercase();
 
     spawn(move || {
         let _busy = busy;
@@ -108,7 +115,13 @@ pub fn start_download(tx: &Option<Sender<UiMsg>>, url: &str) -> Result<(), Strin
             }
         });
         let ev = match result {
-            Ok(()) => UpdateEvent::Downloaded { path: dest },
+            Ok(()) => match downloader::file_sha256(&dest) {
+                Ok(actual) if actual == expected_sha => UpdateEvent::Downloaded { path: dest },
+                Ok(actual) => UpdateEvent::DownloadFailed {
+                    error: format!("更新包 sha256 不匹配（期望 {expected_sha}，实际 {actual}）"),
+                },
+                Err(error) => UpdateEvent::DownloadFailed { error },
+            },
             Err(error) => UpdateEvent::DownloadFailed { error },
         };
         let _ = tx.send(UiMsg::Update(ev));
@@ -136,6 +149,8 @@ mod tests {
         let a = UpdateEvent::Available {
             latest: "1.2.3".into(),
             url: "https://example.com/a.zip".into(),
+            sha256: "a".repeat(64),
+            notes: "notes".into(),
         };
         let b = a.clone();
         assert_eq!(a, b);
@@ -147,8 +162,8 @@ mod tests {
     /// 不必为了测它而先装配整个运行时。
     #[test]
     fn start_without_channel_reports_error() {
-        assert!(start_check(&None).is_err());
-        assert!(start_download(&None, "https://x/a.zip").is_err());
+        assert!(start_check(&None, [String::new(), String::new()], 0).is_err());
+        assert!(start_download(&None, "https://x/a.zip", &"a".repeat(64)).is_err());
     }
 
     /// ★ 回归（2026-09-30）：检查 / 下载各只允许一个在跑，第二次 take 必须拿不到——

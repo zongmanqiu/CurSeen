@@ -295,7 +295,7 @@ pub fn build_trail_page(m: &PanelModel) -> Element {
                 let kexp = m.expand(&format!("ripple.{}", model::RIPPLE_KEYS[i]));
                 let combo = ks.combo;
                 let (sub_title, sub_body, sub_exp) = FeatureCard::new(name, kexp)
-                    .title_dropdown(m.ripple_choices.clone(), ks.combo)
+                    .title_dropdown_signal(m.ripple_choices, ks.combo)
                     .body(Element::host_signal(ks.clickfx_params, move |c| {
                         build_param_cell(c, hk_cap, col1_w)
                     }))
@@ -341,9 +341,9 @@ pub fn build_trail_page(m: &PanelModel) -> Element {
             ));
             for (i, ks) in m.sound.iter().enumerate() {
                 // 与其它下拉同走 `card::choice_row` 正本（构造处已截断，二次幂等）。
-                col = col.child(card::choice_row(
+                col = col.child(card::choice_row_signal(
                     key_labels[i],
-                    m.sound_choices.clone(),
+                    m.sound_choices,
                     ks.combo,
                     col1_w,
                 ));
@@ -383,7 +383,7 @@ mod tests {
             "波纹子卡应按 ripple.<键> 取展开信号"
         );
         assert!(
-            body.contains(".title_dropdown(m.ripple_choices.clone(), ks.combo)"),
+            body.contains(".title_dropdown_signal(m.ripple_choices, ks.combo)"),
             "子卡标题栏应是「关闭/效果」下拉（数据源 ripple_choices）"
         );
         // ③ 子卡**不带开关**：`.switch(` 全页只允许出现在四张一级卡上

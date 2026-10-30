@@ -1,11 +1,11 @@
 //! 原生「打开文件 / 另存为 / 选择文件夹」对话框（仅 Windows）。
 //!
-//! 四个入口，落在两组底层 API 上：
+//! 入口落在三组底层 API 上：
 //!
 //! | 入口 | API | 调用方 |
 //! |---|---|---|
-//! | [`open_image`] / [`open_gif`] | `GetOpenFileNameW` | 悬浮标「浏览…」/ 裁剪窗「打开…」 |
-//! | [`save_png`] / [`save_gif`] / [`save_mp4`] / [`save_text`] | `GetSaveFileNameW` | 贴图「另存为」/ 裁剪窗「保存」/ 视频裁剪 / AI 对话「保存回复…」 |
+//! | [`open_image`] / [`open_gif`] / [`script_open`] | `GetOpenFileNameW` | 悬浮标「浏览…」/ 裁剪窗「打开…」/ 脚本 `ext:open_file` |
+//! | [`save_png`] / [`save_gif`] / [`save_mp4`] / [`save_text`] / [`script_save`] | `GetSaveFileNameW` | 贴图「另存为」/ 裁剪窗「保存」/ 视频裁剪 / AI 对话「保存回复…」/ 脚本 `ext:save_file` |
 //! | [`open_folder`] | `IFileOpenDialog` + `FOS_PICKFOLDERS` | （当前无调用方，留作平台能力） |
 //!
 //! 目录选择特意**不用**老式的 `SHBrowseForFolder`：它没有地址栏、不能粘贴路径，选目录体验
@@ -458,6 +458,113 @@ pub fn open_folder() -> Option<PathBuf> {
     }
 }
 
+/// 脚本能选的档（m13 `ext:open_file` 的 `kind`）。
+///
+/// ★ 刻意**只复用产品里已有的那几套过滤器**，不新造描述文案：同一类型在两个对话框里叫
+///   不同名字，用户会以为是两回事（`FILTER` 在悬浮标里就叫「图片 (*.png;*.gif)」，
+///   脚本侧沿用同一个）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScriptPick {
+    /// 所有文件兜底（`kind` 省略时就是这档）。
+    Any,
+    /// PNG / GIF。
+    Image,
+    /// 常用音效。
+    Audio,
+    /// 仅 GIF。
+    Gif,
+    /// 仅 MP4。
+    Mp4,
+}
+
+impl ScriptPick {
+    /// 脚本书写的取值 → 档位；认不出来一律 `None`。
+    ///
+    /// 不许"认不出来就当 any"：把 `"iamge"` 悄悄降级成全文件对话框，症状是"它有时候
+    /// 不给我显示图片"——那种没人能复现的怪事最贵，所以宁可当场报"没有这个档"。
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "any" => Some(Self::Any),
+            "image" => Some(Self::Image),
+            "audio" => Some(Self::Audio),
+            "gif" => Some(Self::Gif),
+            "mp4" => Some(Self::Mp4),
+            _ => None,
+        }
+    }
+
+    /// 本档用的过滤器（既有常量，一个都不新造）。
+    fn filter(&self) -> &'static str {
+        match self {
+            Self::Any => FILTER_ANY,
+            Self::Image => FILTER,
+            Self::Audio => FILTER_AUDIO,
+            Self::Gif => FILTER_GIF,
+            Self::Mp4 => FILTER_MP4,
+        }
+    }
+}
+
+/// 脚本侧对话框的标题（两类各一个，**不随 `kind` 变**：过滤器下拉里已经写着类型，
+/// 标题栏再念一遍只会把它挤没）。
+const TITLE_OPEN_SCRIPT: &str = "选择文件\0";
+/// 脚本侧「另存为」的标题。
+const TITLE_SAVE_SCRIPT: &str = "另存为\0";
+
+/// 脚本层的「打开」入口（`ext:open_file`，m13）。取消或失败 = `None`。
+///
+/// `owner` 传触发这次脚本的那扇贴图窗，对话框就模态于它（Esc 只关对话框、不会把贴图
+/// 一起退出）；`start_dir` 只是**提示**，见模块头。
+pub fn script_open(
+    kind: ScriptPick,
+    start_dir: Option<&Path>,
+    owner: Option<isize>,
+) -> Option<PathBuf> {
+    pick_open(kind.filter(), TITLE_OPEN_SCRIPT, start_dir, owner)
+}
+
+/// 脚本层的「另存为」入口（`ext:save_file`，m13）。取消或失败 = `None`。
+///
+/// 过滤器固定 [`FILTER_ANY`]：脚本要的落点就是"任意路径 + 自己决定格式"，把类型写进
+/// 扩展名已经够了（`ext` 先过 [`sanitize_ext`]）。
+pub fn script_save(
+    ext: &str,
+    default_name: &str,
+    start_dir: Option<&Path>,
+    owner: Option<isize>,
+) -> Option<PathBuf> {
+    pick_save(
+        FILTER_ANY,
+        TITLE_SAVE_SCRIPT,
+        &sanitize_ext(ext),
+        default_name,
+        start_dir,
+        owner,
+    )
+}
+
+/// 把脚本给的扩展名收成能安全交给对话框的形态：取**前导**一段字母数字、转小写、截到 8，
+/// 一个都不剩就用 `txt`。
+///
+/// `lpstrDefExt` 会被系统拼到用户看到的文件名后面。给它带 `\0`、点号或路径分隔符，
+/// 症状是"后缀里多了怪字符"（2026-10-08 那条没补终止符的 `.mdz` 就是这个形状）。
+/// 这里不猜脚本想要什么格式，只做净化：`"p.n"` 收成 `"p"` 而不是粘成 `"pn"`。
+pub fn sanitize_ext(raw: &str) -> String {
+    let head: String = raw
+        .trim()
+        .trim_start_matches('.')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let cut: String = head.chars().take(8).collect();
+    if cut.is_empty() {
+        "txt".to_string()
+    } else {
+        cut
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +695,69 @@ mod tests {
         let h = owner_hwnd(Some(0x1234));
         assert!(!h.is_invalid());
         assert_eq!(h.0 as isize, 0x1234);
+    }
+
+    /// `kind` 的词表就这六个写法（含省略）。**拼错必须 `None`**，不许悄悄降级成 `any`——
+    /// 降级造出的是"它有时候不给我显示图片"那种没人能复现的怪事。
+    #[test]
+    fn script_pick_vocabulary_is_exact() {
+        for (raw, want) in [
+            ("", ScriptPick::Any),
+            ("any", ScriptPick::Any),
+            ("IMAGE", ScriptPick::Image),
+            (" gif ", ScriptPick::Gif),
+            ("mp4", ScriptPick::Mp4),
+            ("Audio", ScriptPick::Audio),
+        ] {
+            assert_eq!(ScriptPick::parse(raw), Some(want), "{raw:?} 应当认得");
+        }
+        for bad in ["iamge", "video", "txt", "..", "所有文件", "png"] {
+            assert_eq!(ScriptPick::parse(bad), None, "{bad:?} 不在词表里，必须拒");
+        }
+    }
+
+    /// 每档 → 过滤器那张**分派表**必须指向产品已有的那一套。档位写反（把 GIF 接到 Audio
+    /// 上）在这种 match 写法下极易发生，只有按内容断言才拦得住。
+    #[test]
+    fn script_pick_dispatches_to_the_right_filter() {
+        for (kind, pattern) in [
+            (ScriptPick::Any, "*.*"),
+            (ScriptPick::Image, "*.png;*.gif"),
+            (ScriptPick::Audio, "*.wav;*.mp3"),
+            (ScriptPick::Gif, "*.gif\0"),
+            (ScriptPick::Mp4, "*.mp4\0"),
+        ] {
+            assert!(
+                kind.filter().contains(pattern),
+                "{kind:?} 里该有 {pattern:?}"
+            );
+        }
+        assert!(
+            !ScriptPick::Gif.filter().contains(".mp4"),
+            "GIF 档不该看见 mp4"
+        );
+        assert!(
+            !ScriptPick::Mp4.filter().contains(".gif"),
+            "MP4 档不该看见 gif"
+        );
+        assert_eq!(
+            ScriptPick::Any.filter(),
+            FILTER_ANY,
+            "兜底档就是那张所有文件"
+        );
+    }
+
+    /// 扩展名净化：取前导一段、不粘两段、路径形态一律收成 `txt`。
+    /// 这条守的是 `lpstrDefExt`——它会被系统拼进用户看到的文件名。
+    #[test]
+    fn ext_is_sanitized_not_merged_nor_pathed() {
+        assert_eq!(sanitize_ext("  .Png "), "png");
+        assert_eq!(sanitize_ext("md"), "md");
+        assert_eq!(sanitize_ext("p.n"), "p", "取前导一段，不能粘成 \"pn\"");
+        assert_eq!(sanitize_ext("a\0b"), "a", "NUL 一律断开");
+        for junk in ["", "....", "../..", "/*", "…"] {
+            assert_eq!(sanitize_ext(junk), "txt", "{junk:?} 收成什么都不该是怪字符");
+        }
+        assert_eq!(sanitize_ext(&"x".repeat(30)).len(), 8, "超长要截");
     }
 }

@@ -11,7 +11,9 @@
 - [ ] `README.md` → 下载链接文字里的版本号（"下载最新版 x.y.z"，此处是手写字面量）
 - [ ] `HISTORY.md` → 顶部把 `（开发中）` 小节定为正式版本号，并把该节**压缩为面向使用者的
       功能 / 修复要点**（旧版本保持要点级，版本再多也不超篇幅上限）
-- [ ] 复核 `update/version.rs` 读的远端地址仍有效（运行期版本号来源）
+- [ ] 生成并提交 `update.json`：`python build/gen_update_json.py --version <版本> --zip <CurSeen_<版本>.zip>`；
+      它从 HISTORY 当前版本段取 `notes`、算 zip 的 sha256，并写 Gitee/GitHub 两个 zip 地址
+- [ ] 上传 release 资产后，确认 `update.json` 的两个 zip 地址都能下载（否则更新按钮会失败）
 
 ## 二、质量门禁（按顺序，全绿才继续）
 
@@ -80,10 +82,10 @@
       —— 自动：`pip_probe` / `pip_zoom_probe` / `fullscreen_zoom_probe` / `rec_pip_share`
 - [ ] 截图与贴图（三把快捷键出厂**全留空**；贴图右键菜单不**被贴图窗盖住**、子菜单不盖父菜单
       ——靠屏幕右缘再验一遍）—— 仅人手（窗口层级与遮挡自动化兜不住）
-- [ ] 「图片操作」：贴图右键**总有**「图片操作」子菜单（这一级**恒挂载**，撤掉 = 用户以为功能坏了）。
-      里面有条目 ⟺ 该脚本既被 `assets/lua/scripts/` 磁盘扫到、又在脚本页勾开了
-      （唯一判据 `LuaExtSettings::role_is_active("image", id)`，
-      过滤点 `runtime::Runtime::lua_ext_menu_items`）。
+- [ ] 「脚本」：贴图右键**总有**「脚本」子菜单（这一级**恒挂载**，撤掉 = 用户以为功能坏了）。
+      里面有条目 ⟺ 该脚本被 `assets/lua/scripts/` 磁盘扫到、在脚本页勾开了，
+      **并且**它声明的 `requires` 外置文件都在（缺文件就不出现，见 m13）。
+      两道判据都只在 `runtime::Runtime::lua_ext_menu_items` 这一处过。
       出厂全关 → 子菜单是空壳 + 一条置灰的「（暂无脚本）」；把目录里的脚本文件再挪走 → 子菜单
       仍是空壳，**不能整个消失**
       —— 自动：`pin.rs::lua_submenu_rows_keep_the_entry_even_when_empty`（空表恒留一行
@@ -107,8 +109,8 @@
       —— 自动：`global.rs::system_card_wires_admin_launch_toggle_and_hint`（四态文案齐备）
       ；UAC 弹窗与重启生效仅人手
 - [ ] 自动更新：检查 → 下载 → 安装 —— 仅人手
-- [ ] 退出后系统光标恢复正常（全局隐藏光标那条路径的兜底）—— 仅人手
-      （`hide_cursor` 的状态机没有对外读取口，且真调 `hide()` 会动用户的系统光标）
+- [ ] 托盘「退出」后系统光标恢复正常；用任务管理器强杀后再启动，启动时应自动恢复
+      （显式恢复在 `run_overlay` 的 `app.run()` 之后；首实例启动还会无条件重载一次系统光标）
 
 > 真机自动化必须**独占机器**（见 `PLATFORM_NOTES.md` 第四节）。
 

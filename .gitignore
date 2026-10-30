@@ -10,3 +10,6 @@ docs/intro.pptx
 .vscode/
 .idea/
 Thumbs.db
+
+# NVIDIA UMD 诊断日志（D3D11 探针从 main/ 启动时会生成；不入库）
+NVIDIA Corporation/

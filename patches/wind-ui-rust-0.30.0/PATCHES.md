@@ -2755,3 +2755,66 @@ windui 补上这条指针事件来自什么设备这一缺失信息：`PointerEv
 `pin.rs::tests` 新增 `extreme_aspect_ratio_window_is_exactly_image_plus_frame`：钉住
 "窗口 = 图片 × 缩放 + 2×FRAME"的算式（含 800% 上限 484×5764 远超一屏高也不许被钳），
 与真机探针分工——单测管算式、探针管"算式真的落到窗口上"。
+
+---
+
+## 补丁 096（windui 侧）：带边框窗口的 `WM_NCHITTEST` 交回系统——边框可拉伸、标题栏可拖动
+
+### 背景（2026-10-28 用户报告）
+用户原话：*"我们的文本信息窗口可以最大化。但是鼠标悬停在边框线时无法调整大小。"*
+（顺带要求结果窗居中，那是主仓 `ui/script_dialog.rs` 的落点问题，不属于本补丁。）
+
+### 根因
+`src/platform/win32/mod.rs` 的 `handle_nchittest` 一进来就：
+
+```rust
+if !is_frameless(hwnd) { return LRESULT(HTCLIENT as isize); }
+```
+
+注释写的是"与系统默认等价"——**不等价**。带边框（`WS_OVERLAPPEDWINDOW`）的窗整窗报
+`HTCLIENT` 之后，系统再也收不到 `HTLEFT/HTTOP/HTCAPTION/…`：边框热区消失（拖不动）、
+标题栏也归客户区（拖不动、双击不最大化）。最大化按钮之所以"看着能用"，是样式位
+`WS_MAXIMIZEBOX` 还在（系统菜单/快捷键那条路），但鼠标点上去同样不走 NC 路径。
+所有**带边框**的宿主窗都中招：脚本文本窗、GIF/MP4 裁剪窗、设置面板、录完提示窗。
+
+只有**无边框**窗才需要宿主自己算边缘热区（下面那段 `WS_THICKFRAME` 判据就是干这个的），
+带边框的窗本来就该由系统算。
+
+### 修法（`src/platform/win32/mod.rs::handle_nchittest`）
+```rust
+if !is_frameless(hwnd) {
+    return LRESULT(DefWindowProcW(hwnd, WM_NCHITTEST, WPARAM(0), lparam).0);
+}
+```
+无边框分支一个字节没动（贴图窗/覆盖层/选框窗的行为不变）。
+
+### 验收（诚实的范围）
+- **无机器读数**：要证"边框热区回来了"，得建一扇**真** windui 带边框窗再对它
+  `SendMessage(WM_NCHITTEST)`——本轮没写这只探针（`tests/probes/` 里现有的是裸 Win32 窗，
+  测不到 windui 的窗口过程）。列为下一轮的候选：`framed_hittest_probe.rs`（建窗 → 在
+  左边框内 2px 处问 → 断言 `HTLEFT`；再在标题栏问 → `HTCAPTION`）。
+- 低风险的理由（读码 + 平台语义）：`DefWindowProcW` 对 `WM_NCHITTEST` 的结果就是系统的
+  标准答案，所有普通 Win32 窗都走它；无边框分支完全没动。
+- 用户手验（10 秒）：打开任意脚本结果窗 → 鼠标移到四边/四角 → 指针应变成双向箭头并可拖动；
+  标题栏可拖动、双击可最大化。
+
+## 补丁 097（windui 侧）：前置图标贴左——搜索框放大镜离左缘太远
+
+### 背景（2026-10-29 用户报告）
+
+「官方资源下载的搜索框，放大镜距离左侧间隔太大」——要的是贴左边的常规放大镜，不是居中的。
+
+### 根因
+
+`src/ui/inputs.rs` 把前置字形**居中**在 `[TEXT_PAD, TEXT_PAD+lead]` 的图标区里：
+14px 字号下 `lead = 14+8 = 22`、`TEXT_PAD = 12`，字形离输入框左缘约 **16px**。
+
+### 修法
+
+新增 `LEADING_ICON_PAD = 8`，图标改为在 `[8, 8+(lead-8)]` 的窄框内居中（14px 字形落在 8px 处）。
+**文字起点（`TEXT_PAD+lead`）不变**，命中区/光标/选区都不受影响；只影响带 `leading_icon`
+的输入框（当前只有脚本页「官方资源下载」搜索框）。
+
+### Modified Files
+
+- `src/ui/inputs.rs`

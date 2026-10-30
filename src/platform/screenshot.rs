@@ -227,6 +227,52 @@ pub fn encode_png(shot: &Shot) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// PNG 文件 → 全尺寸位图（[`Shot`]，BGRA）。与 [`save_png`] 互为逆运算。
+///
+/// 只解 PNG，而且**唯一消费者是剪贴板历史**（PNG 原件与"预览读回"，代码从
+/// `clipboard_history` 原样搬来）。
+///
+/// ★ 脚本读图**不**走这里（m21 起）：`ext:load_image` / `ext:set_image(路径)` 走
+///   [`crate::platform::image_decode`]——WIC、**原尺寸**、任意 WIC 认得的格式。
+///   别把脚本接回这条：它只认 PNG，而 `clipboard_history` 那条 WIC 缩略图路会把图缩到
+///   720 宽（见 `decode_image_with_target` 的 `Some(THUMB_MAX_W)`）。
+/// 颜色类型分支（RGBA / RGB / 灰度 / 调色板）逐一显式处理：调色板图不展开就会拿到
+/// **索引值**而不是颜色（那条坑在剪贴板缩略图那儿的注释里记着）。
+///
+/// ★ 拿到的 `Shot` 转位图时**必须**用 [`crate::core::backdrop::shot_to_bitmap_alpha`]：
+///   文件解出来的 α 是内容，而 `shot_to_bitmap` 那一档按抓屏语义把 α 一律刷成 255。
+pub fn load_png(path: &std::path::Path) -> Option<Shot> {
+    use std::io::BufReader;
+    let f = std::fs::File::open(path).ok()?;
+    let dec = png::Decoder::new(BufReader::new(f));
+    let mut r = dec.read_info().ok()?;
+    let mut buf = vec![0u8; r.output_buffer_size().unwrap_or(0)];
+    let info = r.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    let (w, h) = (info.width as i32, info.height as i32);
+    let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
+    match info.color_type {
+        png::ColorType::Rgba => {
+            for (px, b) in bgra.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
+                px[0] = b[2];
+                px[1] = b[1];
+                px[2] = b[0];
+                px[3] = b[3];
+            }
+        }
+        png::ColorType::Rgb => {
+            for (px, b) in bgra.chunks_exact_mut(4).zip(buf.chunks_exact(3)) {
+                px[0] = b[2];
+                px[1] = b[1];
+                px[2] = b[0];
+                px[3] = 255;
+            }
+        }
+        _ => return None,
+    }
+    Some(Shot { w, h, bgra })
+}
+
 /// 存成 PNG 文件（父目录不存在则创建）。用户可见落点用这一版（默认压缩档）。
 pub fn save_png(shot: &Shot, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent() {

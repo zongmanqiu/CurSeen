@@ -28,9 +28,32 @@ pub fn register_effect_api(lua: &Lua) -> mlua::Result<()> {
     // 屏幕尺寸（由 Rust 端每帧更新）
     globals.set("screen_w", 1920f32)?;
     globals.set("screen_h", 1080f32)?;
+    // 虚拟桌面原点（物理像素，可为负）：整屏暗罩 / 星空 / 镜像中心必须用它，
+    // 否则副屏在主屏左侧时会把 0,0 当成屏幕左上角。
+    globals.set("screen_x", 0f32)?;
+    globals.set("screen_y", 0f32)?;
 
     // 时间（由 Rust 端每帧更新）
     globals.set("elapsed", 0f32)?;
+    globals.set("wall_ms", 0f64)?;
+    globals.set("local_ms", 0i64)?;
+    globals.set("unix_ms", 0i64)?;
+    globals.set("tz_offset_min", 0i32)?;
+
+    // 指针运动/按住状态（由 Rust 端每帧更新；先给安全默认值）。
+    globals.set("cursor_vx", 0f32)?;
+    globals.set("cursor_vy", 0f32)?;
+    globals.set("cursor_speed", 0f32)?;
+    globals.set("cursor_heading", 0f32)?;
+    globals.set("mouse_vx", 0f32)?;
+    globals.set("mouse_vy", 0f32)?;
+    globals.set("mouse_speed", 0f32)?;
+    globals.set("mouse_heading", 0f32)?;
+    globals.set("mouse_down", false)?;
+    globals.set("mouse_button", "left")?;
+    // 悬停态：系统正在给出交互光标提示（I 形/手形/缩放…）。由 `set_pointer_state`
+    // 每帧刷新；这里先给安全默认值，脚本在 init 里读到的是 false。
+    globals.set("cursor_hover", false)?;
 
     // 指针位置（由 Rust 端每帧更新）。
     //

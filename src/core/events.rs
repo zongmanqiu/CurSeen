@@ -377,6 +377,8 @@ pub enum UiMsg {
     OpenPanel,
     /// 输入钩子捕获到的一个事件。
     Input(InputEvent),
+    /// 用户点了「检查更新」：由 UI 线程从配置取两条清单地址与当前源，再起后台线程。
+    UpdateCheck,
     /// 更新流程的一步进展（检查 / 下载）。 [`crate::update::UpdateEvent`] 是事件载荷，
     /// 定义在 `update` 子系统内部以保持该子系统自洽；它是纯数据，`Clone + Send`。
     Update(UpdateEvent),
@@ -439,6 +441,201 @@ pub enum UiMsg {
     /// 于是只能把结果当**纯数据**送回来，由 UI 线程写进信号
     /// （`Runtime::apply_temp_usage` → `ui::temp_usage::TempUsageState::apply`）。
     TempUsage(super::temp_usage::TempUsage),
+    /// 脚本请宿主开一个模态窗（`ext:result` / `ext:input`），见 [`ScriptDialogSpec`]。
+    ///
+    /// 为什么必须绕这一圈：windui 的窗**只能在 UI 线程开**，而脚本每次触发都在自己的
+    /// 工作线程上跑（`scripting::ext_runner`）。旧做法是工作线程直接弹原生框、靠框自带的
+    /// 嵌套消息泵阻塞（`platform::win_util::text_result_box`）——那套控件的滚动条和按钮
+    /// 与主窗口完全不同（用户 2026-10-27 指出）。换成宿主窗后，跨线程只能送**纯数据 +
+    /// 回复通道**，于是这个窗必然是模态同步的：工作线程 `recv` 等用户点按钮。
+    ScriptDialog(std::sync::Arc<ScriptDialogSpec>),
+    /// 脚本要把**它当初来自的那张贴图**换成另一张图（`ext:set_image`），见 [`ScriptImageSpec`]。
+    ///
+    /// 为什么也绕这一圈：像素可以跨线程递（`RgbaBitmap` 是 `Send`），但**贴图窗的画布不行**
+    /// （`RefCell<PinCanvas>` 不是 `Sync`，而换图要顺带重建渲染对象、改窗口尺寸、踢重排——
+    /// 全都必须在 UI 线程做）。所以这里同样是"纯数据 + 一次性回复"。
+    ScriptImage(std::sync::Arc<ScriptImageSpec>),
+    /// 屏幕中央的一句短反馈（`ext_runner` 的「正在运行：X」/「X 还在跑，这次忽略」）。
+    ///
+    /// 为什么也要一条消息：这句话是**脚本的工作线程**想说的，而浮字画在 UI 线程的覆盖层里
+    /// （`Runtime::action_notify`）。与 [`Self::GifSelChanged`] 同一条纪律——能由我们自己
+    /// 决定时刻的界面变化，主动推一条消息；park 态下没有它就只能等下一次用户输入，
+    /// 而那正好是"按了热键屏幕一点反应都没有"的病。
+    ///
+    /// ★ 只用 `String`、没有回复通道：**它是反馈，不是业务结果**。送不到（总线没装 /
+    ///   应用正在退出）不算失败，也不该让脚本因此改变行为。
+    Notice(String),
+    /// 在线脚本库的用户动作（刷新清单 / 安装 / 卸载，m36）。
+    StoreAction(StoreAction),
+    /// 在线脚本库的进展（后台线程 → UI 线程，m36）。
+    Store(StoreEvent),
+}
+
+/// 一次脚本回写：把 `hwnd` 那张贴图的像素换成 `bitmap`。
+///
+/// ★ 语义与右键「旋转 / 镜像」**同一条缝**（`runtime::layer::pin::transform_pin`）：
+///   只换**视图**，不动 `OpenPin.content` 与贴图环里那份**出厂原图**（「恢复原图」与
+///   「上一个/下一个」的源），也不写盘。想回原样：贴图右键「恢复原图」（m16）。
+pub struct ScriptImageSpec {
+    /// 目标贴图窗的句柄（= 脚本上下文里的 `ctx.hwnd`）。`0` = 不是从贴图触发的 ⇒ 直接失败。
+    pub hwnd: isize,
+    /// 新像素。
+    pub bitmap: std::sync::Arc<super::image::RgbaBitmap>,
+    /// 一次性回复：`Ok(())` = 已换；`Err(中文原因)` = 找不到那张窗 / 重建渲染对象失败。
+    reply: Mutex<Option<std::sync::mpsc::Sender<Result<(), String>>>>,
+}
+
+impl ScriptImageSpec {
+    /// 构造一次回写请求，交出回复端。
+    pub fn new(
+        hwnd: isize,
+        bitmap: std::sync::Arc<super::image::RgbaBitmap>,
+    ) -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<Result<(), String>>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            std::sync::Arc::new(Self {
+                hwnd,
+                bitmap,
+                reply: Mutex::new(Some(tx)),
+            }),
+            rx,
+        )
+    }
+
+    /// 交回结果。**只回一次**（`take`）：先回的那个算数，后来的空操作。
+    pub fn reply(&self, outcome: Result<(), String>) {
+        if let Some(tx) = self.reply.lock().unwrap().take() {
+            let _ = tx.send(outcome);
+        }
+    }
+}
+
+impl std::fmt::Debug for ScriptImageSpec {
+    /// 像素不进 `Debug`，只记句柄与尺寸。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptImageSpec")
+            .field("hwnd", &self.hwnd)
+            .field("w", &self.bitmap.w)
+            .field("h", &self.bitmap.h)
+            .finish()
+    }
+}
+
+/// 一个脚本要宿主弹的模态窗（`ext:result` = 只读正文，`ext:input` = 可编辑）。
+///
+/// ★ **形状是刻意的**：只有"标题 + 正文/初值 + 一次性回复"，没有控件树、没有回调。
+///   跨线程送不了 Lua 函数（`Runtime` 非 `Send`，窗只能在 UI 线程开），所以窗内的事件
+///   全部在 Rust 侧闭合，值确定后一次性回给工作线程。这样既不需要"signal + 回调进 Lua"
+///   那座桥，也没有"脚本已退出但窗还开着"的生命周期问题。常驻 / 自定义界面不属于这里，
+///   那类需求走外部程序（见 `.plan/m08-capability-route-and-host-dialog.md`）。
+pub struct ScriptDialogSpec {
+    /// 显示在窗内标题带上的文字（脚本给的，如「图片体检」）。
+    ///
+    /// ★ **不是**窗口标题：`TopmostKeeper::guard_aux` 是按标题找窗的，动态标题守不住。
+    ///   窗口标题恒为 `ui::script_dialog` 里的两个静态常量之一。
+    pub title: String,
+    /// 只读结果窗的正文。宿主按行切第一处分隔符自动排成两列（切不开的整行显示）。
+    pub body: String,
+    /// `true` = 可编辑输入窗（预填 [`Self::initial`]）；`false` = 只读结果窗。
+    pub editable: bool,
+    /// 输入窗的预填值。
+    pub initial: String,
+    /// 落点参照：**触发它的那个窗口的句柄**（贴图右键带来；面板里点「运行」传 0）。
+    ///
+    /// 为什么带句柄而不是坐标：frameless 的宿主窗要"落在手边"（跟标注输入窗同一条理由——
+    /// 双屏合计 3840 宽时屏幕中心离用户刚点的那一下可能差一整个屏幕）。由 UI 侧问一次
+    /// `platform::win_util::window_rect_hwnd` 拿矩形，工作线程不碰几何。
+    pub owner_hwnd: isize,
+    /// 一次性的回复出口：`Some(文本)` = 点了「确定」，`None` = 取消 / 关窗 / 结果窗被关掉。
+    ///
+    /// 用 `Mutex<Option<_>>` + `take`：**只回一次**。按钮先回，随后的关窗回调再想回就是
+    /// 空操作；反过来也一样。没人回而窗彻底销毁时，这里的 `Sender` 随 `Arc` 一起掉，
+    /// 工作线程的 `recv` 返回 `Err` ⇒ 按"取消"收尾，**不会挂死**。
+    reply: Mutex<Option<std::sync::mpsc::Sender<Option<String>>>>,
+}
+
+impl std::fmt::Debug for ScriptDialogSpec {
+    /// 手写信封：`Sender` 不进 `Debug`，正文只打长度（结果框里可能是整段 OCR 文本）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptDialogSpec")
+            .field("title", &self.title)
+            .field("body_len", &self.body.len())
+            .field("editable", &self.editable)
+            .finish()
+    }
+}
+
+impl ScriptDialogSpec {
+    /// 只读结果窗（`ext:result`、脚本返回的字符串）。构造时一并交出回复端。
+    pub fn result(
+        title: impl Into<String>,
+        body: impl Into<String>,
+        owner_hwnd: isize,
+    ) -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<Option<String>>,
+    ) {
+        Self::build(title.into(), body.into(), false, String::new(), owner_hwnd)
+    }
+
+    /// 可编辑输入窗（`ext:input`）。
+    pub fn input(
+        title: impl Into<String>,
+        initial: impl Into<String>,
+        owner_hwnd: isize,
+    ) -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<Option<String>>,
+    ) {
+        let initial = initial.into();
+        Self::build(title.into(), String::new(), true, initial, owner_hwnd)
+    }
+
+    fn build(
+        title: String,
+        body: String,
+        editable: bool,
+        initial: String,
+        owner_hwnd: isize,
+    ) -> (
+        std::sync::Arc<Self>,
+        std::sync::mpsc::Receiver<Option<String>>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            std::sync::Arc::new(Self {
+                title,
+                body,
+                editable,
+                initial,
+                owner_hwnd,
+                reply: Mutex::new(Some(tx)),
+            }),
+            rx,
+        )
+    }
+
+    /// 把结果送回工作线程。幂等：第二次及以后是空操作（按钮 + 关窗会各调一次）。
+    pub fn reply(&self, value: Option<String>) {
+        if let Ok(mut slot) = self.reply.lock() {
+            if let Some(tx) = slot.take() {
+                // 接收端已掉线（脚本线程已经退出）就放弃——这里不能 panic，
+                // 也不能把值留给下一个窗。
+                let _ = tx.send(value);
+            }
+        }
+    }
+
+    /// 是否已经回过人（`on_close_request` 用它决定要不要按"取消"补一次）。
+    pub fn replied(&self) -> bool {
+        self.reply
+            .lock()
+            .map(|slot| slot.is_none())
+            .unwrap_or(false)
+    }
 }
 
 /// 更新流程的一条后台事件。
@@ -453,8 +650,13 @@ pub enum UpdateEvent {
     CheckStarted,
     /// 已是最新版本。
     UpToDate { latest: String },
-    /// 有新版本，且拿到了下载地址。
-    Available { latest: String, url: String },
+    /// 有新版本，且拿到了下载地址 / 校验值 / HISTORY 说明。
+    Available {
+        latest: String,
+        url: String,
+        sha256: String,
+        notes: String,
+    },
     /// 检查失败（网络 / 解析 / 没有可下载的包）。
     CheckFailed { error: String },
     /// 下载进度（`total == 0` 表示服务端未给长度）。
@@ -465,4 +667,79 @@ pub enum UpdateEvent {
     DownloadFailed { error: String },
     /// 替换脚本已启动，本进程马上就退出。
     Launching,
+}
+
+/// 在线脚本库的一次用户动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreAction {
+    /// 拉取官方清单（`source` 为选中的镜像序号，失败时先试另一镜像、再回退缓存）。
+    RefreshCatalog { source: usize },
+    /// 安装或更新某个包（按 id；`source` 决定先试哪个镜像）。
+    Install { id: String, source: usize },
+    /// 卸载某个包（只删安装记录里登记的文件）。
+    Uninstall(String),
+}
+
+/// 清单里的一枚包 + "本机装没装"的合并视图（纯数据，可跨线程）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorePackRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub size: u64,
+    /// 本机已装的版本（`None` = 没装）。
+    pub installed_version: Option<String>,
+    /// 包的 `min_host` 高于当前宿主：列出但**不许装**（按钮置灰并说明原因）。
+    pub too_new: bool,
+    /// 包内文件数（**只有已装的知道**：来自安装记录；未装 = 0 = 未知）。
+    /// 详情窗用来回答"这个包会往 assets/lua 放多少文件"。
+    pub files: u64,
+    /// 当前清单里有哪些镜像地址（bit i = `store::SOURCE_LABELS[i]` 有地址）。
+    /// 选了某个来源、而这一项没有该来源的地址 ⇒ 行尾按钮置灰（与 RuPix 同一判据）。
+    pub source_mask: u8,
+    /// 作者 / 许可证 / 发行时间（来自清单，详情窗显示）。
+    pub author: String,
+    pub license: String,
+    pub released: String,
+    /// 需要的 Lua API 级别（与宿主 `store::LUA_API` 比较）。
+    pub api: u32,
+    /// 安装后体积（未压缩）与脚本文件数（清单侧）。
+    pub unpacked_size: u64,
+    pub file_count: u64,
+}
+
+/// 在线脚本库的进展事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreEvent {
+    /// 开始拉清单。
+    CatalogStarted,
+    /// 清单就绪（`note` 非空 = 走的是缓存 / 有需要说明的情况）。
+    CatalogReady {
+        rows: Vec<StorePackRow>,
+        note: String,
+    },
+    /// 清单拉取失败（没有可用缓存时）。
+    CatalogFailed { error: String },
+    /// 某个包开始下载（`total == 0` = 服务端未给长度）。
+    PackProgress {
+        id: String,
+        received: u64,
+        total: u64,
+    },
+    /// 安装/更新完成。
+    Installed {
+        id: String,
+        name: String,
+        version: String,
+        added: u64,
+        updated: u64,
+        removed: u64,
+    },
+    /// 安装/更新失败。
+    InstallFailed { id: String, error: String },
+    /// 卸载完成（`files` = 删掉的文件数）。
+    Uninstalled { id: String, files: u64 },
+    /// 卸载失败。
+    UninstallFailed { id: String, error: String },
 }

@@ -117,6 +117,18 @@ impl ScriptedClick {
         self.core.press(x, y);
     }
 
+    /// 抬起事件转发（按住态视觉用；缺 `on_mouse_up` 的脚本静默跳过）。
+    pub fn on_mouse_up(&mut self, button: crate::core::events::MouseButton, x: f32, y: f32) {
+        let name = match button {
+            crate::core::events::MouseButton::Left => "left",
+            crate::core::events::MouseButton::Right => "right",
+            crate::core::events::MouseButton::Middle => "middle",
+            crate::core::events::MouseButton::X1 => "x1",
+            crate::core::events::MouseButton::X2 => "x2",
+        };
+        self.core.release(name, x, y);
+    }
+
     /// 注入参数表（常驻通道参数重放）。
     pub fn set_params(&mut self, params: HashMap<String, Json>) {
         self.core.set_params(params);

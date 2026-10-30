@@ -1,6 +1,6 @@
 //! AI 对话提示词的两道资料门禁。
 //!
-//! AI 对话窗的能力来自随包的 API 速查（`assets/lua/scripts/ai_chat_api.txt`）——它不是
+//! AI 对话窗的能力来自官方包里的 API 速查（`CurSeen-Scripts/Packs/AI/scripts/ai_chat_api.txt`）——它不是
 //! 装饰：模型只知道这份文本里写过的事。所以要钉住两件事：
 //!   1. **覆盖**：权威源 `assets/lua/API.md` 回调表里列的每一项，速查里都得提到。
 //!      历史欠账：复合回调 `on_mouse_down` / `on_key` 漏写，用户问「怎么写响应鼠标 /
@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+/// 官方 AI 包根（同级 CurSeen-Scripts 仓库）。
+fn ai_pack_dir() -> PathBuf {
+    repo_root().join("../CurSeen-Scripts/Packs/AI")
 }
 
 fn read(path: &Path) -> String {
@@ -63,7 +68,7 @@ fn api_md_callback_names(md: &str) -> Vec<String> {
 #[test]
 fn ai_reference_covers_every_api_md_callback() {
     let md = read(&repo_root().join("assets/lua/API.md"));
-    let txt = read(&repo_root().join("assets/lua/scripts/ai_chat_api.txt"));
+    let txt = read(&ai_pack_dir().join("scripts/ai_chat_api.txt"));
 
     let names = api_md_callback_names(&md);
     assert!(
@@ -86,7 +91,7 @@ fn ai_reference_covers_every_api_md_callback() {
     assert!(
         missing.is_empty(),
         "AI 速查漏了 API.md 里的回调 {missing:?}（共 {} 项）\
-         ——请补进 assets/lua/scripts/ai_chat_api.txt",
+         ——请补进 CurSeen-Scripts/Packs/AI/scripts/ai_chat_api.txt",
         names.len()
     );
 }
@@ -94,11 +99,11 @@ fn ai_reference_covers_every_api_md_callback() {
 #[test]
 fn ai_reference_ships_into_build_directory() {
     for name in ["ai_chat_api.txt", "ai_chat.lua"] {
-        let src = repo_root().join("assets/lua/scripts").join(name);
+        let src = ai_pack_dir().join("scripts").join(name);
         let dst = repo_root()
             .parent()
             .unwrap()
-            .join("build/assets/lua/scripts")
+            .join("build/assets/lua/scripts/AI")
             .join(name);
         if !dst.exists() {
             println!(
@@ -120,7 +125,7 @@ fn ai_reference_ships_into_build_directory() {
 /// 就是在教 AI 写加载不出来的方案（2026-09-30 用户要求补虚拟键盘参考时一并钉住）。
 #[test]
 fn ai_reference_vk_example_is_valid_json_with_resolvable_references() {
-    let txt = read(&repo_root().join("assets/lua/scripts/ai_chat_api.txt"));
+    let txt = read(&ai_pack_dir().join("scripts/ai_chat_api.txt"));
 
     // 抽 ```json 围栏块。
     let mut blocks: Vec<String> = Vec::new();

@@ -50,6 +50,7 @@ pub fn build(host: &mut dyn PanelHost) -> Element {
             current,
             &model,
             host.update_state(),
+            host.store_state(),
             host.temp_usage_state(),
             host.ui_sender(),
         ))

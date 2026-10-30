@@ -1,6 +1,6 @@
 //! 全局设置页面。
 //!
-//! 快捷键、模块开关、图层覆盖、工作文件夹。★ 开关架构（2.0）：功能总开关 / 开机自启 /
+//! 快捷键、模块开关、高级（下载源 / 图层 / 工作文件夹 / 系统）。★ 开关架构（2.0）：功能总开关 / 开机自启 /
 //! 预设方案已全部废除——每个功能卡片自己的开关就是唯一开关（见各功能页），全局页只剩
 //! 真正的全局项。
 //!
@@ -95,6 +95,7 @@ use windui::prelude::*;
 use crate::core::events::UiMsg;
 use crate::ui::card::{self, FeatureCard};
 use crate::ui::model::{HotkeyField, PanelModel};
+use crate::ui::store_state::StoreState;
 use crate::ui::temp_usage::{self, TempUsageState};
 use crate::ui::tokens;
 use crate::ui::tokens::to_color;
@@ -220,6 +221,7 @@ pub(crate) const HOTKEY_ENTRIES: &[(&str, HotkeyField)] = &[
 /// 内容区（`panel::WIDTH` 616 − `nav::NAV_WIDTH` 66 = 550）− 滚动容器内边距 16×2 −
 pub fn build_global_page(
     m: &PanelModel,
+    store: StoreState,
     temp: TempUsageState,
     sender: Option<Sender<UiMsg>>,
 ) -> Element {
@@ -234,11 +236,8 @@ pub fn build_global_page(
     //   两组各只留一个（`global.switches` / `global.hotkey`）。
     let switches_expanded = m.expand("global.switches");
     let hotkey_expanded = m.expand("global.hotkey");
-    let overlay_expanded = m.expand("global.overlay");
-    // 「工作文件夹」卡（`<exe>/temp` 的占用 + 快捷入口）。
-    let temp_expanded = m.expand("global.temp");
-    // 「系统」卡（管理员权限启动勾选项）。
-    let system_expanded = m.expand("global.system");
+    // 「高级」卡（m69）：下载源 + 图层覆盖 + 工作文件夹 + 系统合并成的一张杂项卡。
+    let advanced_expanded = m.expand("global.advanced");
     let help_expanded = m.expand("global.help");
 
     // 控件列跟随标题列（见 `card::option_row`）：本页最长名是
@@ -272,8 +271,11 @@ pub fn build_global_page(
             // （`scripts/` 目录、排除键盘页专属的 keysound）——与脚本页同一入口，两边
             // 不可能走偏。MouseTrail/HoverDot/ClickFx 的特效脚本由鼠标页下拉承接
             // （下拉 ≠ 开关，没有可镜像的开关信号），不进本段。
-            let scripts: Vec<&crate::ui::model::LuaExtCard> = m
-                .lua_ext_cards
+            // ★ 这里是**建页那一刻的快照**（m33 把卡片表改成信号后仍是快照）：脚本页的
+            //   「刷新」只重建脚本页那张表，本页的镜像行要等重开面板才跟上。开关本身
+            //   照样即时生效（写回走 `apply_to`，它读的是信号当前值）。
+            let cards_now = m.lua_ext_cards.get();
+            let scripts: Vec<&crate::ui::model::LuaExtCard> = cards_now
                 .iter()
                 .filter(|c| c.is_script_card())
                 .collect();
@@ -283,7 +285,7 @@ pub fn build_global_page(
             if scripts.is_empty() {
                 col = col.child(
                     Element::label(
-                        "还没有可开关的脚本。往 assets/lua/scripts 放入 .lua 后重启即可。",
+                        "还没有可开关的脚本。往 assets/lua/scripts 放入 .lua（或解压一个包），会自动出现在这里。",
                     )
                     .font_size(tokens::FONT_MD)
                     .fg(to_color(tokens::TEXT_SECONDARY)),
@@ -342,7 +344,8 @@ pub fn build_global_page(
             col = col.child(card::divider()).child(card::group_label("脚本快捷键"));
             // ★ 先数一遍有没有脚本真的声明了 `hotkey` 参数：行数要在**建卡那一刻**就知道
             //   （空态提示与行是二选一），而 `host_signal` 的构建闭包是 `Fn`，塞不进计数器。
-            let any_script_hotkeys = m.lua_ext_cards.iter().filter(|c| c.is_script_card()).any(
+            let cards_now2 = m.lua_ext_cards.get();
+            let any_script_hotkeys = cards_now2.iter().filter(|c| c.is_script_card()).any(
                 |c| {
                     c.params
                         .get()
@@ -350,7 +353,7 @@ pub fn build_global_page(
                         .any(|cell| matches!(cell, crate::ui::model::EffectParamCell::Hotkey { .. }))
                 },
             );
-            for c in m.lua_ext_cards.iter().filter(|c| c.is_script_card()) {
+            for c in cards_now2.iter().filter(|c| c.is_script_card()) {
                 let params = c.params;
                 let name = c.name.clone();
                 let hk_cap = m.script_hotkey_cap;
@@ -392,49 +395,34 @@ pub fn build_global_page(
         .child(title)
         .child(body.visible_when(move || exp.get()));
 
-    // ── 图层覆盖（全局置顶：对**所有**屏幕工具生效，勾一次全体作用）──
+    // ── 高级（下载源 + 图层覆盖 + 工作文件夹 + 系统，m69 合并）──
     //
-    // 这两项原本藏在虚拟键盘页的「窗口行为」里，却管的是整层覆盖层的 z 序（拖尾 / 击键
-    // 回显 / 虚拟键盘都在同一层上），不该跟某个功能绑在一起 —— 搬到这里，对所有功能适用。
-    // 鼠标穿透是虚拟键盘私有属性，仍留在键盘页。
+    // ★ 2026-10-31 用户口径：三张薄卡（图层覆盖 2 行 / 工作文件夹 3 行 / 系统 1 行）
+    //   与商店卡的来源下拉合成一张——四件都是"全局、低频、一次设好"的杂项，各自撑一张
+    //   卡都偏空；卡名「高级」即这一格的共同语义（「选项」是空词：每张卡装的都是选项）。
     //
-    // ★ 2026-09-27 用户口径：卡名「覆盖层」→「图层覆盖」——它管的是整层覆盖层的 z 序，
-    //   "图层"比"覆盖"更贴切（覆盖层窗口本身仍叫覆盖层，代码注释不改）。
-    let (title, body, exp) = FeatureCard::new("图层覆盖", overlay_expanded)
-        .body(
-            Element::col()
-                .child(card::option_row(
-                    "总在最上",
-                    Element::checkbox("", m.vk_always_on_top),
-                    col1_w,
-                ))
-                .child(card::option_row(
-                    "全屏避让",
-                    Element::checkbox("", m.vk_fullscreen_avoid),
-                    col1_w,
-                )),
-        )
-        .build_title_row(col1_w, card::INDENT_CARD);
-    content = content
-        .child(title)
-        .child(body.visible_when(move || exp.get()));
-
-    // ── 工作文件夹（`<exe>/temp` 的占用 + 快捷入口）──
+    // 图层两行的行名带上「图层」二字：原卡名「图层覆盖」在解释这两项管的是整层覆盖层
+    // 的 z 序（对所有屏幕工具生效）；并卡后这层语境由行名承接。鼠标穿透是虚拟键盘私有
+    // 属性，仍留在键盘页。
     //
-    // 用户口径（2026-09-27）：设置页要能看见 `temp/` 有多大、并且一键跳过去。这两件事
-    // 是一体的——**看见数字**才知道该不该清，**跳过去**才是动手的地方；只给数字用户
-    // 还得自己去 `C:\...\CurSeen\temp` 里翻。卡名取「工作文件夹」而非「临时文件」：
-    // 里面堆的是用户自己的产物（截图 / 录屏 / 标注），"临时"两个字会让人以为可以随手清掉。
+    // 下载源控件正本在 `pages::store::source_dropdown`（来源标签表不建第二份），这里只摆
+    // 位置——商店与本体更新读的是同一个 `config.store.source`。
     //
-    // ★ 占用是**后台线程**算出来的（`ui::temp_usage`），这里只读信号。扫描几十毫秒起步，
-    //   而这段代码跑在建面板那一帧——留在 UI 线程就是"开面板卡一下"。
+    // 工作文件夹：`<exe>/temp` 的占用 + 快捷入口。原卡名由段名「工作文件夹」承接；
+    // 占用是**后台线程**算出来的（`ui::temp_usage`），这里只读
+    // 信号——扫描几十毫秒起步，留在 UI 线程就是"开面板卡一下"。
+    //
+    // 系统：勾选 = **下一次启动**走 UAC 提权（`main.rs` 启动分支读 `general.admin_launch`）；
+    // 当前进程权限不变，也没有"立即重启"入口。行名即状态（四态）：进程提权态在存活期内
+    // 不变，建面板时读一次；勾选态经 `map` 实时联动。
+    let now_elevated = crate::platform::elevate::is_elevated();
     let temp_dir = crate::core::paths::temp_dir();
-    let (title, body, exp) = FeatureCard::new("工作文件夹", temp_expanded)
+    let (title, body, exp) = FeatureCard::new("高级", advanced_expanded)
         .body({
             let open_target = temp_dir.clone();
             let open_btn = Element::button("打开文件夹").on_click(move |_ctx| {
                 // 只发起、不等：`ShellExecuteW` 把开资源管理器这件事交给系统，
-                // 失败由平台层记日志（这里没有可展示错误的地方，面板上还有路径可照抄）。
+                // 失败由平台层记日志（这里没有可展示错误的地方）。
                 //
                 // ★ 这一行 `info` 是**有意的**：这是唯一能区分"按钮没被点到"与"打开了但
                 //   系统没照做"的证据（真机验收时踩过——注入的点击没落到按钮上，日志里
@@ -445,6 +433,26 @@ pub fn build_global_page(
             // ★ 没有「刷新」按钮：占用**每次打开面板都会重算**，用户要新数字就重开面板
             //   ——为一个能被"重开"替代的动作常驻一个按钮，是白摆控件。
             Element::col()
+                .child(card::group_label("下载源"))
+                .child(card::option_row(
+                    "来源",
+                    crate::ui::pages::store::source_dropdown(store.source),
+                    col1_w,
+                ))
+                .child(card::divider())
+                .child(card::group_label("图层"))
+                .child(card::option_row(
+                    "图层总在最上",
+                    Element::checkbox("", m.vk_always_on_top),
+                    col1_w,
+                ))
+                .child(card::option_row(
+                    "图层全屏避让",
+                    Element::checkbox("", m.vk_fullscreen_avoid),
+                    col1_w,
+                ))
+                .child(card::divider())
+                .child(card::group_label("工作文件夹"))
                 .child(card::option_row(
                     "占用",
                     Element::label_signal(temp.text)
@@ -466,42 +474,27 @@ pub fn build_global_page(
                 ))
                 .child(card::option_row(
                     // ★ 空标签是**刻意的**：这一行只有按钮，而按钮必须落在**控件列**
-                    //   上——与上面「占用」「自动清理」两行的值同一条竖线。给这一行编一个
-                    //   「操作」之类的标签，只是为了给缩进找借口。
+                    //   上——与上面「占用」「自动清理」两行的值同一条竖线。
                     "",
                     Element::row().child(open_btn).cross(Align::Center),
                     col1_w,
                 ))
+                .child(card::divider())
+                .child(card::group_label("系统"))
+                .child(card::option_row_signal(
+                    m.admin_launch.map(move |on| {
+                        match (now_elevated, *on) {
+                            (false, false) => "管理员权限 (未启用)",
+                            (false, true) => "管理员权限 (重启后有效)",
+                            (true, false) => "管理员权限 (重启后取消)",
+                            (true, true) => "管理员权限 (已启用)",
+                        }
+                        .to_string()
+                    }),
+                    Element::checkbox("", m.admin_launch),
+                    col1_w,
+                ))
         })
-        .build_title_row(col1_w, card::INDENT_CARD);
-    content = content
-        .child(title)
-        .child(body.visible_when(move || exp.get()));
-
-    // ── 系统（管理员权限启动）──
-    //
-    // 勾选 = **下一次启动**走 UAC 提权（`main.rs` 启动分支读 `general.admin_launch`）；
-    // 当前进程的权限不变，也没有"立即重启"入口——用户自己退出再开，最简且无魔法。
-    // 出厂不勾：普通权限启动链路干净（无 UAC、无提权重启的启动状态残留）。
-    //
-    // ★ 行名即状态（2026-10-07 用户口径，四态）：**当前进程**（已启用/未启用）×
-    //   **勾选**（重启后生效/取消）两个维度直接写进行名，不另配说明行。
-    //   进程提权态在存活期内不变，建面板时读一次；勾选态经 `map` 实时联动。
-    let now_elevated = crate::platform::elevate::is_elevated();
-    let (title, body, exp) = FeatureCard::new("系统", system_expanded)
-        .body(Element::col().child(card::option_row_signal(
-            m.admin_launch.map(move |on| {
-                match (now_elevated, *on) {
-                    (false, false) => "管理员权限 (未启用)",
-                    (false, true) => "管理员权限 (重启后有效)",
-                    (true, false) => "管理员权限 (重启后取消)",
-                    (true, true) => "管理员权限 (已启用)",
-                }
-                .to_string()
-            }),
-            Element::checkbox("", m.admin_launch),
-            col1_w,
-        )))
         .build_title_row(col1_w, card::INDENT_CARD);
     content = content
         .child(title)
@@ -740,11 +733,9 @@ mod tests {
     fn script_switches_mirror_the_lua_page_cards() {
         let cfg = crate::core::config::Config::default();
         let m = PanelModel::from_config(&cfg);
-        let mirror: Vec<&crate::ui::model::LuaExtCard> = m
-            .lua_ext_cards
-            .iter()
-            .filter(|c| c.is_script_card())
-            .collect();
+        let cards = m.lua_ext_cards.get();
+        let mirror: Vec<&crate::ui::model::LuaExtCard> =
+            cards.iter().filter(|c| c.is_script_card()).collect();
         // 出厂脚本全关（2026-09-27 口径），镜像初值必须如实反映。
         for c in &mirror {
             assert!(
@@ -760,11 +751,7 @@ mod tests {
             );
         }
         // 脚本页出卡数 == 镜像行数（同一谓词，跑两遍防手抖改掉其中一处）。
-        let page_cards = m
-            .lua_ext_cards
-            .iter()
-            .filter(|c| c.is_script_card())
-            .count();
+        let page_cards = cards.iter().filter(|c| c.is_script_card()).count();
         assert_eq!(mirror.len(), page_cards);
     }
 
@@ -897,39 +884,66 @@ mod tests {
         );
     }
 
-    /// 「工作文件夹」卡三件事必须齐备：**占用（信号驱动的文本）** /
-    /// **打开目录按钮**，以及**打开面板时先算一次**。
+    /// 「高级」卡（m69，2026-10-31 用户口径）：下载源 + 图层 + 工作文件夹 + 系统四组
+    /// 合成**一张**卡。缺哪一组都不会报错——只是卡里少几行；这类退步在真机上要展开
+    /// 那张卡才看得见，所以在源码层钉住。
     ///
-    /// ★ 不摆「位置」行（2026-09-28 用户口径）：路径显示不全也抄不了，要过去点
-    ///   「打开文件夹」就行——负面钉住，防止它被"顺手加回来"。
-    ///
-    /// 缺哪一样都不会报错——那张卡只是少一行、或者点了没反应。这类退步在真机上要
-    /// 点到那张卡才看得见，所以在源码层钉住。
+    /// 工作文件夹组要齐备：**占用（信号驱动的文本）** / **打开目录按钮**，以及**打开
+    /// 面板时先算一次**。★ 不摆「位置」行（2026-09-28 用户口径）：路径显示不全也抄不了，
+    /// 要过去点「打开文件夹」就行——负面钉住，防止它被"顺手加回来"。
     #[test]
-    fn temp_card_wires_path_size_button_and_the_initial_scan() {
+    fn advanced_card_holds_all_four_merged_groups() {
         let p = production_src();
         for needle in [
-            "FeatureCard::new(\"工作文件夹\"",
-            "m.expand(\"global.temp\")",
+            "FeatureCard::new(\"高级\"",
+            "m.expand(\"global.advanced\")",
+            // 下载源：控件正本在 pages::store，这里只摆位置。段名（红字）给整组定名，
+            // 行标签只留「来源」——段名已经说了"下载源"，行名不必再重复一遍。
+            "card::group_label(\"下载源\")",
+            "\"来源\"",
+            "store::source_dropdown(",
+            // 图层组：行名带「图层」，承接原卡名的语境。
+            "card::group_label(\"图层\")",
+            "\"图层总在最上\"",
+            "\"图层全屏避让\"",
+            "m.vk_always_on_top",
+            "m.vk_fullscreen_avoid",
+            // 工作文件夹组。
+            "card::group_label(\"工作文件夹\")",
             "\"占用\"",
             "\"打开文件夹\"",
-            // 打开目录走平台层的收口函数，不在这页自己拼 `explorer.exe` 命令行。
             "open_in_explorer",
-            // 首次统计（建面板那一帧）——走后台线程那条通路。
             "temp_usage::spawn_scan",
+            "m.temp_cleanup",
+            // 系统组：行名即状态（四态）。
+            "card::group_label(\"系统\")",
+            "管理员权限 (未启用)",
+            "管理员权限 (重启后有效)",
+            "管理员权限 (重启后取消)",
+            "管理员权限 (已启用)",
+            "m.admin_launch",
+            "option_row_signal(",
         ] {
-            assert!(p.contains(needle), "设置页「工作文件夹」卡缺少：{needle}");
+            assert!(p.contains(needle), "设置页「高级」卡缺少：{needle}");
+        }
+        // 合并后旧卡名不得残留（否则等于两张卡各有一半）。
+        for gone in [
+            "FeatureCard::new(\"图层覆盖\"",
+            "FeatureCard::new(\"工作文件夹\"",
+            "FeatureCard::new(\"系统\"",
+        ] {
+            assert!(!p.contains(gone), "已合并的独立卡不该还在：{gone}");
         }
         // ★ 负面：卡里不得再出现「刷新」按钮——占用**每次打开面板都会重算**，那个按钮
         //   纯属白摆的控件（2026-09-27 用户口径）。它很容易被"顺手加回来"，所以钉住。
         assert!(
             !p.contains("\"刷新\""),
-            "「工作文件夹」卡不该再有「刷新」按钮（重开面板即是重算）"
+            "「高级」卡不该有「刷新」按钮（重开面板即是重算）"
         );
         // ★ 负面：「位置」行已删——路径文本显示不全，等于白摆一行。
         assert!(
             !p.contains("\"位置\""),
-            "「工作文件夹」卡不该再有「位置」行（显示不全，要过去用「打开文件夹」）"
+            "「高级」卡不该再有「位置」行（显示不全，要过去用「打开文件夹」）"
         );
     }
 
@@ -991,22 +1005,18 @@ mod tests {
         assert!(body.contains("font_weight(600)"), "段名必须加粗");
     }
 
-    /// 「系统」卡（2026-10-07）：管理员权限勾选项必须齐备——行名即状态（四态：当前
-    /// 进程权限 × 勾选，随勾选联动）、勾选信号绑定，以及 CARD_IDS 里的卡片 id。
+    /// m69（用户口径）：官方资源下载卡**不在设置页了**——整卡搬到脚本页并固定排第一。
+    /// 这里钉住"不回来"：两处各挂一张的话，展开态与刷新状态会在两个入口间打架。
+    /// 正向的"挂在脚本页且是第一张"由 `pages::lua` 的同名门禁负责。
     #[test]
-    fn system_card_wires_admin_launch_toggle_and_hint() {
+    fn settings_page_no_longer_mounts_the_official_store_card() {
         let p = production_src();
-        for needle in [
-            "FeatureCard::new(\"系统\"",
-            "m.expand(\"global.system\")",
-            "管理员权限 (未启用)",
-            "管理员权限 (重启后有效)",
-            "管理员权限 (重启后取消)",
-            "管理员权限 (已启用)",
-            "m.admin_launch",
-            "option_row_signal(",
+        for gone in [
+            "build_store_card",
+            "m.expand(\"global.store\")",
+            "FeatureCard::new(\"官方资源下载\"",
         ] {
-            assert!(p.contains(needle), "设置页「系统」卡缺少：{needle}");
+            assert!(!p.contains(gone), "设置页不该再挂官方资源下载卡：{gone}");
         }
     }
 }

@@ -23,6 +23,7 @@ pub fn build_content(
     current: Signal<usize>,
     m: &PanelModel,
     update: UpdateState,
+    host_store: crate::ui::store_state::StoreState,
     temp_usage: TempUsageState,
     sender: Option<Sender<UiMsg>>,
 ) -> Element {
@@ -43,18 +44,22 @@ pub fn build_content(
             pages::tool::build_tool_page(m).visible_signal(current.map(|c| *c == nav::NAV_TOOL)),
         )
         .child(
-            // 设置页的「工作文件夹」卡要统计占用（后台线程）与打开目录，依赖从这里注入。
-            pages::global::build_global_page(m, temp_usage, sender.clone())
+            // 设置页的「工作文件夹」占用统计（后台线程）由这里注入；m69 起「高级」卡
+            // 还摆着商店/更新共用的下载源下拉（只取 `StoreState::source`）。
+            pages::global::build_global_page(m, host_store.clone(), temp_usage, sender.clone())
                 .visible_signal(current.map(|c| *c == nav::NAV_GLOBAL)),
         )
         .child(
-            // 关于页要更新按钮（检查/下载），它的两条外部依赖从这里注入。
-            pages::about::build_about_page(update, sender.clone())
+            // 关于页要更新按钮（检查/下载），它的外部依赖从这里注入；来源灰字与商店卡
+            // 读同一个信号（`StoreState::source`），不新增第二份来源状态。
+            pages::about::build_about_page(update, sender.clone(), host_store.source)
                 .visible_signal(current.map(|c| *c == nav::NAV_ABOUT)),
         )
         .child(
-            // 脚本页（原 Lua 页）：列 `assets/lua` 每脚本一张卡，配置参数（运行交给各自宿主）。
-            pages::lua::build_lua_page(m).visible_signal(current.map(|c| *c == nav::NAV_LUA)),
+            // 脚本页（原 Lua 页）：**官方资源下载是固定第一张卡**（m69），其下是
+            // `assets/lua` 每脚本一张卡。商店卡的清单/安装状态与发意图的通道从这里注入。
+            pages::lua::build_lua_page(m, host_store, sender.clone())
+                .visible_signal(current.map(|c| *c == nav::NAV_LUA)),
         )
         .weight(1.0)
 }

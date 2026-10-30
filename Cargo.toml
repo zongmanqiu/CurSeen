@@ -30,6 +30,29 @@ path = "examples/shape_probe.rs"
 [[example]]
 name = "text_in_box_probe"
 path = "examples/text_in_box_probe.rs"
+# CursorX 扩展包离屏预览：24 个脚本各跑 90 帧，产出 PNG 联系表（temp/cursorx_preview/）。
+# 只读、不开窗、不改系统状态；Difference Blend / Fluid Glass 走静态回退分支。
+[[example]]
+name = "cursorx_preview"
+path = "examples/cursorx_preview.rs"
+# MFCMouseEffect 扩展包离屏预览：25 个脚本按通道触发后产出 PNG 联系表。
+[[example]]
+name = "mfcmouse_preview"
+path = "examples/mfcmouse_preview.rs"
+# MouseEffects 扩展包离屏预览：33 个脚本按通道触发后产出 PNG 联系表。
+[[example]]
+name = "mouseeffects_preview"
+path = "examples/mouseeffects_preview.rs"
+# 脚本文本窗（m08）离屏预览：跑生产执行器取出厂脚本的真实文本，再画生产同一个内容树。
+# 只读、不开窗、不碰剪贴板；产出 temp/script_dialog_preview/contact.png。
+[[example]]
+name = "script_dialog_preview"
+path = "examples/script_dialog_preview.rs"
+# m10/m13 端到量具：生产脚本 + 外置引擎文件（臂 1 外置 / 1b 码页开关 / 2 同名假工具 / 3 没装引擎）。
+# 只读那一臂用 `CURSEEN_OCR_PACK=<脚本根目录>` 对着真实安装目录验，不改任何东西。
+[[example]]
+name = "ext_proc_ocr"
+path = "examples/ext_proc_ocr.rs"
 [[example]]
 name = "gen_update_bat"
 path = "examples/gen_update_bat.rs"
@@ -125,6 +148,17 @@ env_logger = "0.11"
 # ── 图片解码：托盘图标 / 关于页二维码（PNG）/ 悬浮标图片 ──
 png = "0.18"
 
+# ── ZIP 解压（m32，脚本的 ext:unzip）──
+#    ★ 只为了 DEFLATE 解压：这个 crate **早就被 `png` 作为传递依赖链进来了**
+#      （`Cargo.lock` 里已有 flate2 + miniz_oxide），显式声明只是"合法地直接用"，
+#      不改变产物体积。纯 Rust，无 C 依赖。ZIP 容器的解析在我们自己手里
+#      （`platform/unzip.rs`）——只认 stored / deflate 两种方法，够覆盖现实里几乎所有的包。
+flate2 = "1"
+
+# ── 更新包完整性（update.json 的 sha256）──
+# 只用于本体的更新包校验；纯 Rust，不引入 TLS/系统库依赖。
+sha2 = "0.10"
+
 # ── SVG 光栅化：仅 `icon-gen` 特性下用（examples/gen_icon.rs，图标/二维码源 → 位图产物）。
 #    依赖是 optional 的：默认构建/测试完全不编译它，换图标时才随 feature 拉进来。
 #    linebender 接管后 0.45+ 许可为 Apache-2.0 OR MIT；纯 Rust，无 C 依赖。
@@ -216,11 +250,18 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     # 剪贴板（截图后直接可粘贴）：CF_DIB 是 Paint / 微信 / Word 都认的通用格式
+    # ★ 码页转换（`platform/process.rs` 的 `ansi_to_string` / `GetACP`）：外部程序的输出编码
+    #   只有调用方能声明，宿主必须解得开。**这两只函数过去只是蹭 windui 的 feature 合并才编得
+    #   过**——那是别人的清单，不该是我们的运气（m13 显式钉住，谁以后裁剪 feature 会当场红）。
+    "Win32_Globalization",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     # 剪贴板条目 meta 行：unix 秒 → 本地时间（FileTimeToLocalFileTime 链路，
     # ★ 同组 API 分属两个 feature：Local 挂 Storage::FileSystem、SystemTime 挂 System::Time）
     "Win32_Storage_FileSystem",
+    # 目录监听（m35：`platform/dir_watch.rs` 的 `ReadDirectoryChangesW`）需要
+    # `OVERLAPPED`/`LPOVERLAPPED_COMPLETION_ROUTINE` 的类型定义（即使我们传 None）。
+    "Win32_System_IO",
     "Win32_System_Time",
     # 录屏音频设备枚举：IPropertyStore（读友好名）+ PKEY_Device_FriendlyName
     "Win32_UI_Shell_PropertiesSystem",
@@ -267,6 +308,12 @@ icon-gen = ["dep:resvg"]
 # ★ 无构建依赖（`[build-dependencies]` 整段为空，故不列）。exe 图标是 `build.rs` 自己
 #   调 Windows SDK 的 `rc.exe` 编 `build/app.rc`（→ `assets/icons/app.ico`）后链进去的，
 #   不需要 `embed-resource`：机器上没有 SDK 时只是"没图标"，不该因此装不上依赖、编不过。
+
+[dev-dependencies]
+# 离屏预览（examples/script_dialog_preview.rs）要直接握 `Pixmap` 做合成与 PNG 编码。
+# 版本必须与 windui 用的那个对齐（windui 依赖 tiny-skia 0.12），否则会编出两份光栅器。
+# ★ 只在 dev 档出现：**不进发布产物**，`cargo build --release --bin curseen` 不链它。
+tiny-skia = "0.12"
 
 # ★ 2026-09-25 大扫除：原 [features] 段（layered-overlay/dev-overlay-grid/screenshot-mode）
 #   删除——三个 feature 在全部源码里 0 处 `cfg(feature)` 消费，纯死配置

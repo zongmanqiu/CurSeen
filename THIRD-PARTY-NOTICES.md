@@ -57,6 +57,7 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 | `resvg` / `usvg`（**optional**，仅 `icon-gen` feature） | 0.48.x | Apache-2.0 OR MIT | **构建期**把 SVG 图标 / 二维码源光栅化成位图产物（`examples/gen_icon.rs`）。默认不编译，**既不进 exe 也不随包分发**——产物位图是它的输出，不受其许可约束 |
 | `gif` | 0.13.x | MIT OR Apache-2.0 | 悬浮标「图片」类型的 GIF 动画帧解码 |
 | `ureq`（native-tls + gzip） | 3.x | MIT OR Apache-2.0 | 更新检查与下载 |
+| `sha2` | 0.10.x | MIT OR Apache-2.0 | 本体更新包 `update.json` 的 sha256 校验 |
 | `native-tls`（Windows 侧落到 `schannel`） | 0.2.x | MIT OR Apache-2.0 | `ureq` 的 TLS 后端；加解密与信任链实际由**系统** Schannel 完成（2026-10-08 起取代 `rustls` + `ring`，理由见 `Cargo.toml` 注释） |
 | `chrono` | 0.4.x | MIT OR Apache-2.0 | 时间戳（日志 / 产物命名） |
 | `rand` | 0.8.x | MIT OR Apache-2.0 | 特效随机量 |
@@ -85,6 +86,19 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 
 > CC0 1.0 不要求署名，但本包仍随附其全文（`licenses/CC0-1.0.txt`）与来源声明——
 > 便于接收者核验素材出处。素材清单与格式说明见 `assets/Sounds/README.md`。
+
+## 二c、随包分发的 Lua 扩展包（非代码依赖）
+
+| 扩展包 | 许可证 | 来源 | 说明 |
+|---|---|---|---|
+| `assets/lua/scripts/CursorFX/` | AGPL-3.0（CurSeen） | 参考与致谢：<https://github.com/devkancheti4-design/cursorfx>（上游 MIT） | 42 个效果的 CurSeen Lua 独立重实现；未复制原项目图片/音频/GIF。包内 `LICENSE` / `README.md` 随包分发。 |
+| `assets/lua/scripts/CursorX/` | AGPL-3.0（CurSeen） | 参考与致谢：<https://github.com/Felix-au/CursorX-Interactive-Cursor-Effects>（上游 MIT） | 24 个光标效果的 CurSeen Lua 独立重实现；未复制原项目图片/音频/其它素材。包内 `LICENSE` / `README.md` 随包分发。 |
+| `assets/lua/scripts/MFCMouseEffect/` | AGPL-3.0（CurSeen） | 参考与致谢：<https://github.com/sqmw/MFCMouseEffect>（上游 MIT） | 25 个效果的 CurSeen Lua 独立重实现；未复制原项目代码/图片/音频/3D 模型。包内 `LICENSE` / `README.md` 随包分发。 |
+
+> 这些脚本是 CurSeen 的独立 Lua 重实现（效果名保留原库原名），不是上游代码的
+> 直接拷贝。这里提到 CursorFX / CursorX / MFCMouseEffect 是为了说明效果来源并致谢；
+> 上游版权归其作者，不代表上游对本目录代码主张版权。`LICENSE` 与每个脚本头注释均保留
+> 来源说明。
 
 ## 三、系统组件（不随程序分发，运行时调用）
 

@@ -1,0 +1,158 @@
+[
+  {
+    "id": "CursorFX",
+    "name": "CursorFX",
+    "version": "0.2.0",
+    "description": "42 个鼠标光标特效：17 个光标（blob、clock、crosshair、emoji、f1car、ghost、gun-pistol、gun-rifle、gun-shotgun、gun-sniper、orb、pixel、ribbon、ring、rocket、spotlight、textflag）、9 个拖尾（bubbles、emojirain、fire、neon、petals、rainbow、snow、sparkles、stars）、16 个点击（animals、birds、bubbles、butterflies、confetti、emojiburst、fireworks、gunshot、hearts、ink、notes、ripple、shockwave、stars、textburst、waves）。",
+    "size": 98528,
+    "min_host": "2.0.5",
+    "dir": "Packs/CursorFX",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/CursorFX_0.2.0/CursorFX_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/CursorFX_0.2.0/CursorFX_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 234026,
+    "file_count": 46
+  },
+  {
+    "id": "CursorX",
+    "name": "CursorX",
+    "version": "0.2.0",
+    "description": "24 个鼠标光标特效：Magnetic、Particle Trail、Spotlight、Morphing Blob、Pixel Shatter、Elastic Ring、Neon Glow、Text Orbiter、Gravity Pull、Constellation、Fire Trail、Crosshair Scope、Mirror Ghost、Rainbow Comet、Bubble Float、Ripple Wave、Glitch Shift、Wind Stream、DNA Helix、Torch Light、Difference Blend、Ghost Trail、Audio Pulse、Fluid Glass；含桌面镜片与悬停态。",
+    "size": 51960,
+    "min_host": "2.0.5",
+    "dir": "Packs/CursorX",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/CursorX_0.2.0/CursorX_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/CursorX_0.2.0/CursorX_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 114733,
+    "file_count": 28
+  },
+  {
+    "id": "MFCMouseEffect",
+    "name": "MFCMouseEffect",
+    "version": "0.2.0",
+    "description": "25 个鼠标特效：点击（Ripple、Star、Text）、拖尾（Meteor Shower、Neon Streamer、Cyber Electric、Sci-Fi Tubes、Particle、Line）、滚轮（Arrow、3D Helix、Stardust Stream）、按住（Energy Charge、Lightning、Hex Shield、Tech Ring (3D)、Hologram (3D)、Neon HUD (3D)、FluxField HUD CPU）、悬停（Glow、Helix Suspension）与光标装饰（Focus Ring、Signal Ring、Soft Orb、Halo Orb）。",
+    "size": 50438,
+    "min_host": "2.0.5",
+    "dir": "Packs/MFCMouseEffect",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/MFCMouseEffect_0.2.0/MFCMouseEffect_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/MFCMouseEffect_0.2.0/MFCMouseEffect_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 111147,
+    "file_count": 29
+  },
+  {
+    "id": "MouseEffects",
+    "name": "MouseEffects",
+    "version": "0.2.0",
+    "description": "33 个鼠标环境/粒子特效：点击（Confetti、Crystal Growth、Firework、Ink Blot、Pixel Explosion、Shockwave）、拖尾（Circuit、Fire Trail、Laser Work、Particle Trail、Pixie Dust、Smoke）、常驻（Aurora、Nebula、Falling Leaves、Fireflies、Hearts、Tesla 等 21 个光标效果）。",
+    "size": 69192,
+    "min_host": "2.0.5",
+    "dir": "Packs/MouseEffects",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/MouseEffects_0.2.0/MouseEffects_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/MouseEffects_0.2.0/MouseEffects_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 153402,
+    "file_count": 37
+  },
+  {
+    "id": "AI",
+    "name": "AI 写脚本",
+    "version": "0.1.0",
+    "description": "AI 写脚本：多轮对话让 AI 帮你编写、修改 CurSeen 的 Lua 脚本；系统提示词自带 CurSeen Lua API 速查，可填 API 地址、模型与 API Key，支持快捷键呼出对话窗。",
+    "size": 23606,
+    "min_host": "2.0.5",
+    "dir": "Packs/AI",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/AI_0.1.0/AI_0.1.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/AI_0.1.0/AI_0.1.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 56462,
+    "file_count": 6
+  },
+  {
+    "id": "ImageReport",
+    "name": "图片体检",
+    "version": "0.2.0",
+    "description": "对当前贴图做图片体检：尺寸、比例、透明度、颜色、主色板、WCAG 对比度、拉普拉斯清晰度；结果进文本窗，可复制为 Markdown。",
+    "size": 8032,
+    "min_host": "2.0.5",
+    "dir": "Packs/ImageReport",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/ImageReport_0.2.0/ImageReport_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/ImageReport_0.2.0/ImageReport_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 18642,
+    "file_count": 5
+  },
+  {
+    "id": "OCR",
+    "name": "OCR 文字识别",
+    "version": "0.3.0",
+    "description": "OCR 文字识别：识别贴图或剪贴板截图中的中英文文字，结果进文本窗并默认复制；官方离线工具随包，装包即用，不需要自备引擎。",
+    "size": 21154879,
+    "min_host": "2.0.5",
+    "dir": "Packs/OCR",
+    "tool": "ocr",
+    "tool_dest": "ocr_tool",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/OCR_0.3.0/OCR_0.3.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/OCR_0.3.0/OCR_0.3.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 1,
+    "unpacked_size": 33025668,
+    "file_count": 10
+  },
+  {
+    "id": "Barcode",
+    "name": "条码识别",
+    "version": "0.2.0",
+    "description": "条码识别：识别二维码与一维条码，结果进文本窗；网址可直接打开，图片字节可用系统默认程序打开。",
+    "size": 774934,
+    "min_host": "2.0.5",
+    "dir": "Packs/Barcode",
+    "tool": "barcode",
+    "tool_dest": "barcode_tool",
+    "urls": {
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/Barcode_0.2.0/Barcode_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/Barcode_0.2.0/Barcode_0.2.0.zip"
+    },
+    "author": "CurSeen",
+    "license": "AGPL-3.0",
+    "released": "2026-10-30",
+    "api": 2,
+    "unpacked_size": 1486805,
+    "file_count": 6
+  }
+]

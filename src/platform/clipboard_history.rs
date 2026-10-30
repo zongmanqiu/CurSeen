@@ -415,6 +415,9 @@ const THUMB_MAX_W: i32 = 720;
 /// 文件条目本来就是引用原路径，粘回去仍是原文件。
 const FILE_THUMB_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
+/// 通用读图（m21）沿用的**同一个**文件体积上限：两处说清是同一个来源，别立第二把尺子。
+pub(crate) const MAX_IMAGE_FILE_BYTES: u64 = FILE_THUMB_MAX_BYTES;
+
 /// 全尺寸原件目录（`images/`）的**告知线**：达到就对用户提示一次。
 ///
 /// 为什么不设硬上限（2026-10-02 用户口径）：剪贴板历史是"我不想丢的东西"，为了省空间
@@ -772,38 +775,14 @@ fn thumbnail_of(shot: &Shot, max_w: i32) -> Shot {
     }
 }
 
+/// PNG 文件 → 全尺寸位图。
+///
+/// ★ 实现已挪到 [`crate::platform::screenshot::load_png`]（m14）：那边是 `save_png` 的语义
+/// 对家，而脚本侧也要读图（`ext:load_image`），两处必须共用一份解码。这里保留同名薄委托，
+/// 因为这个模块里那四条调用链与两条"落盘再读回"的测试都认这个名字。
 fn shot_from_png(path: &std::path::Path) -> Option<Shot> {
-    use std::io::BufReader;
-    let f = std::fs::File::open(path).ok()?;
-    let dec = png::Decoder::new(BufReader::new(f));
-    let mut r = dec.read_info().ok()?;
-    let mut buf = vec![0u8; r.output_buffer_size().unwrap_or(0)];
-    let info = r.next_frame(&mut buf).ok()?;
-    buf.truncate(info.buffer_size());
-    let (w, h) = (info.width as i32, info.height as i32);
-    let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
-    match info.color_type {
-        png::ColorType::Rgba => {
-            for (px, b) in bgra.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
-                px[0] = b[2];
-                px[1] = b[1];
-                px[2] = b[0];
-                px[3] = b[3];
-            }
-        }
-        png::ColorType::Rgb => {
-            for (px, b) in bgra.chunks_exact_mut(4).zip(buf.chunks_exact(3)) {
-                px[0] = b[2];
-                px[1] = b[1];
-                px[2] = b[0];
-                px[3] = 255;
-            }
-        }
-        _ => return None,
-    }
-    Some(Shot { w, h, bgra })
+    crate::platform::screenshot::load_png(path)
 }
-
 /// 看着像图片扩展名？只用来挡住明显不是图片的文件（exe / zip / 视频…），别让
 /// worker 为它们白跑一次 IO。能不能真的解出来交给 WIC——系统没装对应解码器时
 /// （本机 WebP 就缺），`CreateDecoderFromFilename` 会直接失败，这里静默跳过。
@@ -851,7 +830,21 @@ fn is_image_ext(path: &str) -> bool {
 /// ② **顺序必须是先 scaler 再 converter**。反过来的话会先把全尺寸解码出来再缩，
 ///    4000×3000 实测峰值 **45.8MB**（decoder 会拉整幅缓冲）；先缩则全程只占
 ///    720×540×4 = **1.48MB**，而且更快（同一张 big.jpg：全解 21ms → 先缩 9ms）。
-fn decode_image_file(factory: &IWICImagingFactory, path: &str) -> Option<Shot> {
+pub(crate) fn decode_image_file(factory: &IWICImagingFactory, path: &str) -> Option<Shot> {
+    decode_image_with_target(factory, path, Some(THUMB_MAX_W as u32))
+}
+
+/// 同一条 WIC 链，**目标宽度是参数**（m21）：`None` = 原尺寸（跳过 scaler）。
+///
+/// ★ 为什么必须共用这一份：`frame → [scaler] → converter → CopyPixels` 的四步、
+///   以及"必须过 converter 才拿得到 BGRA"（见上面那段实测），都是这条链的**规则**；
+///   抄一份出来给"读图"用，等于让两条路各记一套规则——一条改了另一条不会红。
+///   共用之后唯一的差别就是缩放目标：缩略图给 `Some(720)`，读文件给 `None`。
+pub(crate) fn decode_image_with_target(
+    factory: &IWICImagingFactory,
+    path: &str,
+    target_w: Option<u32>,
+) -> Option<Shot> {
     unsafe {
         let dec = factory
             .CreateDecoderFromFilename(
@@ -867,18 +860,35 @@ fn decode_image_file(factory: &IWICImagingFactory, path: &str) -> Option<Shot> {
         if w == 0 || h == 0 {
             return None;
         }
-        // WIC 的 Fant 重采样比 [`thumbnail_of`] 的最近邻好得多，所以这里直接缩到目标宽，
-        // 不再二次采样。窄图也不放大，与 `thumbnail_of` 同一口径。
-        let nw = (THUMB_MAX_W as u32).min(w);
-        let nh = ((h as f64) * (nw as f64 / w as f64)).max(1.0) as u32;
-        let scaler: IWICBitmapScaler = factory.CreateBitmapScaler().ok()?;
-        scaler
-            .Initialize(&frame, nw, nh, WICBitmapInterpolationModeFant)
-            .ok()?;
+        // 目标宽度：缩略图那条给 720（窄图不放大），读文件那条给 `None` = **原尺寸**。
+        // 原尺寸时**不建 scaler**：多一道 Fant 重采样没有意义，还多一次整幅拷贝。
+        let (nw, nh, scaled) = match target_w {
+            Some(t) => {
+                let nw = t.min(w);
+                let nh = ((h as f64) * (nw as f64 / w as f64)).max(1.0) as u32;
+                (nw, nh, true)
+            }
+            None => (w, h, false),
+        };
+        let scaler: Option<IWICBitmapScaler> = if scaled {
+            // WIC 的 Fant 重采样比 [`thumbnail_of`] 的最近邻好得多，所以这里直接缩到目标宽，
+            // 不再二次采样。窄图也不放大，与 `thumbnail_of` 同一口径。
+            let sc: IWICBitmapScaler = factory.CreateBitmapScaler().ok()?;
+            sc.Initialize(&frame, nw, nh, WICBitmapInterpolationModeFant)
+                .ok()?;
+            Some(sc)
+        } else {
+            None
+        };
 
         let conv: IWICFormatConverter = factory.CreateFormatConverter().ok()?;
+        // 源：缩过就用 scaler，原尺寸就直接用 frame（都是 `IWICBitmapSource`）
+        let source: IWICBitmapSource = match &scaler {
+            Some(sc) => sc.cast::<IWICBitmapSource>().ok()?,
+            None => frame.cast::<IWICBitmapSource>().ok()?,
+        };
         conv.Initialize(
-            &scaler,
+            &source,
             &GUID_WICPixelFormat32bppBGRA as *const _,
             WICBitmapDitherTypeNone,
             None,
@@ -908,12 +918,12 @@ fn decode_image_file(factory: &IWICImagingFactory, path: &str) -> Option<Shot> {
 ///
 /// ★ 用守卫不手写配对：worker 平时跑 `recv()` 卡着不退出，但如果 SendError 让它
 ///   掉出循环（面板关闭），退出路径也得回收——RAII 覆盖全部路径。
-struct ComGuard {
+pub(crate) struct ComGuard {
     live: bool,
 }
 
 impl ComGuard {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let live = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
         Self { live }
     }

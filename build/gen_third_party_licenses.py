@@ -54,6 +54,7 @@ COMPONENTS = [
     ("png", "PNG 编解码", "https://github.com/image-rs/image-png"),
     ("gif", "GIF 解码", "https://github.com/image-rs/image-gif"),
     ("ureq", "HTTP 客户端（更新检查）", "https://github.com/algesten/ureq"),
+    ("sha2", "sha256 校验（本体更新包）", "https://github.com/RustCrypto/hashes"),
     ("chrono", "日期时间", "https://github.com/chronotope/chrono"),
     ("rand", "随机数", "https://github.com/rust-random/rand"),
     ("toml", "TOML 解析（经 windui）", "https://github.com/toml-rs/toml"),

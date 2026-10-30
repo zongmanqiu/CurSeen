@@ -19,9 +19,13 @@ pub mod model;
 pub mod nav;
 pub mod pages;
 pub mod panel;
+/// 脚本用的宿主模态窗（`ext:result` / `ext:input`）。
+pub mod script_dialog;
 pub mod sfx;
+pub mod store_state;
 pub mod temp_usage;
 pub mod tokens;
+pub mod update_window;
 
 // 重新导出主要组件
 pub use card::FeatureCard;

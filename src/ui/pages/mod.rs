@@ -12,5 +12,6 @@ pub mod global;
 pub mod key_display;
 pub mod lua;
 pub mod screen;
+pub mod store;
 pub mod tool;
 pub mod trail;

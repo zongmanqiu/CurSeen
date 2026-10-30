@@ -47,6 +47,11 @@ pub trait PanelHost {
     /// 必须拿到能拷贝进去的东西。
     fn update_state(&self) -> UpdateState;
 
+    /// 在线脚本库状态（m36）：行表 / 状态行 / 忙碌位 / 两段式卸载的待确认项。
+    ///
+    /// 与 [`Self::update_state`] 同款：`Signal` 组成的值，只能由宿主（UI 线程）持有并拷进面板。
+    fn store_state(&self) -> crate::ui::store_state::StoreState;
+
     /// 设置页「工作文件夹」卡的状态（`<exe>/temp` 的占用文本 + 统计重入位）。
     ///
     /// 与 [`Self::update_state`] 同款：`Signal` 组成的值，只能由宿主（UI 线程）持有并

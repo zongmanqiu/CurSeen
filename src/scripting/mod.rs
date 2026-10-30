@@ -12,6 +12,9 @@ pub mod fs_api;
 pub mod registry;
 pub mod registry_ext;
 pub mod runtime;
+pub mod store;
+pub mod store_task;
 
 pub use engine::ScriptingEngine;
 pub use registry::{EffectSchema, LuaEffectRegistry, ParamDef, ParamType};
+pub use registry_ext::ExtSchema;

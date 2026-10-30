@@ -468,6 +468,20 @@ pub fn choice_row(
     )
 }
 
+/// 与 [`choice_row`] 同形，选项表绑信号（目录扫描出的声音/效果列表运行期可换）。
+pub fn choice_row_signal(
+    label: &str,
+    options: Signal<Vec<String>>,
+    sig: Signal<usize>,
+    col1_width: i32,
+) -> Element {
+    option_row(
+        label,
+        Element::dropdown_signal(options, sig).width(CONTROL_GROUP_W),
+        col1_width,
+    )
+}
+
 /// 「标签 + 取色器」一行（2026-09-25 同日收拢）：取色器与标题栏下拉同宽
 /// （右缘对齐标准）。需要透明度条的脚本参数（`EffectParamCell::Color`）仍走
 /// `color_picker_opts`，但宽度同样取 [`CONTROL_GROUP_W`]。

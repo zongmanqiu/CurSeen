@@ -1,0 +1,210 @@
+{
+  "id": "MouseEffects",
+  "name": "MouseEffects",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "default": "aurora",
+  "effects": [
+    {
+      "id": "confetti",
+      "name": "Confetti",
+      "kind": "click",
+      "file": "confetti.lua"
+    },
+    {
+      "id": "crystal_growth",
+      "name": "Crystal Growth",
+      "kind": "click",
+      "file": "crystal_growth.lua"
+    },
+    {
+      "id": "firework",
+      "name": "Firework",
+      "kind": "click",
+      "file": "firework.lua"
+    },
+    {
+      "id": "ink_blot",
+      "name": "Ink Blot",
+      "kind": "click",
+      "file": "ink_blot.lua"
+    },
+    {
+      "id": "pixel_explosion",
+      "name": "Pixel Explosion",
+      "kind": "click",
+      "file": "pixel_explosion.lua"
+    },
+    {
+      "id": "shockwave",
+      "name": "Shockwave",
+      "kind": "click",
+      "file": "shockwave.lua"
+    },
+    {
+      "id": "circuit",
+      "name": "Circuit",
+      "kind": "trail",
+      "file": "circuit.lua"
+    },
+    {
+      "id": "fire_trail",
+      "name": "Fire Trail",
+      "kind": "trail",
+      "file": "fire_trail.lua"
+    },
+    {
+      "id": "laser_work",
+      "name": "Laser Work",
+      "kind": "trail",
+      "file": "laser_work.lua"
+    },
+    {
+      "id": "particle_trail",
+      "name": "Particle Trail",
+      "kind": "trail",
+      "file": "particle_trail.lua"
+    },
+    {
+      "id": "pixie_dust",
+      "name": "Pixie Dust",
+      "kind": "trail",
+      "file": "pixie_dust.lua"
+    },
+    {
+      "id": "smoke",
+      "name": "Smoke",
+      "kind": "trail",
+      "file": "smoke.lua"
+    },
+    {
+      "id": "spirograph",
+      "name": "Spirograph",
+      "kind": "cursor",
+      "file": "spirograph.lua"
+    },
+    {
+      "id": "aurora",
+      "name": "Aurora",
+      "kind": "cursor",
+      "file": "aurora.lua"
+    },
+    {
+      "id": "black_hole",
+      "name": "Black Hole",
+      "kind": "cursor",
+      "file": "black_hole.lua"
+    },
+    {
+      "id": "bubbles",
+      "name": "Bubbles",
+      "kind": "cursor",
+      "file": "bubbles.lua"
+    },
+    {
+      "id": "cherry_blossoms",
+      "name": "Cherry Blossoms",
+      "kind": "cursor",
+      "file": "cherry_blossoms.lua"
+    },
+    {
+      "id": "dna_helix",
+      "name": "DNA Helix",
+      "kind": "cursor",
+      "file": "dna_helix.lua"
+    },
+    {
+      "id": "dandelion_seeds",
+      "name": "Dandelion Seeds",
+      "kind": "cursor",
+      "file": "dandelion_seeds.lua"
+    },
+    {
+      "id": "falling_leaves",
+      "name": "Falling Leaves",
+      "kind": "cursor",
+      "file": "falling_leaves.lua"
+    },
+    {
+      "id": "fireflies",
+      "name": "Fireflies",
+      "kind": "cursor",
+      "file": "fireflies.lua"
+    },
+    {
+      "id": "gravity_well",
+      "name": "Gravity Well",
+      "kind": "cursor",
+      "file": "gravity_well.lua"
+    },
+    {
+      "id": "hearts",
+      "name": "Hearts",
+      "kind": "cursor",
+      "file": "hearts.lua"
+    },
+    {
+      "id": "lightning_storm",
+      "name": "Lightning Storm",
+      "kind": "cursor",
+      "file": "lightning_storm.lua"
+    },
+    {
+      "id": "nebula",
+      "name": "Nebula",
+      "kind": "cursor",
+      "file": "nebula.lua"
+    },
+    {
+      "id": "portal",
+      "name": "Portal",
+      "kind": "cursor",
+      "file": "portal.lua"
+    },
+    {
+      "id": "procedural_sigil",
+      "name": "Procedural Sigil",
+      "kind": "cursor",
+      "file": "procedural_sigil.lua"
+    },
+    {
+      "id": "sacred_geometries",
+      "name": "Sacred Geometries",
+      "kind": "cursor",
+      "file": "sacred_geometries.lua"
+    },
+    {
+      "id": "snowfall",
+      "name": "Snowfall",
+      "kind": "cursor",
+      "file": "snowfall.lua"
+    },
+    {
+      "id": "spotlight",
+      "name": "Spotlight",
+      "kind": "cursor",
+      "file": "spotlight.lua"
+    },
+    {
+      "id": "starfield_warp",
+      "name": "Starfield Warp",
+      "kind": "cursor",
+      "file": "starfield_warp.lua"
+    },
+    {
+      "id": "tesla",
+      "name": "Tesla",
+      "kind": "cursor",
+      "file": "tesla.lua"
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "kind": "cursor",
+      "file": "zoom.lua"
+    }
+  ],
+  "description": "参考与致谢：github/ltrudu/MouseEffects",
+  "upstream": "MouseEffects",
+  "category": "mouse"
+}

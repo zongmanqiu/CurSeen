@@ -532,6 +532,9 @@ impl Runtime {
         // Ctrl+Win+滚轮 毫无干预（它在系统里本就没有默认行为）。
         let zoom_wheel = self.config.pip_running() || self.config.fullscreen_running();
         crate::platform::input::mouse::set_zoom_wheel_armed(zoom_wheel);
+        // 脚本滚轮门：有脚本声明 `on_wheel` 时钩子才转发普通滚轮（Scroll 特效用）。
+        // 与帧门一样按"当前运行实例"对账——没有滚轮脚本时每滚一格的开销完全为零。
+        crate::platform::input::mouse::set_script_wheel_armed(self.trail.any_wheel_wanted());
         // 滚轮回显门：击键回显开着**且**处于「全部」模式时才让钩子转发普通滚轮
         // （show_mouse 由 display_mode 派生——独立开关已删，见
         // `key_display::settings::from_config`。关掉任意一项，下一帧就把

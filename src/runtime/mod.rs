@@ -242,6 +242,8 @@ pub struct Runtime {
     overlay_repaint_hint: bool,
     /// 自更新状态（面板可见的信号 + 流程机器状态）。
     pub update: UpdateState,
+    /// 在线脚本库状态（m36）：同样常驻——下载/安装可能在面板关着的时候完成。
+    pub store: crate::ui::store_state::StoreState,
     /// ★ 面板「工作文件夹」卡：`<exe>/temp` 的占用（后台统计，结果经 [`UiMsg::TempUsage`] 回来）。
     ///
     /// 与 [`Self::update`] 同一条理由常驻在 `Runtime` 而不是随面板新建：统计可能在面板
@@ -429,7 +431,7 @@ pub struct Runtime {
     timer_ms: f64,
     /// 计时器起点（墙钟 `Instant`，与帧率无关，空闲休眠也不丢时间）。
     timer_start: Option<Instant>,
-    /// Lua 扩展脚本目录：`assets/lua`（exe 同级）。图片操作 / 脚本页都会扫这里。
+    /// Lua 扩展脚本目录：`assets/lua`（exe 同级）。脚本 / 脚本页都会扫这里。
     lua_ext_dir: std::path::PathBuf,
 }
 
@@ -517,6 +519,8 @@ impl Runtime {
         // 开关边沿检测的初值必须在把 `config` 移动进结构体**之前**算好：
         // 结构体字面量里 `config,` 这一项之后 `config` 就不可用了。
         let initial_enabled = ModuleEnabled::read(&config);
+        // 在线脚本库的"更新源"下拉初值 = 配置里存的来源（m40：切换后持久化）。
+        let store_source = config.store.source_index();
         // ★ 工作文件夹自动清理（2026-09-28 用户口径）：**每次启动执行一次**，后台线程
         //   进行——递归 stat + 删除几十个录屏文件是几十毫秒到秒级，留在启动路径上就是
         //   "双击图标半天不出窗口"。days=0（永不，出厂默认）时连线程都不开。
@@ -581,6 +585,7 @@ impl Runtime {
             panel_last_save_ms: 0,
             overlay_repaint_hint: false,
             update: UpdateState::new(),
+            store: crate::ui::store_state::StoreState::new(store_source),
             temp_usage: TempUsageState::new(),
             ui_tx: None,
             recorder: None,
@@ -794,13 +799,23 @@ impl Runtime {
     /// ★ 2026-09-27 用户口径：`scripts/` 下每个脚本都要有开关，所以**这里按开关过滤**——
     /// 声明了 `menu` 且 id 落在 `config.lua_ext.image_active` 里才出现。
     ///
+    /// ★ 2026-10-28 第二道同点过滤：脚本声明了 `requires`（外置文件）而文件不在 ⇒ **不出现**。
+    /// 判据只有 [`ExtSchema::available`] 一个（路径解析复用 `fs_api::resolve`，与 `ctx.fs`、
+    /// `ext:proc` 同一把闸）。这里不新增机制：可见性判据必须继续留在**这一处**，
+    /// 因为 `docs/UI_COMPONENTS.md` 与发布检查单都把这条写成"唯一过滤点"。
+    ///
+    /// ★ 热键那条**不在这里挡**（有意）：[`Self::script_hotkeys_with_state`] 是从
+    /// `config.lua_ext.params` 派生的，让它依赖磁盘就意味着每次登记热键都要扫一遍盘，
+    /// 而休眠唤醒那段共用同一份名单（见该函数的注释）。缺文件时按热键会**如实弹一句**
+    /// "把工具放进 ocr\\ 才能识别"——脚本自己算得出的事，不必让宿主去猜。
+    ///
     /// 变了什么：此前（2026-09-26）定的是"菜单可见性只看磁盘扫描、不受任何开关影响"，
     /// 理由是"所有脚本出厂全关但菜单要列全"。那个两难在有了**每脚本独立开关**之后
     /// 不存在了：勾选 = 菜单里出现这一条，不勾 = 收起。于是"手动动作 ≠ 自动运行"这条
     /// 铁律仍然成立（开关不喂给常驻实例，只管入口存在性），而用户不必再为了用一次
     /// 图片信息跑去改配置。
     ///
-    /// 调用方（pin.rs）据此恒挂载「图片操作」子菜单，空表时挂空壳 + 灰色占位项。
+    /// 调用方（pin.rs）据此恒挂载「脚本」子菜单，空表时挂空壳 + 灰色占位项。
     pub fn lua_ext_menu_items(&self) -> Vec<(String, String)> {
         let mut reg = crate::scripting::registry_ext::LuaExtRegistry::new(&self.lua_ext_dir);
         reg.scan();
@@ -808,8 +823,20 @@ impl Runtime {
             .into_iter()
             // 开关是唯一判据，且判定函数只有一个（config::LuaExtSettings::role_is_active）。
             .filter(|s| self.config.lua_ext.role_is_active("image", &s.id))
+            // 外置文件没到位的项不出现（`requires`，m13）。
+            .filter(|s| s.available())
             .map(|s| (s.id.clone(), s.menu.clone().unwrap_or_else(|| s.id.clone())))
             .collect()
+    }
+
+    /// 屏幕中央的一句短反馈，时长与淡出跟录制/GIF 提示同一套（`Notify::DURATION` = 2 s）。
+    ///
+    /// 用途：`ext_runner` 说「正在运行：X」/「X 还在跑，这次忽略」。它**不新起计时器**：
+    /// 显示期间由 [`Self::input_needs_frame`]（`action_notify.is_showing()`）要求出帧、
+    /// 由 `frame_delay` 的 `remain_ms` 定下一次唤醒——与既有浮字是同一条路，所以
+    /// "多一句提示"不会变成常驻出帧。
+    pub fn action_notice(&mut self, text: &str) {
+        self.action_notify.show(text);
     }
 
     /// `config.lua_ext.params[id]` 的每脚本参数；没跑过 → 空表。
@@ -867,13 +894,207 @@ impl Runtime {
             .collect()
     }
 
+    /// 重扫 `assets/lua` 并重建脚本页的卡片表（面板「刷新」按钮，m33）。
+    ///
+    /// ★ 只换"列表"，**不碰配置、也不碰正在运行的实例**：开关/参数都在 `config` 里，
+    ///   新卡片按现值初始化；常驻实例由下一次 `sync_trail_if_stale` 对账（新加的复合脚本
+    ///   要用户自己勾开才会跑）。返回重建后的条目数（0 = 面板没开）。
+    pub fn refresh_scripts(&mut self) -> usize {
+        let Some(model) = &self.panel else {
+            return 0;
+        };
+        let n = model.reload_lua_cards(&self.config, &self.lua_ext_dir);
+        log::info!("脚本目录已重扫：{n} 项");
+        n
+    }
+
+    /// 发起本体更新检查：清单地址取 `config.update`，选中源跟随商店来源。
+    ///
+    /// 面板按钮只发 `UiMsg::UpdateCheck`，不直接碰网络；这里在 UI 线程取配置，
+    /// 再把阻塞请求交给 `update::task` 的后台线程。
+    pub fn start_update_check(&mut self) {
+        let urls = self.config.update.urls();
+        let source = self.config.store.source_index();
+        if let Err(e) = crate::update::task::start_check(&self.ui_tx, urls, source) {
+            log::warn!("发起检查更新失败：{e}");
+        }
+    }
+
+    /// 发起一个在线脚本库动作（面板按钮 → `UiMsg::StoreAction` → 这里）。
+    ///
+    /// ★ 一发起就置灰/改状态行：`Install` 下载期间**没有**"已开始"事件，不在这里置
+    ///   `busy` 的话，几 MB 的包下载全程按钮都还是亮的（第二次点只会撞「上一个动作还在进行」）。
+    pub fn start_store_action(
+        &mut self,
+        action: crate::core::events::StoreAction,
+    ) -> Result<(), String> {
+        use crate::core::events::StoreAction as A;
+        // 状态行只有 7 个短词（m46）：检查中… / 下载中… / 已更新 / 已卸载 /
+        // 安装失败 / 卸载失败 / 离线。这里只给"进行中"的两个；卸载很快，不单独报。
+        let label = match &action {
+            A::RefreshCatalog { .. } => "检查中…",
+            A::Install { .. } => "下载中…",
+            A::Uninstall(_) => "",
+        };
+        let install_id = match &action {
+            A::Install { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        // 清单地址来自配置（用户可改镜像）；选中来源只决定先试哪一条。
+        let urls = self.config.store.urls();
+        if let Err(e) = crate::scripting::store_task::start(&self.ui_tx, action, urls) {
+            // 起不来（上一个还在跑 / 通道没就绪）：不冒充"失败"，只记日志。
+            log::warn!("脚本库动作未发起：{e}");
+            return Err(e);
+        }
+        self.store.busy.set(true);
+        self.store.status.set(label.to_string());
+        if let Some(id) = install_id {
+            // 行尾按钮当场变 0%，不用等第一条 `PackProgress`（RuPix 同一口径）。
+            self.store.download.set(Some((id, 0)));
+        }
+        Ok(())
+    }
+
+    /// 动作**没能发起**（上一个还在跑 / UI 通道没就绪）：只更新状态行，不动 `busy`
+    /// （"上一个还在跑"时 `busy` 本来就该是 true，清掉会把按钮误放回可点）。
+    pub fn store_report_refusal(&mut self, error: String) {
+        // 按钮在忙时已经置灰；走到这里多半是极窄的并发窗口或通道未就绪。
+        // 不冒充"失败"、不改状态行（7 个短词之外不新增状态）。
+        log::warn!("脚本库动作被拒：{error}");
+    }
+
+    /// 把后台的进展落到信号上（状态行 / 忙碌 / 行表 / 下载百分比）。
+    pub fn store_apply_store_event(&mut self, ev: crate::core::events::StoreEvent) {
+        use crate::core::events::StoreEvent as E;
+        match ev {
+            E::CatalogStarted => {
+                self.store.busy.set(true);
+                self.store.status.set("检查中…".to_string());
+            }
+            E::CatalogReady { rows, note } => {
+                self.store.busy.set(false);
+                self.store.rows.set(rows.clone());
+                // 摘要/镜像/跳过条目等细节进日志；状态行回到空（空闲）。
+                if !note.is_empty() {
+                    log::info!("脚本清单：{note}");
+                }
+                // 用的是随包旧清单（两个镜像都拉不到）⇒ 7 个状态里的「离线」；
+                // 正常成功 ⇒ 普通态「N 个可下载」（换镜像/跳过条目的细节进日志）。
+                if note.starts_with("离线") {
+                    self.store.status.set("离线".to_string());
+                } else {
+                    let src = self.store.source.get().min(1);
+                    let n = crate::ui::store_state::downloadable_count(&rows, src);
+                    self.store.status.set(format!("{n} 个可下载"));
+                }
+            }
+            E::CatalogFailed { error } => {
+                self.store.busy.set(false);
+                log::warn!("拉取脚本清单失败：{error}");
+                self.store.status.set("离线".to_string());
+            }
+            E::PackProgress {
+                id,
+                received,
+                total,
+            } => {
+                // 百分比进行尾按钮（RuPix 同一处）；状态行给"在动"的证据。
+                let pct = if total > 0 {
+                    received
+                        .saturating_mul(100)
+                        .checked_div(total)
+                        .map_or(0, |p| p.min(100) as u8)
+                } else {
+                    0
+                };
+                self.store.download.set(Some((id.clone(), pct)));
+                self.store.status.set("下载中…".to_string());
+            }
+            E::Installed {
+                id,
+                name,
+                version,
+                added,
+                updated,
+                removed,
+            } => {
+                self.store.busy.set(false);
+                self.store.download.set(None);
+                self.store.status.set("已更新".to_string());
+                log::info!(
+                    "脚本包 {name} v{version} 已安装：+{added} ~{updated} -{removed}（{id}）"
+                );
+            }
+            E::InstallFailed { id, error } => {
+                self.store.busy.set(false);
+                self.store.download.set(None);
+                log::warn!("安装脚本包 {id} 失败：{error}");
+                self.store.status.set("安装失败".to_string());
+            }
+            E::Uninstalled { id, files } => {
+                self.store.busy.set(false);
+                log::info!("脚本包 {id} 已卸载：删除 {files} 个文件");
+                self.store.status.set("已卸载".to_string());
+            }
+            E::UninstallFailed { id, error } => {
+                self.store.busy.set(false);
+                log::warn!("卸载脚本包 {id} 失败：{error}");
+                self.store.status.set("卸载失败".to_string());
+            }
+        }
+    }
+
+    /// `assets/` 变化后的**自动**重扫（m35）：由覆盖层的 250 ms 对账调用。
+    ///
+    /// 监听线程（[`crate::platform::dir_watch`]）只置一个原子标记；真正的重扫在这里（UI 线程）
+    /// ——一阵突发（解压一个 20 文件的包）会在 250 ms 的窗口里自然合流成一次。
+    /// 面板没开就没有可刷新的对象：直接消费掉标记，别攒到下次开面板再白刷一遍。
+    ///
+    /// ★ 2026-10-29 用户口径：监听**整个 `assets/`**，不只 `assets/lua`。所以刷新面也
+    ///   跟着扩到所有"从资产目录扫出来"的下拉：拖尾 / 悬浮标 / 点击效果 / 声音 /
+    ///   键音脚本 / 虚拟键盘方案；脚本卡仍走 [`Self::refresh_scripts`] 的合并规则。
+    pub fn refresh_assets_if_changed(&mut self) -> bool {
+        if !crate::platform::dir_watch::dirty() {
+            return false;
+        }
+        // ★ 录屏 / 长截图进行中：**延后**，标记留着。
+        //   录制本身在三条独立线程上（采集/看门狗/编码），不会被这里的扫描中断；
+        //   但一次全树重扫（163 个脚本 ≈ 55 ms）占的是 UI 线程，而"开始/停止录制"与
+        //   长截图的滚轮拼接都对 UI 卡顿敏感。所以宁可晚一两秒刷新，也别在这两个时刻抖。
+        if self.recorder.is_some() || self.scroll.is_some() {
+            return false;
+        }
+        let _ = crate::platform::dir_watch::take_dirty();
+        let Some(model) = self.panel.as_mut() else {
+            return false;
+        };
+        let n = model.reload_lua_cards(&self.config, &self.lua_ext_dir);
+        model.reload_asset_lists(&self.config);
+        log::info!("assets 目录变化 → 自动刷新脚本 {n} 项 + 资产下拉");
+        true
+    }
+
     /// 快捷键触发的脚本运行：后台线程脱手执行（结果自弹，阻塞 HTTP 不碰 UI 线程）。
     ///
     /// ★ 调用方必须先勾过启用开关（名单由 [`Self::script_hotkeys`] 过滤，这里不再重复判）。
+    ///
+    /// ★★ **必须在 UI 线程调用**：下面用 `pin::current_bitmap` 取"选中的那张贴图此刻的
+    ///   像素"，而登记表是 `thread_local` 的——站在别的线程只会查不到、静默退化成"没有图"。
+    ///   现有唯一调用点（`runtime::input` 的按键分发）就在 UI 线程。
     pub fn run_script_hotkey(&self, id: &str) {
         log::info!("脚本热键触发：{id}");
         let params = self.lua_ext_params(id);
-        crate::scripting::ext_runner::run_ext_detached(&self.lua_ext_dir, id, &params, None);
+        // ★★ "按**当前图片**处理"（2026-10-28 用户口径：镜像了，就按镜像后的图处理）。
+        //   图片取的是**选中的那张贴图此刻的像素**——旋转 / 镜像 / 上一次脚本回写之后的样子，
+        //   不是"钉进来那一刻"的出厂图（`pin_content` 那份只给「恢复原图」与贴图环用）。
+        //   没有选中的贴图 ⇒ 传 `None`，脚本会自己回落到剪贴板里的截图（m30）。
+        let ctx = self.selected_pin().and_then(|seq| {
+            let image = crate::runtime::layer::pin::current_bitmap(seq)?;
+            let hwnd = crate::runtime::layer::pin::current_hwnd(seq)? as usize;
+            Some(crate::scripting::ext_runner::ExtInput { image, hwnd })
+        });
+        crate::scripting::ext_runner::run_ext_detached(&self.lua_ext_dir, id, &params, ctx);
     }
 }
 // ── 依赖倒置：为面板提供宿主实现 ────────────────────────────────────────
@@ -895,6 +1116,10 @@ impl PanelHost for Runtime {
 
     fn update_state(&self) -> UpdateState {
         self.update.clone()
+    }
+
+    fn store_state(&self) -> crate::ui::store_state::StoreState {
+        self.store.clone()
     }
 
     fn temp_usage_state(&self) -> TempUsageState {
@@ -932,6 +1157,90 @@ impl Drop for Runtime {
 
 #[cfg(test)]
 mod tests {
+
+    /// ★ m18：脚本那句「正在运行」只能用**既有的**浮字通道，代价上限 = `Notify::DURATION`。
+    ///
+    /// 这条同时钉两件事：① 显示期间 `input_needs_frame()` 为真（否则 park 之后没有 paint，
+    /// 浮字永远淡不掉——这正是"提示卡在屏幕上"的形状）；② 它**不会**变成常驻需求：
+    /// 2 秒之后帧门重新归假，覆盖层可以照常休眠。低占用那把尺子就落在这格上。
+    /// ★ m35：目录变化 → 250 ms 对账里**自动**重扫脚本页（不重启、不点按钮）。
+    /// 用临时目录而不是出厂资产：判据要证明"刷的是配置里那个目录"。
+    #[test]
+    fn assets_change_refreshes_the_open_panel_once() {
+        let root =
+            std::env::temp_dir().join(format!("curseen_auto_refresh_{}", std::process::id()));
+        let scripts = root.join("scripts");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("demo.lua"),
+            "name = \"演示\"
+role = \"image\"
+menu = \"演示\"
+function run(ctx) return \"ok\" end
+",
+        )
+        .unwrap();
+
+        let mut rt = Runtime::new(crate::core::config::Config::default());
+        rt.lua_ext_dir = root.clone();
+        rt.panel = Some(crate::ui::model::PanelModel::from_config(&rt.config));
+
+        // ① 有标记 ⇒ 刷一次，且能看到临时目录里的脚本
+        let _ = crate::platform::dir_watch::take_dirty();
+        crate::platform::dir_watch::mark_dirty();
+        assert!(rt.refresh_assets_if_changed(), "标了脏就该刷一次");
+        let cards = rt.panel.as_ref().unwrap().lua_ext_cards.get();
+        assert!(
+            cards.iter().any(|c| c.id == "scripts/demo"),
+            "自动刷新后应看到临时目录里的脚本"
+        );
+
+        // ② 没有新标记 ⇒ 不刷（返回值是"这一次刷了没"，不是"面板里有几张卡"）
+        let _ = crate::platform::dir_watch::take_dirty();
+        assert!(!rt.refresh_assets_if_changed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★ 2026-10-29 用户口径：监听**整个 `assets/`**，不只 `assets/lua`——往
+    /// `MouseTrail/`、`VirtualKeyboards/` 里丢文件也要触发刷新。这里钉住启动时的
+    /// 监听根与标签（避免以后又收窄回 `assets/lua`）。
+    #[test]
+    fn assets_watch_covers_the_whole_assets_tree() {
+        let src = include_str!("overlay.rs");
+        assert!(
+            src.contains("asset_dir(\"\")"),
+            "监听根应是 assets/（`asset_dir(\"\")`），不是某个子目录"
+        );
+        assert!(
+            src.contains("watch_dir(&dir, \"assets\")"),
+            "监听标签应写明 assets"
+        );
+        assert!(
+            !src.contains("watch_dir(&dir, \"assets/lua\")"),
+            "不许再收窄回 assets/lua"
+        );
+    }
+
+    #[test]
+    fn a_script_notice_asks_for_frames_only_while_it_is_visible() {
+        let mut rt = Runtime::new(crate::core::config::Config::default());
+        assert!(!rt.input_needs_frame(), "什么都没开时覆盖层该能 park");
+        rt.action_notice("正在运行：2.ocr_text");
+        assert!(rt.input_needs_frame(), "浮字显示期间必须出帧");
+        assert_eq!(
+            rt.action_notify.remain_ms(),
+            Some((crate::modules::drawing::notify::Notify::DURATION * 1000.0) as u32),
+            "时长必须与既有的录制提示同一档（2 s），不许为这条另起一个数"
+        );
+        rt.action_notify
+            .tick(crate::modules::drawing::notify::Notify::DURATION + 0.1);
+        assert!(!rt.action_notify.is_showing(), "到点必须自己淡掉");
+        assert!(
+            !rt.input_needs_frame(),
+            "淡完之后帧门要归假——这句提示不许常驻"
+        );
+    }
     use super::*;
 
     /// ★ 回归：模块由「开」变「关」的那一帧会回收内存，且**只**回收那一帧。
@@ -1108,15 +1417,34 @@ mod tests {
     /// 手动动作仍然不等于自动运行——开关只管入口存在性，不喂常驻实例。
     #[test]
     fn lua_menu_items_follow_the_image_switch() {
+        // 图片体检/OCR 迁到 CurSeen-Scripts 后，内置 `scripts/` 已没有 image 脚本；
+        // 这条判据只关心开关闸门，用临时目录造一枚 image 脚本，别拿出厂态碰运气。
+        let dir = std::env::temp_dir().join(format!("curseen_menu_gate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("demo_image.lua"),
+            "role = \"image\"\nname = \"演示\"\nmenu = \"演示\"\n",
+        )
+        .unwrap();
+
         // 独立基准：注册表自己扫出来的、声明了 menu 的脚本（不带任何过滤）。
-        let mut reg =
-            crate::scripting::registry_ext::LuaExtRegistry::new(&crate::core::paths::lua_ext_dir());
+        let mut reg = crate::scripting::registry_ext::LuaExtRegistry::new(&dir);
         reg.scan();
         let declared: Vec<String> = reg.menu_items().iter().map(|s| s.id.clone()).collect();
         assert!(
             !declared.is_empty(),
-            "出厂就该扫到声明了 menu 的脚本——扫不到 = `assets/lua` 路径不对，这条会假绿"
+            "夹具就该扫到声明了 menu 的脚本——扫不到 = 临时目录没建对，这条会假绿"
         );
+
+        let menu_for = |cfg: Config| {
+            let mut rt = Runtime::new(cfg);
+            rt.lua_ext_dir = dir.clone();
+            rt.lua_ext_menu_items()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
 
         // ① 出厂态（两个列表都空 = 全部脚本关闭）：菜单**一项都不得出现**。
         let cfg = Config::default();
@@ -1124,24 +1452,16 @@ mod tests {
             cfg.lua_ext.composite_active.is_empty() && cfg.lua_ext.image_active.is_empty(),
             "出厂默认必须全关，否则下面两条会假绿"
         );
-        let got: Vec<String> = Runtime::new(cfg.clone())
-            .lua_ext_menu_items()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let got = menu_for(cfg.clone());
         assert!(
             got.is_empty(),
-            "脚本出厂全关时「图片操作」应为空壳（占位项由调用方挂），got {got:?}"
+            "脚本出厂全关时「脚本」应为空壳（占位项由调用方挂），got {got:?}"
         );
 
         // ② 勾开一个：菜单里**只有**它，且不要求重启（菜单每次调用都重扫）。
         let mut cfg2 = cfg.clone();
         cfg2.lua_ext.set_role_active("image", &declared[0], true);
-        let got2: Vec<String> = Runtime::new(cfg2)
-            .lua_ext_menu_items()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let got2 = menu_for(cfg2);
         assert_eq!(
             got2,
             vec![declared[0].clone()],
@@ -1152,14 +1472,152 @@ mod tests {
         let mut cfg3 = cfg.clone();
         cfg3.lua_ext
             .set_role_active("composite", &declared[0], true);
-        let got3: Vec<String> = Runtime::new(cfg3)
+        let got3 = menu_for(cfg3);
+        assert!(
+            got3.is_empty(),
+            "复合脚本的运行开关管不到手动菜单，got {got3:?}"
+        );
+
+        // ④ `requires` 那一格挪成了独立测试 `requires_hides_menu_entries_for_missing_files`：
+        // 它需要自己的脚本目录（确定性夹具），而不是拿出厂脚本碰运气——出厂态变了就会静默跳过，
+        // 那正是假绿。本条 ①②③ 只管开关那两道闸。
+    }
+
+    /// ★ `requires`（m13）：**勾开了但外置文件不在 ⇒ 不进菜单**；文件补上 ⇒ 不重启就出现。
+    ///
+    /// 为什么单开一条而不用出厂脚本碰运气：出厂态里"有没有未满足的 requires"是会变的
+    /// （谁把 `ocr\` 拷进源目录，那条就静默跳过＝假绿）。这里自带夹具，两档都是必然发生。
+    #[test]
+    fn requires_hides_menu_entries_for_missing_files() {
+        use crate::scripting::registry_ext::LuaExtRegistry;
+        let dir =
+            std::env::temp_dir().join(format!("curseen_requires_gate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plain.lua"),
+            "name = \"通用\"
+role = \"image\"
+menu = \"通用动作\"
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("gated.lua"),
+            "name = \"要外置\"
+role = \"image\"
+menu = \"跑外置\"
+requires = { \"./tools/x.exe\" }
+",
+        )
+        .unwrap();
+        // 夹具自己先立起来：两份都该被扫到、都声明了 menu（扫不到就什么都不测）。
+        let mut reg = LuaExtRegistry::new(&dir);
+        reg.scan();
+        let declared = reg.menu_items().len();
+        assert_eq!(
+            declared, 2,
+            "夹具该扫到 2 条带 menu 的脚本，实际 {declared}"
+        );
+        let gated = reg.get("gated").expect("gated 该扫到");
+        assert!(
+            !gated.available(),
+            "夹具里 ./tools/x.exe 不存在，必须算不满足"
+        );
+
+        // 两条都勾开 ⇒ 只有 plain 出现。
+        let mut cfg = Config::default();
+        cfg.lua_ext.set_role_active("image", "plain", true);
+        cfg.lua_ext.set_role_active("image", "gated", true);
+        let mut rt = Runtime::new(cfg.clone());
+        rt.lua_ext_dir = dir.clone();
+        let got: Vec<String> = rt
+            .lua_ext_menu_items()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            got,
+            vec!["plain".to_string()],
+            "缺外置文件的该被挡在菜单外，got {got:?}"
+        );
+
+        // 把文件补上 ⇒ **不重启**（同一份 Runtime）下一次调用就该出现。
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::write(dir.join("tools").join("x.exe"), b"probe").unwrap();
+        let got2: Vec<String> = rt
             .lua_ext_menu_items()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
         assert!(
-            got3.is_empty(),
-            "复合脚本的运行开关管不到手动菜单，got {got3:?}"
+            got2.contains(&"gated".to_string()),
+            "外置文件到位后不重启就该出现，got {got2:?}",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// m46：红色状态行只允许 7 个短词（3–4 个汉字）；旧的摘要/包名/URL 长文案不许回潮。
+    #[test]
+    fn store_status_vocabulary_stays_short() {
+        let src = include_str!("mod.rs");
+        let cut = src.rfind("\n#[cfg(test)]").unwrap_or(src.len());
+        let s = &src[..cut];
+        for word in [
+            "检查中…",
+            "下载中…",
+            "已更新",
+            "已卸载",
+            "安装失败",
+            "卸载失败",
+            "离线",
+        ] {
+            // 必须真的写进状态信号（注释里提到不算）：精确到 `status.set("…")`。
+            let needle = format!("status.set(\"{word}\".to_string())");
+            assert!(s.contains(&needle), "缺少状态写入：{needle}");
+        }
+        assert!(
+            s.contains("format!(\"{n} 个可下载\")"),
+            "普通态要真的写 `format!(\"{{n}} 个可下载\")`（注释里提到不算）"
+        );
+        for gone in [
+            "个可升级",
+            "正在更新清单",
+            "正在下载「",
+            "已安装「",
+            "已卸载 {",
+            "安装 {id} 失败",
+            "卸载 {id} 失败",
+        ] {
+            assert!(!s.contains(gone), "长文案回潮：{gone}");
+        }
+    }
+
+    /// m69：切源不能只改配置——行尾动作与「N 个可下载」都在建树时按来源定档，
+    /// `sync_store_source` 必须在切源当帧重放**已有清单**（不联网），否则灰字来源
+    /// 会与按钮状态对不上。
+    #[test]
+    fn switching_source_replays_rows_and_count_without_network() {
+        let src = include_str!("panel.rs");
+        let at = src
+            .find("fn sync_store_source(")
+            .expect("找不到 sync_store_source");
+        let rest = &src[at..];
+        let end = rest
+            .find("\n    pub(crate) fn sync_panel")
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        for needle in [
+            "downloadable_count(&rows",
+            "self.store.status.set(format!(\"{n} 个可下载\"))",
+            "self.store.rows.set(rows)",
+        ] {
+            assert!(body.contains(needle), "切源后没有重放 UI：{needle}");
+        }
+        // 只读已有行表——这里不许发起清单刷新（切源不是联网动作）。
+        assert!(
+            !body.contains("start_store_refresh") && !body.contains("RefreshCatalog"),
+            "切源不该联网：重放即可"
         );
     }
 }

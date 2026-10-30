@@ -74,7 +74,7 @@ function draw(ctx, params)
   if rb == nil then rb = (params.color_mode ~= "fixed") end
   local cm = rb and "rainbow" or "fixed"
   local opacity = params.opacity or 1.0
-  local fr, fg, fb = hex_to_rgb(params.fixed_color or "#FF0000")
+  local fr, fg, fb, fa = hex_to_rgb(params.fixed_color or "#FF0000")
   for i = 1, #anchors do
     local a = anchors[i]
     local dx, dy = a.x - cx, a.y - cy
@@ -82,7 +82,7 @@ function draw(ctx, params)
     if dist < CONNECT_DISTANCE then
       local ratio = 1.0 - dist / CONNECT_DISTANCE
       local life_ratio = math.max(0.0, 1.0 - (elapsed - a.born) / a.life)
-      local alpha_f = opacity * ratio * life_ratio
+      local alpha_f = opacity * ratio * life_ratio * fa / 255
       if alpha_f > 0 then
         local r, g, b
         if cm == "rainbow" then

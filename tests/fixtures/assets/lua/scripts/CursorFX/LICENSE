@@ -1,0 +1,11 @@
+CurSeen CursorFX Lua 扩展包
+
+本目录的 Lua 代码由 CurSeen 项目独立编写，随 CurSeen 按 GNU AGPL-3.0 分发。
+
+参考与致谢：
+  CursorFX
+  https://github.com/devkancheti4-design/cursorfx
+  MIT License
+
+CursorFX 的版权归其原作者所有。本目录不包含 CursorFX 的源代码、图片、音频或 GIF；
+这里提到 CursorFX，是为了说明效果来源并致谢，不代表 CursorFX 作者对本目录代码主张版权。

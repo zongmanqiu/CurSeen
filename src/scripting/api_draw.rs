@@ -9,6 +9,8 @@
 //! 整个程序单线程跑，指针在 `draw` 调用期间恒定有效，安全。
 
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use mlua::{Lua, UserData, UserDataMethods};
 
@@ -16,7 +18,10 @@ use crate::core::color::Argb;
 use crate::core::draw::{
     Blend, BlendMode, DrawCmd, DrawList, GradStop, Layer, Paint, PointRange, Shape,
 };
-use crate::core::geometry::Point;
+use crate::core::geometry::{Point, Rect};
+use crate::core::image::LensMode;
+use crate::platform::display::ScreenRect;
+use crate::platform::{capture_exclusion, screenshot};
 
 thread_local! {
     /// 当前帧的绘制目标（裸指针，单线程下安全）。
@@ -24,6 +29,30 @@ thread_local! {
     /// 当前帧可用的悬浮标位图（PNG 图片类型专用；由宿主在 call_draw 前设置）。
     static HOVER_IMAGE: RefCell<Option<std::rc::Rc<crate::core::image::RgbaBitmap>>> =
         const { RefCell::new(None) };
+    /// 最近一次桌面镜片采样时刻（见 [`tick_lens_exclusion`]）。
+    static LENS_LAST_USE: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    /// 当前是否把覆盖层排除在抓屏之外。
+    static LENS_EXCLUDED: RefCell<bool> = const { RefCell::new(false) };
+    /// 抓屏失败是否已警告（避免每帧刷日志）。
+    static LENS_FAIL_WARNED: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// 镜片采样的空闲回收：1 秒没有新采样就还原覆盖层的抓屏排除。
+///
+/// 由 [`set_draw_target`]（每个脚本每帧 draw 前）调用。脚本被切走后没人再调
+/// `ctx:backdrop_circle`，下一次任意 draw 就会把排除状态收回；覆盖层若整个休眠，
+/// 窗口不在屏上，排除状态不会影响用户的截图/录屏。
+fn tick_lens_exclusion() {
+    if !LENS_EXCLUDED.with(|c| *c.borrow()) {
+        return;
+    }
+    let stale = LENS_LAST_USE
+        .with(|c| *c.borrow())
+        .is_none_or(|t| t.elapsed() > Duration::from_secs(1));
+    if stale {
+        let _ = capture_exclusion::set_overlay_excluded(false);
+        LENS_EXCLUDED.with(|c| *c.borrow_mut() = false);
+    }
 }
 
 /// 设置本帧悬浮标脚本可用的位图（PNG 图片类型）。
@@ -33,10 +62,11 @@ pub fn set_hover_image(img: Option<std::rc::Rc<crate::core::image::RgbaBitmap>>)
 
 /// 在调用 Lua `draw(ctx)` 前设置本帧的绘制目标；画完务必配对调用 [`clear_draw_target`]。
 pub fn set_draw_target(list: &mut DrawList) {
-    // ★ 每个脚本、每帧的 draw 前都把写入层复位到 Normal：脚本只在自己 draw 里用
+    // 每个脚本、每帧的 draw 前都把写入层复位到 Normal：脚本只在自己 draw 里用
     // ctx:layer 切换层，不把上一个脚本留下的层状态带到下一个。层状态是 DrawList 上的
     // 字段，不清这里的复位，前一个声明了 base 的脚本之后所有原生 push 都会错进 base 桶。
     list.set_layer(Layer::Normal);
+    tick_lens_exclusion();
     TARGET.with(|t| *t.borrow_mut() = Some(list as *mut DrawList));
 }
 
@@ -151,6 +181,161 @@ impl UserData for DrawListCtx {
                     } else {
                         list.stroke_circle(center, outer_r - width * 0.5, width, color);
                     }
+                });
+                Ok(())
+            },
+        );
+
+        // 椭圆填充（CursorFX 的 blob / ghost / guns 大量使用）。
+        methods.add_method_mut(
+            "ellipse",
+            |_, _this, (x, y, rx, ry, r, g, b, a): (f32, f32, f32, f32, u8, u8, u8, u8)| {
+                if rx <= 0.0 || ry <= 0.0 {
+                    return Ok(());
+                }
+                let color = Argb::new(a, r, g, b);
+                let center = Point::new(x, y);
+                with_list(|list| {
+                    list.push(DrawCmd::Fill {
+                        shape: Shape::Ellipse {
+                            center,
+                            radius_x: rx,
+                            radius_y: ry,
+                        },
+                        paint: Paint::Solid(color, BlendMode::SourceOver),
+                        alpha: 1.0,
+                        blend: Blend::SourceOver,
+                    });
+                });
+                Ok(())
+            },
+        );
+
+        // 椭圆描边。
+        methods.add_method_mut(
+            "ellipse_ring",
+            |_, _this, (x, y, rx, ry, width, r, g, b, a): (f32, f32, f32, f32, f32, u8, u8, u8, u8)| {
+                if rx <= 0.0 || ry <= 0.0 || width <= 0.0 {
+                    return Ok(());
+                }
+                let color = Argb::new(a, r, g, b);
+                with_list(|list| {
+                    list.push(DrawCmd::Stroke {
+                        shape: Shape::Ellipse {
+                            center: Point::new(x, y),
+                            radius_x: rx,
+                            radius_y: ry,
+                        },
+                        paint: Paint::Solid(color, BlendMode::SourceOver),
+                        alpha: 1.0,
+                        width,
+                        cap: crate::core::draw::Cap::Round,
+                        join: crate::core::draw::Join::Round,
+                        blend: Blend::SourceOver,
+                    });
+                });
+                Ok(())
+            },
+        );
+
+        // 圆角矩形填充。
+        methods.add_method_mut(
+            "round_rect",
+            |_, _this, (x, y, w, h, radius, r, g, b, a): (f32, f32, f32, f32, f32, u8, u8, u8, u8)| {
+                if w <= 0.0 || h <= 0.0 {
+                    return Ok(());
+                }
+                let color = Argb::new(a, r, g, b);
+                let rect = crate::core::geometry::Rect::new(x, y, w, h);
+                let radius = radius.max(0.0).min(w.min(h) * 0.5);
+                with_list(|list| {
+                    list.push(DrawCmd::Fill {
+                        shape: Shape::Rect { rect, radius },
+                        paint: Paint::Solid(color, BlendMode::SourceOver),
+                        alpha: 1.0,
+                        blend: Blend::SourceOver,
+                    });
+                });
+                Ok(())
+            },
+        );
+
+        // 圆角矩形描边。
+        methods.add_method_mut(
+            "round_rect_ring",
+            |_,
+             _this,
+             (x, y, w, h, radius, width, r, g, b, a): (
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                f32,
+                u8,
+                u8,
+                u8,
+                u8,
+            )| {
+                if w <= 0.0 || h <= 0.0 || width <= 0.0 {
+                    return Ok(());
+                }
+                let color = Argb::new(a, r, g, b);
+                let rect = crate::core::geometry::Rect::new(x, y, w, h);
+                let radius = radius.max(0.0).min(w.min(h) * 0.5);
+                with_list(|list| {
+                    list.push(DrawCmd::Stroke {
+                        shape: Shape::Rect { rect, radius },
+                        paint: Paint::Solid(color, BlendMode::SourceOver),
+                        alpha: 1.0,
+                        width,
+                        cap: crate::core::draw::Cap::Round,
+                        join: crate::core::draw::Join::Round,
+                        blend: Blend::SourceOver,
+                    });
+                });
+                Ok(())
+            },
+        );
+
+        // 多段径向渐变：`stops = {{offset=0,r=..,g=..,b=..,a=..}, ...}`。
+        // CursorFX 的 orb / gunshot / shockwave 用中心亮、边缘透明的多段渐变。
+        methods.add_method_mut(
+            "radial_stops",
+            |_, _this, (x, y, radius, stops): (f32, f32, f32, mlua::Table)| {
+                if radius <= 0.0 {
+                    return Ok(());
+                }
+                let mut gs = Vec::new();
+                for i in 1..=stops.raw_len() {
+                    let Ok(s) = stops.get::<mlua::Table>(i) else {
+                        continue;
+                    };
+                    let off: f32 = s.get("offset").unwrap_or(0.0);
+                    let r: u8 = s.get("r").unwrap_or(255);
+                    let g: u8 = s.get("g").unwrap_or(255);
+                    let b: u8 = s.get("b").unwrap_or(255);
+                    let a: u8 = s.get("a").unwrap_or(255);
+                    gs.push(GradStop {
+                        offset: off.clamp(0.0, 1.0),
+                        color: Argb::new(a, r, g, b),
+                    });
+                }
+                if gs.len() < 2 {
+                    return Ok(());
+                }
+                let center = Point::new(x, y);
+                with_list(|list| {
+                    list.push(DrawCmd::Fill {
+                        shape: Shape::Circle { center, radius },
+                        paint: Paint::Radial {
+                            center,
+                            radius,
+                            stops: gs,
+                        },
+                        alpha: 1.0,
+                        blend: Blend::SourceOver,
+                    });
                 });
                 Ok(())
             },
@@ -447,6 +632,72 @@ impl UserData for DrawListCtx {
                     list.text_centered(Point::new(cx, cy), &s, size, color, None);
                 });
                 Ok(())
+            },
+        );
+
+        // 桌面圆形采样：把指针周围一小块**真实桌面**按圆形蒙版画回来。
+        //
+        // mode = "magnify"：源区半径 = radius / zoom，双线性放大（真放大镜）。
+        // mode = "difference"：逐通道 |源 − (r,g,b)|（复刻 mix-blend-mode: difference）。
+        // alpha 与其它颜色参数同口径（0–255），内部再换算成 DrawCmd::Image 的 0–1 乘子。
+        // 返回 false = 抓屏/自身排除不可用，脚本据此退回静态外观——绝不静默画出套娃。
+        methods.add_method_mut(
+            "backdrop_circle",
+            |_, _this, args: (f32, f32, f32, String, f32, u8, u8, u8, f32)| {
+                let (x, y, radius, mode, zoom, r, g, b, alpha) = args;
+                let radius = radius.clamp(2.0, 220.0);
+                let zoom = if zoom.is_finite() {
+                    zoom.clamp(1.0, 4.0)
+                } else {
+                    1.0
+                };
+                let lens_mode = match mode.as_str() {
+                    "difference" => LensMode::Difference { color: (r, g, b) },
+                    _ => LensMode::Magnify { zoom },
+                };
+                // 先排除覆盖层再抓屏；排不掉就不画（否则镜片会把上一帧的自己抓进来）。
+                if !LENS_EXCLUDED.with(|c| *c.borrow()) {
+                    if !capture_exclusion::set_overlay_excluded(true) {
+                        return Ok(false);
+                    }
+                    LENS_EXCLUDED.with(|c| *c.borrow_mut() = true);
+                }
+                let half = match lens_mode {
+                    LensMode::Magnify { zoom } => radius / zoom,
+                    LensMode::Difference { .. } => radius,
+                };
+                let side = (half * 2.0).round().max(2.0) as i32;
+                let rect = ScreenRect {
+                    x: x.round() as i32 - side / 2,
+                    y: y.round() as i32 - side / 2,
+                    w: side,
+                    h: side,
+                };
+                let shot = match screenshot::grab(rect) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if !LENS_FAIL_WARNED.with(|c| *c.borrow()) {
+                            LENS_FAIL_WARNED.with(|c| *c.borrow_mut() = true);
+                            log::warn!("桌面镜片抓屏失败：{e}（后续静默；脚本退回静态外观）");
+                        }
+                        return Ok(false);
+                    }
+                };
+                let Some(bmp) =
+                    crate::core::image::lens_circle(&shot, radius.round() as u32, lens_mode)
+                else {
+                    return Ok(false);
+                };
+                let d = radius.round();
+                let dest = Rect {
+                    x: x - d,
+                    y: y - d,
+                    w: d * 2.0,
+                    h: d * 2.0,
+                };
+                with_list(|list| list.image(Rc::new(bmp), dest, (alpha / 255.0).clamp(0.0, 1.0)));
+                LENS_LAST_USE.with(|c| *c.borrow_mut() = Some(Instant::now()));
+                Ok(true)
             },
         );
     }

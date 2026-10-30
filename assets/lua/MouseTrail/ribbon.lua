@@ -171,14 +171,15 @@ function draw(ctx, params)
   local rb = params.rainbow
   if rb == nil then rb = (params.color_mode ~= "fixed") end
   local cm = rb and "rainbow" or "fixed"
-  local a = math.floor((params.opacity or 0.5) * 255)
-  local r, g, b
+  local r, g, b, ca
   if cm == "rainbow" then
     local hue = (elapsed * 0.3) % 1.0
     r, g, b = hsv_to_rgb(hue * 360, 1.0, 1.0)
+    ca = 255
   else
-    r, g, b = hex_to_rgb(params.fixed_color or "#FF0000")
+    r, g, b, ca = hex_to_rgb(params.fixed_color or "#FF0000")
   end
+  local a = math.floor((params.opacity or 0.5) * 255 * ca / 255)
 
   local path = build_path(half_w)
   if path then

@@ -312,10 +312,11 @@ fn main() {
         }
     });
 
-    // ── 走真实脚本：ai_chat.lua 自己组系统提示词并开窗（引擎每步记内存账） ──
+    // ── 走真实脚本：官方包 AI/ai_chat.lua 自己组系统提示词并开窗（引擎每步记内存账） ──
     // ★ 顺序要紧：引擎的账（M2a/M2b）必须在**任何窗口**创建前记——窗口机制会拉起
     //   一串系统 DLL 且卸载不掉，先开过裸窗再量引擎，引擎的数就被污染了。
-    let script_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/lua/scripts");
+    let script_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../CurSeen-Scripts/Packs/AI/scripts");
     let notes: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let notes_t = notes.clone();
     let t = std::thread::spawn(move || {

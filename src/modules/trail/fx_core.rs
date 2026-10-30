@@ -77,6 +77,14 @@ pub struct FxCore {
     pub active: bool,
     /// 脚本是否声明 `hide_cursor = true`。
     pub hide_cursor: bool,
+    /// 上一次移动的 (x,y,elapsed)：算 `cursor_vx/vy/speed/heading` 用。
+    last_move: Option<(f32, f32, f32)>,
+    vx: f32,
+    vy: f32,
+    speed: f32,
+    heading: f32,
+    mouse_down: bool,
+    mouse_button: &'static str,
 }
 
 impl FxCore {
@@ -98,6 +106,13 @@ impl FxCore {
             acc: 0.0,
             active: false,
             hide_cursor,
+            last_move: None,
+            vx: 0.0,
+            vy: 0.0,
+            speed: 0.0,
+            heading: 0.0,
+            mouse_down: false,
+            mouse_button: "left",
         })
     }
 
@@ -128,6 +143,17 @@ impl FxCore {
     ///
     /// `spawn_batch`：拖尾宿主的"本批生成几个粒子"（间隔类特效用），其余宿主传 `None`。
     pub fn move_to(&mut self, x: f32, y: f32, spawn_batch: Option<u32>) {
+        // 单位口径：按 60fps 的每帧像素算，与 CursorFX 的 state.vx/vy 同量纲。
+        if let Some((lx, ly, lt)) = self.last_move {
+            let dt = self.elapsed - lt;
+            if dt > 1e-4 {
+                self.vx = (x - lx) / dt / 60.0;
+                self.vy = (y - ly) / dt / 60.0;
+                self.speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
+                self.heading = self.vy.atan2(self.vx);
+            }
+        }
+        self.last_move = Some((x, y, self.elapsed));
         self.cursor = (x, y);
         if self.origin.is_none() {
             self.origin = Some((x, y));
@@ -153,12 +179,47 @@ impl FxCore {
     /// 指针在 (x, y) 按下：更新光标、落定出生点、注环境、发 `on_press`
     /// （脚本只写了老名 `on_click` 时引擎自动回退，老脚本零改动）。
     pub fn press(&mut self, x: f32, y: f32) {
+        self.press_button("left", x, y);
+    }
+
+    /// 带按键名的按下（复合/包卡脚本可据此区分左右中键）。
+    pub fn press_button(&mut self, button: &'static str, x: f32, y: f32) {
         self.cursor = (x, y);
+        self.mouse_down = true;
+        self.mouse_button = button;
         if self.origin.is_none() {
             self.origin = Some((x, y));
         }
         let _ = self.push_env();
-        let _ = self.engine.call_on_press(x, y, self.elapsed, &self.params);
+        let _ = self
+            .engine
+            .call_on_button(button, x, y, self.elapsed, &self.params);
+    }
+
+    /// 抬起：清 `mouse_down` 并转发 `on_mouse_up`（缺回调静默跳过）。
+    pub fn release(&mut self, button: &'static str, x: f32, y: f32) {
+        self.cursor = (x, y);
+        self.mouse_down = false;
+        self.mouse_button = button;
+        let _ = self.push_env();
+        let _ = self.engine.call_on_mouse_up(button, x, y, &self.params);
+    }
+
+    /// 滚轮：刷新光标 + 环境，转发 `on_wheel`（缺回调静默跳过）。
+    pub fn wheel(&mut self, delta: i32, horizontal: bool, x: f32, y: f32) {
+        self.cursor = (x, y);
+        let _ = self.push_env();
+        let _ = self
+            .engine
+            .call_on_wheel(delta, horizontal, x, y, &self.params);
+    }
+
+    /// 脚本是否声明了 `on_wheel`。
+    pub fn wants_wheel(&self) -> bool {
+        matches!(
+            self.engine.lua().globals().get::<mlua::Value>("on_wheel"),
+            Ok(mlua::Value::Function(_))
+        )
     }
 
     /// 推进 `dt_s` 秒：按 `FIXED_DT` 子步进（不足一步的零头留在累加器里），
@@ -231,7 +292,15 @@ impl FxCore {
         let origin = self.origin.unwrap_or(self.cursor);
         self.engine
             .update_env(self.cursor, origin, self.elapsed, self.screen, self.host)?;
-        self.engine.set_wall_ms(self.wall_ms)
+        self.engine.set_wall_ms(self.wall_ms)?;
+        self.engine.set_pointer_state(
+            self.vx,
+            self.vy,
+            self.speed,
+            self.heading,
+            self.mouse_down,
+            self.mouse_button,
+        )
     }
 }
 
@@ -653,9 +722,9 @@ end
     #[test]
     fn image_script_is_inert_in_mouse_directories() {
         const IMAGE: &str = r#"
-name = "图片信息"
+name = "图片体检"
 role = "image"
-menu = "图片信息"
+menu = "图片体检"
 function run(ctx, params) return true end
 "#;
         let root = mount_points(IMAGE, &["MouseTrail"]);

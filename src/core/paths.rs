@@ -34,6 +34,38 @@ pub fn data_dir() -> PathBuf {
     app_dir()
 }
 
+/// 单个脚本的私有数据目录：`<程序目录>/data/lua/<脚本 id>/`（按需创建）。
+///
+/// 与 `assets/` **分离**：脚本写自己的 JSON/缓存不会触发目录监听/面板重扫；与 `temp/`
+/// 分离：不是一次性产物，不会被临时清理。用户设置仍归 `config.json` 的
+/// `lua_ext.params[id]`，这里只放脚本自己的状态/缓存。
+///
+/// id 的路径段做最小净化（只留 ASCII 字母数字与 `. _ -`，丢弃空/`.`/`..`），既保留
+/// `scripts/2.ocr_text` 这种可读层级，又不让脚本名把目录带出 `data/lua`。
+pub fn script_data_dir(id: &str) -> PathBuf {
+    let mut dir = data_dir().join("data").join("lua");
+    for part in id.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        let safe: String = part
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if !safe.is_empty() {
+            dir.push(safe);
+        }
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// 配置文件：`<程序目录>/config.json`。
 pub fn config_path() -> PathBuf {
     data_dir().join("config.json")
@@ -176,10 +208,16 @@ pub fn clickfx_dir() -> PathBuf {
 
 /// Lua 扩展脚本目录：`assets/lua`。
 ///
-/// 图片右键菜单的「图片操作」子菜单和 UI 的脚本页都扫这个目录。每个脚本定义
+/// 图片右键菜单的「脚本」子菜单和 UI 的脚本页都扫这个目录。每个脚本定义
 /// `name` / `description` / `menu` / `schema()` 并通过全局 `ext` 调用本程序开放的 API。
 pub fn lua_ext_dir() -> PathBuf {
-    asset_dir("lua")
+    // 单元测试跑 `tests/fixtures/assets/lua`：出厂鼠标包已从 `main/assets` 清出，
+    // 但引擎/模型门禁仍要对着完整脚本树跑。集成测试与生产走 `asset_dir`。
+    #[cfg(test)]
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assets/lua");
+    #[cfg(not(test))]
+    let dir = asset_dir("lua");
+    dir
 }
 
 /// 屏幕标注的 PNG 导出目录：`<程序目录>/temp/annotation`。
@@ -294,6 +332,32 @@ mod tests {
             p.parent().is_some_and(|d| d.ends_with("HoverDot")),
             "裸名应落到 HoverDot 文件夹：{p:?}"
         );
+    }
+
+    #[test]
+    fn script_data_lives_outside_assets_and_sanitizes_id_segments() {
+        let dir = script_data_dir("scripts/2.ocr_text");
+        assert!(
+            dir.ends_with(
+                Path::new("data")
+                    .join("lua")
+                    .join("scripts")
+                    .join("2.ocr_text")
+            ),
+            "{dir:?}"
+        );
+        assert!(
+            !dir.to_string_lossy().contains("assets"),
+            "不能落进 assets：{dir:?}"
+        );
+        assert!(dir.is_dir(), "取用时必须已建好：{dir:?}");
+        let escaped = script_data_dir("../../evil/name");
+        assert!(
+            escaped.ends_with(Path::new("data").join("lua").join("evil").join("name")),
+            "`..` 段应被丢弃：{escaped:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(escaped);
     }
 
     #[test]

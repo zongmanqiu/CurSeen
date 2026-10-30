@@ -79,8 +79,8 @@ body{padding-left:280px}
 effect_name = &quot;实心圆&quot;     -- role=&quot;effect&quot; 时：拖尾/悬浮标/点击效果**下拉框**里的显示名
 description = &quot;一句话说明&quot; -- 可选；面板脚本页显示
 role = &quot;effect&quot;          -- 可选：四个挂载目录下缺省由目录推断（effect/composite），其余场合才必填
-menu = &quot;图片信息&quot;         -- role=&quot;image&quot; 时：贴图右键「图片操作」里的菜单文本
-hide_cursor = true       -- 悬浮标脚本声明&quot;隐藏系统指针&quot;（如激光笔样式）
+menu = &quot;图片信息&quot;         -- role=&quot;image&quot; 时：贴图右键「脚本」里的菜单文本
+hide_cursor = true       -- 悬浮标脚本声明&quot;隐藏系统箭头&quot;（I 形/缩放提示保留）（如激光笔样式）
 </code></pre>
 <h2 id="三-四类脚本的契约">三、四类脚本的契约</h2>
 <h3 id="3-1-绘制特效-role-effect-拖尾-悬浮标-点击效果">3.1 绘制特效 <code>role="effect"</code>（拖尾 / 悬浮标 / 点击效果）</h3>
@@ -171,7 +171,8 @@ end<br />
 <p>宿主每帧更新的全局（<strong>四类宿主同一套</strong>）：<code>cursor_x</code> <code>cursor_y</code>（指针位置；点击效果<br />
 出生后每帧仍跟着指针刷新）、<code>origin_x</code> <code>origin_y</code>（实例出生点：拖尾/悬浮标 = 首个采样<br />
 点，点击效果 = 按下点）、<code>mouse_x</code> <code>mouse_y</code>（<code>cursor_*</code> 的老别名）、<code>elapsed</code>（秒）、<br />
-<code>screen_w</code> <code>screen_h</code>、<code>host</code>（<code>"trail"</code> / <code>"hover"</code> / <code>"clickfx"</code> / <code>"panel"</code>）、<br />
+<code>screen_w</code> <code>screen_h</code>、<code>screen_x</code> <code>screen_y</code>（虚拟屏原点，可为负；<br />
+整屏暗罩 / 星空 / 镜像中心要用它）、<code>host</code>（<code>"trail"</code> / <code>"hover"</code> / <code>"clickfx"</code> / <code>"panel"</code>）、<br />
 <code>wall_ms</code>（墙钟毫秒）、<code>_params</code>（当前参数表；老脚本读它，新脚本直接用回调第二参）。</p>
 <p>★★ <strong><code>step(dt)</code> 的 <code>dt</code> 四类宿主一律是秒</strong>，且都按固定步长（1/120 秒）子步进——不足<br />
 一步的零头留到下一帧，卡顿后最多补 16 步。历史上有过"拖尾秒 / 点击毫秒""悬浮标<br />
@@ -248,6 +249,10 @@ end<br />
 <td><code>(cx, cy, str, size, r, g, b, a)</code> 文字；<code>(cx, cy)</code> = <strong>文字几何中心</strong></td>
 </tr>
 <tr>
+<td><code>backdrop_circle</code></td>
+<td><code>(x, y, radius, mode, zoom, r, g, b, a) -&gt; bool</code> <strong>真桌面采样</strong>：<code>"magnify"</code> 放大镜（源区半径 = radius/zoom）/ <code>"difference"</code> 逐通道 <code>|源−(r,g,b)|</code>；<code>a</code> 0–255；返回 false = 抓屏不可用。<strong>运行期间覆盖层不进系统截图/录屏</strong></td>
+</tr>
+<tr>
 <td><code>layer</code></td>
 <td><code>("base"/"normal"/"top")</code> 后续指令的绘制层；破坏性擦除必须垫底</td>
 </tr>
@@ -268,7 +273,7 @@ end<br />
 <code>ctx = { role, sounds={文件名,…}, key, mods, repeated, dt }</code>。</p>
 <p><strong>返回值语义</strong>（两个入口一致）：返回 <code>ctx.sounds</code> 里的文件名或索引 → 播放它；<br />
 返回 <code>false</code> → <strong>强制静音</strong>（连宿主默认音也不响）；返回 <code>nil</code> / <code>true</code> / 其它 → 落回默认音效。</p>
-<h3 id="3-3-图片操作扩展-role-image">3.3 图片操作扩展 <code>role="image"</code></h3>
+<h3 id="3-3-脚本扩展-role-image">3.3 脚本扩展 <code>role="image"</code></h3>
 <p>入口 <code>run(ctx, params)</code>；<code>ctx = { role="image", image=?, hwnd=? }</code>（<code>hwnd</code> = 目标窗口句柄）。<br />
 <code>image</code> 是<strong>只读快照</strong>，改动不回写贴图：</p>
 <table>
@@ -325,6 +330,14 @@ end<br />
 <tr>
 <td><code>on_mouse_down(button, x, y, params)</code></td>
 <td><code>button</code> = <code>left/right/middle/x1/x2</code></td>
+</tr>
+<tr>
+<td><code>on_mouse_up(button, x, y, params)</code></td>
+<td>鼠标抬起（按住态视觉用）</td>
+</tr>
+<tr>
+<td><code>on_wheel(delta, horizontal, x, y, params)</code></td>
+<td>滚轮：delta 一格 ±120（正 = 上/右）；horizontal = 倾斜滚轮。只有声明它，钩子才转发普通滚轮</td>
 </tr>
 <tr>
 <td><code>on_key(key, mods, repeated, params)</code></td>
@@ -441,32 +454,17 @@ end
 </thead>
 <tbody>
 <tr>
-<td><code>scripts/1.image_info.lua</code></td>
-<td><code>role="image"</code></td>
-<td>最小骨架：声明 + <code>run</code> + 返回结果框</td>
-</tr>
-<tr>
-<td><code>scripts/2.avg_color.lua</code></td>
-<td><code>role="image"</code></td>
-<td>像素采样（<code>bytes()</code> + <code>string.byte</code> 批量统计）</td>
-</tr>
-<tr>
-<td><code>scripts/3.composite_demo.lua</code></td>
-<td><code>role="composite"</code></td>
-<td>拖尾 + 点击音 + 点击效果三合一模板</td>
-</tr>
-<tr>
-<td><code>scripts/ai_chat.lua</code></td>
+<td><code>scripts/AI/ai_chat.lua</code></td>
 <td><code>composite</code></td>
-<td><strong>AI 写脚本</strong>：卡片里填 API Key / 地址 / 模型 / 快捷键，热键呼出多轮对话（<code>ext:input</code> + <code>ext:http</code> + <code>ext:json_decode</code>），系统提示词带 <code>ai_chat_api.txt</code> 速查，可让 AI 辅助写脚本</td>
+<td><strong>AI 写脚本</strong>（官方资源包）：卡片里填 API Key / 地址 / 模型 / 快捷键，热键呼出多轮对话（<code>ext:chat_window</code>），系统提示词带同目录的 <code>ai_chat_api.txt</code> 速查，可让 AI 辅助写脚本</td>
 </tr>
 <tr>
-<td><code>scripts/unified_sound.lua</code></td>
+<td><code>KeySound/unified_sound.lua</code></td>
 <td><code>role="keysound"</code></td>
 <td>统一 <code>run</code> 入口的键音脚本</td>
 </tr>
 <tr>
-<td><code>scripts/class_sound.lua</code></td>
+<td><code>KeySound/class_sound.lua</code></td>
 <td><code>role="keysound"</code></td>
 <td>按键分类挑选音效</td>
 </tr>
@@ -700,6 +698,12 @@ end
 <td>默认 1080，每帧刷新</td>
 </tr>
 <tr>
+<td><code>screen_x</code> / <code>screen_y</code></td>
+<td>number</td>
+<td>虚拟桌面原点（物理像素，可为负）</td>
+<td>整屏暗罩 / 星空 / 镜像中心要用它：副屏在主屏左侧或上方时 <code>0,0</code> 不是屏幕左上角</td>
+</tr>
+<tr>
 <td><code>elapsed</code></td>
 <td>number</td>
 <td>逐帧累加时间（<strong>秒</strong>）</td>
@@ -716,6 +720,12 @@ end
 <td>number</td>
 <td><code>cursor_*</code> 的别名</td>
 <td>兼容老脚本，零改动</td>
+</tr>
+<tr>
+<td><code>cursor_hover</code></td>
+<td>bool</td>
+<td>系统是否正在给出<strong>交互光标提示</strong></td>
+<td>I 形 / 手形 / 缩放 / 禁止 / 帮助 / 十字。桌面按钮用箭头光标，因此它<strong>不代表</strong>「指针下有按钮」；自定义光标也不算</td>
 </tr>
 <tr>
 <td><code>origin_x</code> / <code>origin_y</code></td>
@@ -836,6 +846,11 @@ end
 <td><code>(cx, cy, s, size, r, g, b, a)</code></td>
 <td>文字，锚点为<strong>几何中心</strong>（点击点周围随机冒字用）。</td>
 </tr>
+<tr>
+<td><code>backdrop_circle</code></td>
+<td><code>(x, y, r, mode, zoom, cr, cg, cb, alpha) -&gt; bool</code></td>
+<td><strong>真桌面采样</strong>：<code>mode="magnify"</code> 放大镜（源区半径 = r/zoom，zoom 1–4）；<code>mode="difference"</code> 逐通道 <code>|源−(cr,cg,cb)|</code>；<code>alpha</code> 0–255。返回 <code>false</code> = 抓屏不可用（退回静态外观）。<strong>只要它在跑，CurSeen 覆盖层对系统截图/录屏不可见</strong>——排除自身、避免镜片无限套娃的代价。</td>
+</tr>
 </tbody>
 </table>
 <hr />
@@ -861,7 +876,7 @@ end
 <td><code>result</code></td>
 <td>函数</td>
 <td><code>ext:result(text: string)</code></td>
-<td>弹出一个可复制文本框（非阻塞，自带消息泵）。</td>
+<td>开一扇<strong>宿主文本窗</strong>（标题带 + 一个多行文本框）：会换行、鼠标直接圈选、Ctrl+C 可复制，还能<strong>轻微改两下</strong>再走；底部「复制」交的是<strong>当前</strong>内容（改过就复制改后的）。窗高按行数实算。阻塞在<strong>脚本自己的线程</strong>上直到用户关窗，UI 线程零等待。</td>
 </tr>
 <tr>
 <td><code>log</code></td>
@@ -873,18 +888,120 @@ end
 <td><code>http</code></td>
 <td>函数</td>
 <td><code>ext:http(method, url, headers: table, body?: string) -&gt; { status: int, body: string }</code></td>
-<td><strong>阻塞</strong> HTTP（60s 超时）。<code>headers</code> 为 <code>key=value</code> 表；<code>method</code> 支持 GET / DELETE / POST / PUT（其它方法返回 <code>{status=0, body="不支持的 HTTP 方法…"}</code>）。错误时 <code>status=0</code> 且 <code>body</code> 为错误信息字符串（不 panic）。</td>
+<td><strong>阻塞</strong> HTTP（60s 超时）。★ 只能在 <code>run</code> 模型里调：<code>draw</code> 逐帧跑在 UI 线程，调用会被<strong>拒绝</strong>（返回 <code>status=0</code> 与原因），不会把界面冻住。<code>headers</code> 为 <code>key=value</code> 表；<code>method</code> 支持 GET / DELETE / POST / PUT（其它方法返回 <code>{status=0, body="不支持的 HTTP 方法…"}</code>）。错误时 <code>status=0</code> 且 <code>body</code> 为错误信息字符串（不 panic）。</td>
+</tr>
+<tr>
+<td><code>download</code></td>
+<td>方法</td>
+<td><code>ext:download(url: string, path: string, headers?: table) -&gt; int | nil, err</code></td>
+<td>把 URL 的响应体<strong>流式</strong>写到 <code>path</code>（二进制安全，返回字节数）。★ 先写 <code>path.partial</code>、成功再原子改名，失败清半成品；上限 512 MB；服务端给了 <code>Content-Length</code> 会校验。★ <strong>阻塞</strong>，只能从 <code>run</code> 模型里调（<code>draw</code> 跑在 UI 线程，会冻全屏）。★ 地址不限——和 <code>ext:http</code> 一样，下什么、从哪下是脚本作者的责任。</td>
+</tr>
+<tr>
+<td><code>unzip</code></td>
+<td>方法</td>
+<td><code>ext:unzip(zip_path: string, dest_dir: string) -&gt; int | nil, err</code></td>
+<td>把 ZIP 解到 <code>dest_dir</code>（不存在就建），返回<strong>文件</strong>数（目录不算）。只认 stored / deflate；<strong>路径逃逸一律拒</strong>（<code>..</code>、绝对路径、盘符、符号链接），CRC 不符 / 加密条目 / 超限（单条目 256 MB、整包 2 GiB）也拒，且不留半成品。暂不支持 ZIP64。</td>
 </tr>
 <tr>
 <td><code>input</code></td>
 <td>方法</td>
-<td><code>ext:input(title: string, default?: string) -&gt; string \| nil</code></td>
-<td>弹一个可编辑输入框（阻塞，自带消息泵）。确定 = 返回输入文本；取消 / <code>Esc</code> / 关窗 = 返回 <code>nil</code>。</td>
+<td><code>ext:input(title: string, default?: string) -&gt; string | nil</code></td>
+<td>开同一扇宿主文本窗的<strong>输入</strong>档（多行，Enter 换行；进窗即全选，提交只走「确定」按钮）。确定 = 返回输入文本；取消 / <code>Esc</code> / 关窗 = 返回 <code>nil</code>。★ 只有 <code>run</code> 模型（<code>image</code> / <code>keysound</code>，跑在工作线程）能等到回答：<code>draw</code> 模型逐帧跑在 UI 线程，在那里阻塞会自锁，所以那种调用只开窗、立即返回 <code>nil</code>。</td>
+</tr>
+<tr>
+<td><code>proc</code></td>
+<td>方法</td>
+<td><code>ext:proc(opts: table) -&gt; table | nil, err</code></td>
+<td><strong>外置工具通道</strong>（m10）：起一个进程、等它跑完、把输出交回脚本。<code>opts = { exe, args?, cwd?, timeout_ms?, ansi? }</code>，返回 <code>{ code, stdout, stderr, timed_out, truncated, elapsed_ms }</code>（<code>code</code> 在被超时杀掉时是 <code>nil</code>；<code>elapsed_ms</code> 是<strong>整次调用</strong>的墙钟，含起进程与加载 dll——那才是用户感到的延迟）。★ <code>exe</code> 只准写<strong>脚本自己目录（含子目录）里的相对路径 + <code>.exe</code></strong>：绝对路径、<code>..</code>、<code>.dll</code> / <code>.bat</code> 一律拒绝并给中文原因。<code>args</code> 是<strong>数组</strong>，逐个交给子进程，不拼命令行（路径里有空格与引号都不用脚本操心）。<code>ansi = true</code> 按系统码页（中文系统 = GBK）解输出，默认按 UTF-8——猜错的表现就是"锟斤拷 / 鏂囧瓧"，所以这条只能由认识那个工具的脚本来声明。<code>timeout_ms</code> 默认 30 s、上限 120 s（超时宿主一定杀掉并收尸）。工作目录默认 = exe 所在目录（工具按相对路径找自己的模型 / dll）。阻塞在脚本自己的线程上，UI 零等待。★ 只能在 <code>run</code> 模型里调（<code>draw</code> 在 UI 线程上调用会被拒绝，理由同 <code>ext:http</code>）。</td>
+</tr>
+<tr>
+<td><code>script_dir</code></td>
+<td>方法</td>
+<td><code>ext:script_dir() -&gt; string</code></td>
+<td>脚本自己所在目录的<strong>绝对</strong>路径。要给外置工具拼绝对路径时用它（多数工具只认绝对路径）。</td>
+</tr>
+<tr>
+<td><code>tmpdir</code></td>
+<td>方法</td>
+<td><code>ext:tmpdir() -&gt; string</code></td>
+<td>宿主专属的临时目录（绝对路径，取用时已建好）。<code>ext:proc</code> 路线的标准用法：<code>img:save(ext:tmpdir() .. "\\in.png")</code> → 把绝对路径交给工具。</td>
+</tr>
+<tr>
+<td><code>data_dir</code></td>
+<td>方法</td>
+<td><code>ext:data_dir() -&gt; string</code></td>
+<td>本脚本自己的<strong>持久数据目录</strong>：<code>&lt;程序目录&gt;/data/lua/&lt;脚本 id&gt;/</code>（绝对路径，按需创建）。缓存/历史/上次选择放这里；不在 <code>assets/</code> 下，写它不会触发目录监听，也不会被 <code>temp/</code> 清理。用户设置仍写 <code>config.json</code> 的 <code>lua_ext.params[id]</code>。</td>
+</tr>
+<tr>
+<td><code>open_file</code></td>
+<td>方法</td>
+<td><code>ext:open_file(kind?: string, start_dir?: string) -&gt; string | nil | nil, err</code></td>
+<td>原生「打开」对话框，<strong>由用户来选</strong>（所以这里的路径可以是任意绝对位置，与 <code>ext:proc</code> 的 <code>exe</code> 只准脚本目录相反——选什么是人做的，起始目录只是提示）。<code>kind</code> = <code>any</code>(默认) / <code>image</code> / <code>audio</code> / <code>gif</code> / <code>mp4</code>，<strong>只影响过滤器</strong>；不认识的写法返回 <code>nil, 原因</code> 并列出可用档（刻意<strong>不降级成 any</strong>：拼错一个字母却拿到全文件对话框，症状是"它有时候不给我显示图片"）。三档要分清：选到 = 绝对路径；<strong>取消 = <code>nil</code></strong>（"没选"不是错误，脚本自己收尾）；词表不对 / 在 <code>draw</code> 脚本里调用 = <code>nil, 原因</code>。阻塞在脚本自己的线程上，对话框模态于触发它的那张贴图。</td>
+</tr>
+<tr>
+<td><code>save_file</code></td>
+<td>方法</td>
+<td><code>ext:save_file(name?: string, ext?: string, start_dir?: string) -&gt; string | nil</code></td>
+<td>原生「另存为」。<code>ext</code> 会被收成<strong>前导一段</strong>字母数字（转小写、≤8 字，畸形或缺省 = <code>txt</code>），所以 <code>"p.n"</code> 是 <code>p</code> 而不是 <code>pn</code>。返回的路径可能指向已存在的文件——覆盖确认由系统在对话框里问，脚本不必再自查存在性。取消 = <code>nil</code>。</td>
+</tr>
+<tr>
+<td><code>open_temp</code></td>
+<td>方法</td>
+<td><code>ext:open_temp(bytes: string, ext: string) -&gt; string | nil, err</code></td>
+<td>把字节写成 <code>ext:tmpdir()</code> 里的临时文件，并用<strong>系统默认程序</strong>打开；成功返回路径。<code>ext</code> 只允许光栅图片（<code>png/jpg/jpeg/gif/bmp/webp/tif/tiff/ico</code>），其余一律拒——二维码内容不可信，不能借 <code>.exe</code> / <code>.lnk</code> / <code>.url</code> 变成一次执行。写盘回读长度；打开失败时文件仍在，原因里带路径。</td>
+</tr>
+<tr>
+<td><code>open_url</code></td>
+<td>方法</td>
+<td><code>ext:open_url(url: string) -&gt; true | nil, err</code></td>
+<td>用系统默认浏览器打开网址。<strong>只允许 <code>http</code> / <code>https</code></strong>；<code>file:</code>、<code>javascript:</code>、自定义协议与含空白/控制字符的串一律拒。</td>
+</tr>
+<tr>
+<td><code>read_file</code></td>
+<td>方法</td>
+<td><code>ext:read_file(path: string) -&gt; string | nil, err</code></td>
+<td>读<strong>任意路径</strong>的字节（m14「回程」）。与 <code>ctx.fs:read</code> 的分工就在"任意路径"上：那个限脚本目录（防手滑的纪律），这个不限——外部工具的产物落在哪儿都取回来。返回 Lua 二进制安全字符串，<strong>字节原样、不猜编码</strong>。超过 64 MiB 一律<strong>拒</strong>而不是截断（被剪掉的字节当图片/JSON 用，症状是"这文件坏了"）。取消/失败分得清：文件不存在、是目录、超限 ⇒ <code>nil, 原因</code>。</td>
+</tr>
+<tr>
+<td><code>write_file</code></td>
+<td>方法</td>
+<td><code>ext:write_file(path: string, data: string) -&gt; true | nil, err</code></td>
+<td>写文件（任意路径，父目录自动建）。★ 写完<strong>回读核长度</strong>：<code>fs::write</code> 报 Ok 不等于盘上就是这些字节（占位云盘、同步杀软是这条路上唯一会骗人的一环），对不上就报原因——同 <code>ext:clip_set</code> 一条纪律，不报"写好了"。</td>
+</tr>
+<tr>
+<td><code>load_image</code></td>
+<td>方法</td>
+<td><code>ext:load_image(path: string) -&gt; ExtImage | nil, err</code></td>
+<td>把文件读成图片对象。有了它，"外部工具改了张图"才真接得回脚本：<code>ext:proc</code> → <code>ext:load_image</code> → 像素 / <code>png_base64</code> / 再喂下一个工具。★ <strong>按原尺寸解</strong>（m21）：走 WIC，格式支持面以<strong>这台机器上 WIC 装了哪些解码器</strong>为准（PNG / JPEG / BMP / GIF / TIFF 通常都有，WebP 要看系统；"本机能不能解"以实测为准，别假设"常见格式都行"）。三条拒绝面各给一句人话：文件不存在 / 0 字节 · 超过 128 MB（与剪贴板缩略图同一个上限）· 整张超过 64 百万像素（BGRA 是 4 字节/像素，再大就该先缩）。格式不认识 / 缺解码器 / 文件坏掉，WIC 只报同一个失败，所以原因里如实写"三种之一"。读回来的 <strong>α 原样保留</strong>（不是截图那条"α 一律刷成 255"的语义，见 <code>core::backdrop::shot_to_bitmap_alpha</code>）。</td>
+</tr>
+<tr>
+<td><code>set_image</code></td>
+<td>方法</td>
+<td><code>ext:set_image(源) -&gt; true | nil, err</code></td>
+<td>把<strong>眼前这张贴图</strong>换成另一张图（源 = <code>ExtImage</code>，或一个图片文件路径——与 <code>ext:load_image</code> 同一条读图路）。★ 语义与右键「旋转 / 镜像」<strong>同一条缝</strong>，因此行为一致：只换<strong>视图</strong>——不写盘，也不改「恢复原图」与贴图环用的那份<strong>出厂原图</strong>；新图宽高不同会带着窗口一起重算（图 × 当前缩放 + 2px 描边，左上角不动）。改坏了有退路：像素一旦与出厂那份不同，贴图右键就出现<strong>「恢复原图」</strong>，换回的正是钉进来那一刻那张。脚本侧不需要自己留原图。没有贴图上下文（脚本页里直接跑、热键触发时没选中窗）⇒ <code>nil, 原因</code>，<strong>不猜是哪一张</strong>。逐帧脚本里排到下一次派发才生效，第二返回值会这么说明。</td>
+</tr>
+<tr>
+<td><code>clip_get</code></td>
+<td>方法</td>
+<td><code>ext:clip_get() -&gt; string | nil</code></td>
+<td>读剪贴板里的文本（识别结果去别处粘贴前可以先看一眼）。没有文本 = <code>nil</code>。</td>
+</tr>
+<tr>
+<td><code>clip_image</code></td>
+<td>方法</td>
+<td><code>ext:clip_image() -&gt; ExtImage | nil</code></td>
+<td>剪贴板里的<strong>位图</strong>（CF_DIB，32/24bpp，自下而上/自上而下都认）。让"截图 → 分析"不必先钉成贴图：截图工具（Win+Shift+S / QQ 截图）放进剪贴板之后，直接 <code>ext:clip_image()</code> → 取色板 / 对比度体检 / <code>img:crop</code> → <code>img:save</code>。★ 没有图像 = <code>nil</code>（与 <code>clip_get</code> 没有文本同一条纪律；读失败也归到 <code>nil</code>——底层不区分，这里不假装分得清）。★ α 一律按<strong>抓屏语义</strong>刷成 255：DIB 的第四字节不可信，别指望它带透明（带透明的图请用 <code>ext:load_image</code>）。</td>
+</tr>
+<tr>
+<td><code>clip_set</code></td>
+<td>方法</td>
+<td><code>ext:clip_set(text: string) -&gt; true | 抛错</code></td>
+<td>把文本写进剪贴板。★ <strong>写完立刻读回来核</strong>：底层写入不返回结果（失败只落日志），不一致就抛错——不能替用户宣布"复制好了"。★ 这会覆盖用户原有的剪贴板内容（本机共享资源），所以面向人的脚本要把这一步做成<strong>可关的开关</strong>，并写清复制成功与否。</td>
 </tr>
 <tr>
 <td><code>json_decode</code></td>
 <td>函数</td>
-<td><code>ext:json_decode(text: string) -&gt; table \| nil</code></td>
+<td><code>ext:json_decode(text: string) -&gt; table | nil</code></td>
 <td>JSON 文本 → Lua 表（数组 → 1 起始序列表）。解析失败返回 <code>nil</code>（不抛错）。</td>
 </tr>
 <tr>
@@ -895,8 +1012,9 @@ end
 </tr>
 </tbody>
 </table>
+<p><strong>信任模型只有一句：装脚本 = 交出你这个账号的权限</strong>，与装任何来源的 exe 同级，这里没有沙箱。<code>ext:proc</code> 那条"只准起脚本自己目录里的 <code>.exe</code>"是<strong>路径收口</strong>（拦手滑与误装，让"脚本能跑什么"只看一个目录就可审计），<strong>拦不住</strong>恶意脚本——<code>ext:write_file</code> 就能把 exe 写进那个目录再被起起来。</p>
 <h3 id="4-1-ExtImage-userdata">4.1 <code>ExtImage</code> userdata</h3>
-<p>由 <code>ext:get_image()</code> 与 <code>run</code> 模型的 <code>ctx.image</code> 返回。只读快照克隆，脚本改动不回写贴图。</p>
+<p>由 <code>ext:get_image()</code> 与 <code>run</code> 模型的 <code>ctx.image</code> 返回的<strong>只读快照</strong>。像素动作（<code>crop</code> / <code>rotate_cw90</code> / <code>flip_h</code> / <code>flip_v</code>）都返回<strong>新图</strong>，手里这张不动；要让屏幕上那张变，必须显式 <code>ext:set_image(结果)</code>——贴图是用户摆在那里的东西，不许被一次计算悄悄换掉。换上去之后想回原样：右键那张贴图 →「恢复原图」。</p>
 <table>
 <thead>
 <tr>
@@ -922,8 +1040,8 @@ end
 <tr>
 <td><code>save</code></td>
 <td>方法</td>
-<td><code>img:save(path: string)</code></td>
-<td>存成 PNG 文件（父目录会自动创建）。</td>
+<td><code>img:save(path: string, quality?: int)</code></td>
+<td>按<strong>扩展名</strong>写文件（m25）：<code>.png</code> 无损（给它传 <code>quality</code> 会报错），<code>.jpg</code> / <code>.jpeg</code> 有损（<code>quality</code> 1–100，默认 90，<strong>透明像素合成到白底</strong>——JPEG 没有 α 通道）。别的扩展名一律拒绝并点名这两种；配合 <code>ext:save_file(名字, "jpg")</code> 先让用户选落点。父目录自动创建；失败<strong>抛错</strong>，原因里点名阶段。</td>
 </tr>
 <tr>
 <td><code>pixel</code></td>
@@ -936,6 +1054,24 @@ end
 <td>方法</td>
 <td><code>img:bytes() -&gt; string</code></td>
 <td>原始 RGBA 缓冲（二进制安全字符串，长度 = w×h×4，行优先）。批量采样比逐点 <code>pixel</code> 快一个量级。</td>
+</tr>
+<tr>
+<td><code>crop</code></td>
+<td>方法</td>
+<td><code>img:crop(x, y, w, h) -&gt; ExtImage | nil, err</code></td>
+<td>裁出子矩形（<strong>像素坐标，相对本图左上角</strong>）。★ 越界<strong>不钳制</strong>：一律 <code>nil, 原因</code> 并点名是哪个角出的界——悄悄裁一半的症状是"它有时候少一块"，比一句"我算错了"难查得多。</td>
+</tr>
+<tr>
+<td><code>rotate_cw90</code></td>
+<td>方法</td>
+<td><code>img:rotate_cw90() -&gt; ExtImage</code></td>
+<td>顺时针 90°，宽高互换（与贴图右键「顺时针 90°」同一个 core 函数）。</td>
+</tr>
+<tr>
+<td><code>flip_h</code> / <code>flip_v</code></td>
+<td>方法</td>
+<td><code>img:flip_h() -&gt; ExtImage</code></td>
+<td>水平 / 垂直镜像。</td>
 </tr>
 </tbody>
 </table>
@@ -1064,19 +1200,31 @@ end
 <td><code>effect_name</code></td>
 <td>string</td>
 <td>特效三目录扫描取显示名；缺失回退文件名</td>
-<td>特效显示名。</td>
+<td>特效显示名；<code>name</code> 优先，二者互为别名。</td>
 </tr>
 <tr>
 <td><code>name</code></td>
 <td>string</td>
 <td>统一框架脚本取显示名，缺省文件名</td>
-<td>显示名。</td>
+<td>显示名；复制到任何目录都先读它。</td>
 </tr>
 <tr>
 <td><code>description</code></td>
 <td>string</td>
 <td>统一框架</td>
 <td>一句话说明（可选）。</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>string</td>
+<td>包卡下拉</td>
+<td><code>cursor</code> / <code>trail</code> / <code>click</code> / <code>hover</code> / <code>other</code>；官方目录以目录为准，包卡用它标类别。</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>string</td>
+<td>脚本页卡片排序</td>
+<td>可选分组：<code>mouse</code> / <code>picture</code> / <code>text</code> / <code>ai</code>。有值的卡片先按固定组顺序排；<strong>没有声明的老脚本排在最后</strong>、组内仍按原 id。只影响排序，不改显示名与 id。</td>
 </tr>
 <tr>
 <td><code>role</code></td>
@@ -1088,13 +1236,19 @@ end
 <td><code>menu</code></td>
 <td>string</td>
 <td>统一框架</td>
-<td>贴图右键「图片操作」子菜单文本；<code>nil</code> 表示只出现在脚本页。</td>
+<td>贴图右键「脚本」子菜单文本；<code>nil</code> 表示只出现在脚本页。</td>
+</tr>
+<tr>
+<td><code>requires</code></td>
+<td>string[]</td>
+<td>注册表读、菜单过滤用（<code>ExtSchema::available</code>）</td>
+<td>这个脚本要用的<strong>外置文件</strong>（相对脚本目录）。缺任何一个 ⇒ <strong>不进</strong>贴图右键「脚本」（m13）。路径解析与 <code>ctx.fs</code>、<code>ext:proc</code> 共用<strong>同一条路径判据</strong>：绝对路径 / <code>..</code> 一律算不满足，不顺着找。空 = 不依赖任何东西（没声明的老脚本永远可见）。</td>
 </tr>
 <tr>
 <td><code>hide_cursor</code></td>
 <td>bool</td>
 <td>引擎读取全局</td>
-<td>脚本声明隐藏系统指针时设 <code>true</code>；不存在 / 非布尔 → <code>false</code>。必须在 <code>load_script</code> 之后读取（顶层赋值在执行期写入 globals）。</td>
+<td>脚本声明隐藏系统<strong>箭头</strong>时设 <code>true</code>（I 形/手形/缩放提示保留）；不存在 / 非布尔 → <code>false</code>。必须在 <code>load_script</code> 之后读取（顶层赋值在执行期写入 globals）。</td>
 </tr>
 </tbody>
 </table>
@@ -1157,8 +1311,20 @@ end
 <tr>
 <td><code>on_mouse_down</code></td>
 <td><code>on_mouse_down(button, x, y, params)</code></td>
-<td>复合脚本专属</td>
+<td>全部宿主</td>
 <td>鼠标按下，<code>button</code> ∈ <code>"left"/"right"/"middle"/"x1"/"x2"</code>（参数顺序刻意与 <code>on_press(x,y,t)</code> 不同名，防抄错）。取时间用全局 <code>elapsed</code>。</td>
+</tr>
+<tr>
+<td><code>on_mouse_up</code></td>
+<td><code>on_mouse_up(button, x, y, params)</code></td>
+<td>全部宿主</td>
+<td>鼠标抬起；按住态视觉（加速/后坐/连发）用。</td>
+</tr>
+<tr>
+<td><code>on_wheel</code></td>
+<td><code>on_wheel(delta, horizontal, x, y, params)</code></td>
+<td>复合 / 拖尾宿主</td>
+<td>滚轮。<code>delta</code> 一格 ±120（正 = 上/右），<code>horizontal</code> = 倾斜滚轮。<strong>只有脚本声明它，钩子才转发普通滚轮</strong>；缺失静默跳过。</td>
 </tr>
 <tr>
 <td><code>on_key</code></td>
@@ -1442,7 +1608,7 @@ end
 <li class="toc-l2"><a href="#三-四类脚本的契约">三、四类脚本的契约</a></li>
 <li class="toc-l3"><a href="#3-1-绘制特效-role-effect-拖尾-悬浮标-点击效果">3.1 绘制特效 role=&quot;effect&quot;（拖尾 / 悬浮标 / 点击效果）</a></li>
 <li class="toc-l3"><a href="#3-2-击键音效-role-keysound">3.2 击键音效 role=&quot;keysound&quot;</a></li>
-<li class="toc-l3"><a href="#3-3-图片操作扩展-role-image">3.3 图片操作扩展 role=&quot;image&quot;</a></li>
+<li class="toc-l3"><a href="#3-3-脚本扩展-role-image">3.3 脚本扩展 role=&quot;image&quot;</a></li>
 <li class="toc-l3"><a href="#3-4-复合脚本-role-composite-API-全开放">3.4 复合脚本 role=&quot;composite&quot;（API 全开放）</a></li>
 <li class="toc-l2"><a href="#四-参数-schema-自动生成面板控件">四、参数 schema（自动生成面板控件）</a></li>
 <li class="toc-l2"><a href="#五-通用-ctx-成员-所有-run-类脚本">五、通用 ctx 成员（所有 run 类脚本）</a></li>

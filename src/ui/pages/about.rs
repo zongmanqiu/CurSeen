@@ -17,7 +17,6 @@ use crate::core::events::UiMsg;
 use crate::ui::tokens;
 use crate::ui::tokens::to_color;
 use crate::update::state::UpdateState;
-use crate::update::task;
 
 /// 官方仓库主页（Gitee，主仓 + 更新源）。**唯一来源**：本页的"Gitee仓库"标签与
 /// 可点击链接都读它，改地址只改这一处（两条文本各写一份必然走偏）。
@@ -51,7 +50,14 @@ const DONATE_QR_GAP: i32 = 28;
 const DONATE_QR_BORDER: i32 = 2;
 
 /// 构建关于页面。
-pub fn build_about_page(up: UpdateState, sender: Option<Sender<UiMsg>>) -> Element {
+///
+/// `source` = 当前下载源下标（`config.store.source`）：更新检查与商店共用同一个来源，
+/// 这里只显示灰字名，切换入口仍在设置页「高级」卡。
+pub fn build_about_page(
+    up: UpdateState,
+    sender: Option<Sender<UiMsg>>,
+    source: Signal<usize>,
+) -> Element {
     let mut content = Element::col();
 
     // ── 软件信息 ──
@@ -173,27 +179,8 @@ pub fn build_about_page(up: UpdateState, sender: Option<Sender<UiMsg>>) -> Eleme
             // 正在检查/下载时置灰：网络请求是"发一次就够了"的动作，连点会开好几条线程。
             .enabled_signal(up.busy.map(|b| !*b))
             .on_click(move |_ctx| {
-                if let Err(e) = task::start_check(&sender) {
-                    log::warn!("发起检查更新失败: {e}");
-                }
-            })
-    };
-
-    let install_btn = {
-        let sender = sender.clone();
-        // ★ 地址在**点击那一刻**才读：`update.url` 是"检查完之后才填入"的，若在建树时
-        //   捕捉就会永远是空串（面板刚打开时必然还没检查过）。`UpdateState` 是可拥有的
-        //   值，直接进闭包即可。
-        let flag = up.clone();
-        // 只有"拿到下载地址且不忙"时才可点：否则用户点到的只是个必然报错的按钮。
-        // 这里用 `enabled_when`（每帧读一次）而不是信号映射——两个信号（ready/busy）
-        // 做逻辑与没有现成的组合子，逐帧求值正是想要的语义。
-        let gate = flag.clone();
-        Element::button("下载并更新")
-            .enabled_when(move || gate.ready.get() && !gate.busy.get())
-            .on_click(move |_ctx| {
-                if let Err(e) = task::start_download(&sender, &flag.url()) {
-                    log::warn!("发起下载失败: {e}");
+                if let Some(sender) = &sender {
+                    let _ = sender.send(UiMsg::UpdateCheck);
                 }
             })
     };
@@ -213,7 +200,8 @@ pub fn build_about_page(up: UpdateState, sender: Option<Sender<UiMsg>>) -> Eleme
                 Element::row()
                     .child(check_btn)
                     .child(Element::leaf().width(8))
-                    .child(install_btn)
+                    // 当前更新源：灰字只读（与商店卡同一枚提示）；切换在设置页「高级」卡。
+                    .child(crate::ui::pages::store::source_hint(source))
                     .cross(Align::Center)
                     .margin_xy(0, 12),
             )
@@ -297,4 +285,30 @@ pub fn build_about_page(up: UpdateState, sender: Option<Sender<UiMsg>>) -> Eleme
     // 三张卡自身按内容宽收缩（都不加 Match）、在整宽的 content 里靠左（col 默认
     // `Align::Start`；2026-09-27 用户口径定稿：文字靠左、色块按所需宽度显示）。
     Element::scroll().child(content.padding(16).width_match())
+}
+
+#[cfg(test)]
+mod tests {
+    /// 本文件的生产代码文本（截至测试模块）。
+    fn production_src() -> &'static str {
+        let all = include_str!("about.rs");
+        let cut = all.find("\n#[cfg(test)]").unwrap_or(all.len());
+        &all[..cut]
+    }
+
+    /// m69（用户口径）：更新区显示与商店卡同一枚**只读**来源灰字；底部那句
+    /// 「更新源跟随设置页…」的说明已删除，也不允许出现第二个来源切换控件。
+    #[test]
+    fn update_card_shows_a_read_only_source_hint() {
+        let p = production_src();
+        assert!(
+            p.contains("store::source_hint(source)"),
+            "关于页更新区缺少来源灰字"
+        );
+        assert!(!p.contains("更新源跟随"), "底部来源说明长句应已删除");
+        assert!(
+            !p.contains("Element::dropdown("),
+            "关于页不该提供第二个来源切换控件"
+        );
+    }
 }

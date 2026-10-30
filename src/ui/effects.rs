@@ -107,6 +107,36 @@ impl EffectCatalog {
         0
     }
 
+    /// 配置里指定的 id 不在目录里 ⇒ **补进末尾**（显示名 `<id>（脚本缺失）`），返回下标。
+    ///
+    /// 与录屏音频设备、虚拟键盘方案同一条口径：**不许把用户配置静默改成第一项**。
+    /// 面板会把这个"缺失"项原样写回配置；用户想换效果时自己从下拉里选。
+    pub fn index_of_or_keep(&self, id: &str) -> usize {
+        let stripped = id.strip_prefix("lua:").unwrap_or(id);
+        let existing = {
+            let ids = self.ids.borrow();
+            ids.iter()
+                .position(|x| x == id)
+                .or_else(|| ids.iter().position(|x| x == stripped))
+                .or_else(|| {
+                    ids.iter()
+                        .position(|x| x.as_str() == format!("lua:{stripped}"))
+                })
+        };
+        if let Some(i) = existing {
+            return i;
+        }
+        let mut ids = self.ids.borrow_mut();
+        ids.push(id.to_string());
+        let idx = ids.len() - 1;
+        drop(ids);
+        let mut names = self.names.get();
+        names.push(format!("{id}（脚本缺失）"));
+        self.names.set(names);
+        self.schemas.borrow_mut().entry(id.to_string()).or_default();
+        idx
+    }
+
     /// 取某特效的参数声明（按 id 文件名）。不存在返回空。
     pub fn schema_for(&self, id: &str) -> Vec<ParamDef> {
         self.schemas.borrow().get(id).cloned().unwrap_or_default()
@@ -243,5 +273,31 @@ end
         assert_eq!(shorten("测试粒子"), "测试粒子");
         assert_eq!(shorten("一二三四五六七八九十"), "一二三四五六七八…");
         assert_eq!(shorten("abc"), "abc");
+    }
+
+    /// 配置里的 id 不在目录里 ⇒ 补进末尾并原样写回，**不许静默改成第一项**。
+    #[test]
+    fn keeps_a_configured_effect_missing_from_the_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "curseen_fx_keep_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cat = EffectCatalog::with_dir(dir.clone());
+        assert!(cat.display_names().is_empty());
+        let i = cat.index_of_or_keep("waves");
+        assert_eq!(i, 0);
+        assert_eq!(cat.id_at(i), "waves", "写回的必须是配置原值");
+        assert_eq!(
+            cat.display_names(),
+            vec!["waves（脚本缺失）".to_string()],
+            "下拉里要明确告诉用户脚本没了"
+        );
+        assert_eq!(cat.index_of_or_keep("waves"), 0, "不许重复追加");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

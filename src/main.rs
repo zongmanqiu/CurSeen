@@ -8,7 +8,6 @@
 
 fn main() {
     curseen_ui::core::logger::init_logging();
-    // panic 落盘必须在**提权重启之前**装好：崩溃若发生在提权副本里，那份进程同样需要它。
     curseen_ui::core::logger::install_panic_hook();
     // ★ 紧跟着挂一环"恢复系统指针"：`panic = "abort"` 下 `Drop` 不会跑，而激光笔这类
     //   特效换掉的是**系统级光标位图**，不恢复就会把"没有鼠标指针"留给用户。

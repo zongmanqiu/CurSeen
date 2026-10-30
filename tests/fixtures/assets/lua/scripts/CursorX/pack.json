@@ -1,0 +1,156 @@
+{
+  "id": "CursorX",
+  "name": "CursorX",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "default": "particle_trail",
+  "effects": [
+    {
+      "id": "magnetic",
+      "name": "Magnetic",
+      "kind": "cursor",
+      "file": "magnetic.lua"
+    },
+    {
+      "id": "particle_trail",
+      "name": "Particle Trail",
+      "kind": "cursor",
+      "file": "particle_trail.lua"
+    },
+    {
+      "id": "spotlight",
+      "name": "Spotlight",
+      "kind": "cursor",
+      "file": "spotlight.lua"
+    },
+    {
+      "id": "morphing_blob",
+      "name": "Morphing Blob",
+      "kind": "cursor",
+      "file": "morphing_blob.lua"
+    },
+    {
+      "id": "pixel_shatter",
+      "name": "Pixel Shatter",
+      "kind": "cursor",
+      "file": "pixel_shatter.lua"
+    },
+    {
+      "id": "elastic_ring",
+      "name": "Elastic Ring",
+      "kind": "cursor",
+      "file": "elastic_ring.lua"
+    },
+    {
+      "id": "neon_glow",
+      "name": "Neon Glow",
+      "kind": "cursor",
+      "file": "neon_glow.lua"
+    },
+    {
+      "id": "text_orbiter",
+      "name": "Text Orbiter",
+      "kind": "cursor",
+      "file": "text_orbiter.lua"
+    },
+    {
+      "id": "gravity_pull",
+      "name": "Gravity Pull",
+      "kind": "cursor",
+      "file": "gravity_pull.lua"
+    },
+    {
+      "id": "constellation",
+      "name": "Constellation",
+      "kind": "cursor",
+      "file": "constellation.lua"
+    },
+    {
+      "id": "fire_trail",
+      "name": "Fire Trail",
+      "kind": "cursor",
+      "file": "fire_trail.lua"
+    },
+    {
+      "id": "crosshair_scope",
+      "name": "Crosshair Scope",
+      "kind": "cursor",
+      "file": "crosshair_scope.lua"
+    },
+    {
+      "id": "mirror_ghost",
+      "name": "Mirror Ghost",
+      "kind": "cursor",
+      "file": "mirror_ghost.lua"
+    },
+    {
+      "id": "rainbow_comet",
+      "name": "Rainbow Comet",
+      "kind": "cursor",
+      "file": "rainbow_comet.lua"
+    },
+    {
+      "id": "bubble_float",
+      "name": "Bubble Float",
+      "kind": "cursor",
+      "file": "bubble_float.lua"
+    },
+    {
+      "id": "ripple_wave",
+      "name": "Ripple Wave",
+      "kind": "cursor",
+      "file": "ripple_wave.lua"
+    },
+    {
+      "id": "glitch_shift",
+      "name": "Glitch Shift",
+      "kind": "cursor",
+      "file": "glitch_shift.lua"
+    },
+    {
+      "id": "wind_stream",
+      "name": "Wind Stream",
+      "kind": "cursor",
+      "file": "wind_stream.lua"
+    },
+    {
+      "id": "dna_helix",
+      "name": "DNA Helix",
+      "kind": "cursor",
+      "file": "dna_helix.lua"
+    },
+    {
+      "id": "torch_light",
+      "name": "Torch Light",
+      "kind": "cursor",
+      "file": "torch_light.lua"
+    },
+    {
+      "id": "difference_blend",
+      "name": "Difference Blend",
+      "kind": "cursor",
+      "file": "difference_blend.lua"
+    },
+    {
+      "id": "ghost_trail",
+      "name": "Ghost Trail",
+      "kind": "cursor",
+      "file": "ghost_trail.lua"
+    },
+    {
+      "id": "audio_pulse",
+      "name": "Audio Pulse",
+      "kind": "cursor",
+      "file": "audio_pulse.lua"
+    },
+    {
+      "id": "fluid_glass",
+      "name": "Fluid Glass",
+      "kind": "cursor",
+      "file": "fluid_glass.lua"
+    }
+  ],
+  "description": "参考与致谢：github/Felix-au/CursorX-Interactive-Cursor-Effects",
+  "upstream": "CursorX",
+  "category": "mouse"
+}

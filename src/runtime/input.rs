@@ -143,25 +143,34 @@ impl Runtime {
                 //   谁先谁后不确定；判据只看"点有没有落在选中的那张贴图矩形里"，与顺序无关。
                 self.note_pointer_down(x, y);
             }
-            InputEvent::MouseUp { button, .. } => {
+            InputEvent::MouseUp { button, x, y, .. } => {
                 if self.vk_pointer_end(button) {
                     return;
                 }
+                // 四类脚本宿主统一收抬起：按住态视觉（加速/后坐/连发）需要它。
+                self.trail.on_mouse_up(button, x as f32, y as f32);
             }
             InputEvent::MouseWheel {
-                delta, horizontal, ..
-            }
+                delta,
+                horizontal,
+                x,
+                y,
+                ..
+            } => {
                 // ★ 缩放滚轮（**内置快捷键 Ctrl+Win+滚轮**，钩子只在组合命中时才
                 //   转发到这里——组合、为什么选它、冲突实测，见
                 //   `platform::input::mouse` 的 WM_MOUSEWHEEL 注释）。
                 //   方向与 Windows 放大镜一致：前推（delta>0）放大、后拉缩小。
                 //   横向倾斜滚轮只服务击键回显（回显武装时钩子才镜像），与倍率无关。
-                if !horizontal => {
+                if !horizontal {
                     let dir = if delta > 0 { 1 } else { -1 };
                     if self.zoom_step(dir) {
                         return;
                     }
                 }
+                // 缩放没吃掉 → 转发给脚本的 Scroll 通道（`on_wheel`）。
+                self.trail.on_wheel(delta, horizontal, x as f32, y as f32);
+            }
             _ => {}
         }
         self.input_queue.push(event);

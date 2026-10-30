@@ -142,11 +142,9 @@ end
 
 function draw(ctx, params)
   if #flakes == 0 then return end
-  local a_u8 = math.floor((params.opacity or 0.9) * 255)
+  local r, g, b, ca = hex_to_rgb(params.color or "#E8F4FF")
+  local a_u8 = math.floor((params.opacity or 0.9) * 255 * ca / 255)
   if a_u8 < 1 then return end
-
-  -- ★ hex_to_rgb 返回 **4** 个值（r,g,b,a）；这里只要前 3 个，逐个接住即可
-  local r, g, b = hex_to_rgb(params.color or "#E8F4FF")
   local stroke = params.stroke or 1.2
   local shrink_to = params.shrink_to or 0.35
 

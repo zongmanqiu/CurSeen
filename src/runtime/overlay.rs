@@ -78,10 +78,31 @@ enum MouseMode {
 /// 按的 Ctrl+S（这也是选中态必须在点到别处时解除的原因，见 `Runtime::note_pointer_down`）。
 const PIN_SAVE_HOTKEY: &str = "Ctrl+S";
 
+/// 注册 Segoe MDL2 Assets 作为私用区（PUA）回退字体——搜索框放大镜 `U+E721` 用。
+///
+/// 注册失败（老系统缺 `segmdl2.ttf`）只让图标退化成方框，其余文本不受影响。
+/// 路径不用盘符字面量：`WINDIR` 缺失时用 `SYSTEMDRIVE` 拼（与 RuPix 同一条 hygiene 口径）。
+fn register_icon_font() {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| {
+        format!(
+            "{}\\Windows",
+            std::env::var("SYSTEMDRIVE").unwrap_or_default()
+        )
+    });
+    let path = format!("{windir}\\Fonts\\segmdl2.ttf");
+    if let Err(e) = windui::text::register_private_use_font(&path, "Segoe MDL2 Assets") {
+        log::warn!("注册图标字体失败（搜索图标会显示为方框）：{e}");
+    }
+}
+
 /// 启动覆盖层（阻塞，直到应用退出）。
 ///
 /// `input_rx` 来自 `InputHook::start()` 的配对端，由桥接线程转投 UI 通道。
 pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>) {
+    // ★ 图标字体必须在 `App::new` 之前注册：渲染引擎在窗口创建时取一次快照。
+    //   搜索框的放大镜（U+E71E）是私用区码位，DirectWrite 的系统 fallback 匹配不到，
+    //   必须把 Segoe MDL2 Assets 显式注册成 PUA 回退字体（RuPix 同款做法）。
+    register_icon_font();
     // 虚拟桌面矩形（物理像素，原点可能为负）。
     let vs = runtime.borrow().screen;
     // 几何换算的唯一出处。世界坐标（物理像素）→ 窗口本地逻辑坐标。
@@ -255,18 +276,23 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
                     toggle_panel(ctx, &chan_rt);
                 }
             }
+            UiMsg::UpdateCheck => {
+                chan_rt.borrow_mut().start_update_check();
+            }
             UiMsg::Update(ev) => {
                 // 只改状态，不碰窗口：面板上的状态行/进度条绑在信号上，`Signal::set` 自己会
                 // 把面板标脏重绘（见 windui `signal.rs` 的失效通道）。
-                chan_rt.borrow_mut().apply_update_event(ev);
+                let update_prompt = chan_rt.borrow_mut().apply_update_event(ev);
+                // ★ **先对账脚本，再同步输入门**：新选中的复合脚本要先进实例，
+                //   滚轮武装（`script_wheel_armed`）与"要不要帧"才问得准。
+                //   此前顺序反了：选中 Scroll 脚本后的第一拍仍按旧实例判门，
+                //   滚轮被钩子漏转发——用户报"Stardust Stream 感觉不到"。
+                chan_rt.borrow_mut().sync_trail_if_stale();
                 // ★ 立即同步鼠标输入门：`apply_update_event` 可能改了 VK 开关/穿透态，
                 //   桥接线程每条鼠标事件都读 `MOUSE_INPUT_NEEDED` 原子，晚同步一帧就
                 //   丢一整批点击（用户刚勾上「启用键盘」，接下来 ~250ms 的键帽点击
                 //   全被桥接线程扔掉）。
                 chan_rt.borrow().sync_input_gate();
-                // ★ 先对账再判门：新勾上的复合脚本要先进实例，下面的"要不要帧"才问得准
-                //   （否则"勾了没反应"，详见 `Runtime::sync_trail_if_stale`）。
-                chan_rt.borrow_mut().sync_trail_if_stale();
                 // ★ 立即解除 park：配置变更可能首次启用了 VK（或关闭了穿透），覆盖层
                 //   此前因「什么都没开」处于 park 态（`paint()` 不被调用 → `frame()` 不执行
                 //   → `publish_hit_region()` 不执行 → 命中区永远为空 → 点键帽无反应）。
@@ -276,12 +302,70 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
                     set_overlay_parked(false);
                     log::info!("配置变更：覆盖层解除 park（VK/拖尾/绘制等需要帧）");
                 }
+                if let Some(prompt) = update_prompt {
+                    // 与脚本说明窗同款：窗是我们主动要开的，不该等下一次输入才出帧。
+                    if overlay_is_parked() {
+                        set_overlay_parked(false);
+                    }
+                    request_repaint();
+                    let sender = chan_rt.borrow().ui_tx.clone();
+                    crate::ui::update_window::open(ctx, prompt, sender);
+                }
             }
             UiMsg::TempUsage(u) => {
                 // 与上面的 `Update` 同形：只写信号，不碰窗口（`Signal::set` 自己会把面板
                 // 标脏重绘）。★ 这里**不需要**解 park——统计的是设置页里的一张卡，那种
                 // 时刻覆盖层本来就醒着；它也不改任何覆盖层状态。
                 chan_rt.borrow_mut().apply_temp_usage(u);
+            }
+            UiMsg::ScriptDialog(spec) => {
+                // 脚本请宿主开的模态窗（`ext:result` / `ext:input`）。工作线程把窗交给这里
+                // 之后就阻塞在回复通道上等用户，UI 线程零等待（与旧的原生框逐字同一语义）。
+                //
+                // ★ 先解 park 再开窗：窗是**我们自己**决定时刻的界面变化，不该等下一次用户
+                //   输入才出帧（同 `GifSelChanged` 那条纪律）。不解的话，功能全关时脚本弹的
+                //   结果框要等 250ms 对账或鼠标动一下才现身。
+                if overlay_is_parked() {
+                    set_overlay_parked(false);
+                }
+                request_repaint();
+                crate::ui::script_dialog::open(ctx, spec);
+            }
+            UiMsg::ScriptImage(spec) => {
+                // 脚本回写贴图（`ext:set_image`）。像素是工作线程备好递过来的，**换图本身**
+                // 必须落在这条线程：画布不是线程安全的，而且换图要顺带重建渲染对象、
+                // 改窗口尺寸（`SetWindowPos` 会同步重入本窗的 paint）。
+                //
+                // ★ 这里**不动 park 状态**（与上面 `ScriptDialog` 那支不同）：换图自带的
+                //   `SetWindowPos` + `request_relayout` 已经把那张贴图窗标脏重排了，
+                //   覆盖层不需要为它醒一次。回写的成败原样交回脚本线程，由脚本决定怎么显示。
+                let r = crate::runtime::layer::pin::apply_script_image(spec.hwnd, (*spec.bitmap).clone());
+                spec.reply(r);
+            }
+            UiMsg::StoreAction(action) => {
+                // 在线脚本库：动作本身在后台线程跑，进展经 `UiMsg::Store` 回来。
+                // 面板还没建好时（`panel == None`）也能跑——状态挂在 Runtime 上。
+                // ★ 先求值再接错：`if let Err(e) = rt.borrow_mut().…` 会让 RefMut 活满整块，
+                //   块内再 `borrow_mut()` 就是运行时 panic（本文件末尾的门禁专用测试盯着它）。
+                let started = chan_rt.borrow_mut().start_store_action(action);
+                if let Err(e) = started {
+                    chan_rt.borrow_mut().store_report_refusal(e);
+                }
+            }
+            UiMsg::Store(ev) => {
+                chan_rt.borrow_mut().store_apply_store_event(ev);
+                request_repaint();
+            }
+            UiMsg::Notice(text) => {
+                // 脚本的短反馈（「正在运行：X」/「X 还在跑，这次忽略」）。与 `ScriptDialog`
+                // 同一条 park 纪律：这句话时刻由触发它的那次按键决定，不能等下一次输入。
+                // ★ 不新起计时器、不改帧门：显示期间 `input_needs_frame()` 已含
+                //   `action_notify.is_showing()`，淡出由既有的 `remain_ms` 排帧。
+                if overlay_is_parked() {
+                    set_overlay_parked(false);
+                }
+                chan_rt.borrow_mut().action_notice(&text);
+                request_repaint();
             }
             UiMsg::GifSelChanged => {
                 // ★ GIF 选框是在**区域选择窗**里确认的（`layer::region` 的 `confirm`
@@ -394,6 +478,25 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
 
     // 把通道交给 Runtime：更新线程要用它把结果送回 UI 线程。
     runtime.borrow_mut().set_ui_tx(ui_tx.clone());
+    // ★ 同一份通道再交给**进程级总线**（`core::ui_bus`）：脚本层拿不到 `Runtime`
+    //   （分层是 `core ← platform ← scripting ← … ← runtime`），而 `ext:result` / `ext:input`
+    //   必须能说"请 UI 线程替我开一扇窗"。总线里存的只是"怎么把一条 UiMsg 送出去"这个闭包
+    //   ——`core` 禁依赖 windui（`build/layering_scan.py` 第 2 条：可测性红线），所以 windui
+    //   的 `Sender` 留在本层、只以闭包捕获的形式下去。拿不到总线时 `ui_bus::dialog` 返回
+    //   `Unavailable`，调用方退回原生框——覆盖层起来之前和单测里的裸 Runtime 就是这种环境。
+    {
+        let bus_tx = ui_tx.clone();
+        crate::core::ui_bus::install(move |msg| bus_tx.send(msg).is_ok());
+    }
+
+    // ★ 脚本目录监听（m35）：`assets/` 一有变化（放入 / 删除 / 解压出来）就置一个脏标记，
+    //   真正的重扫在 250 ms 对账里做（`refresh_assets_if_changed`）——不需要重启，
+    //   也不需要"刷新"按钮。监听线程阻塞在内核里等事件，空闲零 CPU。
+    {
+        // 整个 `assets/`：拖尾/悬浮标/点击效果脚本、虚拟键盘方案、声音文件都在这棵树下。
+        let dir = crate::core::paths::asset_dir("");
+        crate::platform::dir_watch::watch_dir(&dir, "assets");
+    }
 
     let tray = create_tray(ui_tx.clone());
 
@@ -443,6 +546,9 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
         // ★ 全屏放大窗：与画中画同一个类、不同标题（同名会让 `FindWindowW` 只找到
         //   其中一个，见 `FULLSCREEN_WINDOW_TITLE` 上的注释）。
         crate::platform::pip_window::FULLSCREEN_WINDOW_TITLE,
+        // ★ 脚本文本窗（m08）**不在**这份名单里：它的标题就是脚本给的名字（动态），
+        //   而守护按标题找窗，动态标题守不住。不守也不会被压住——那扇窗 `.owned(true)`
+        //   挂在覆盖层名下，Win32 里 owned 窗恒在其 owner 之上，覆盖层自己正被守护抬着。
     ]);
     let app = app.on_interval(PANEL_POLL, move |ctx| {
         poll_rt.borrow_mut().sync_ui();
@@ -601,6 +707,10 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
         }
         // ★ 录制成功提示窗的 250ms 兜底：停止快捷键之后可能再没有输入消息
         //   （用户手已离开键盘），通道回调那条路不会跑，这里保证提示窗最迟 250ms 内出现。
+        // ★ 脚本目录变化（m35）：监听线程只置标记，重扫在这里做（250ms 自然合流）。
+        if poll_rt.borrow_mut().refresh_assets_if_changed() {
+            request_repaint();
+        }
         let toast = poll_rt.borrow_mut().take_rec_toast();
         if let Some(path) = toast {
             open_rec_toast(ctx, &poll_rt, path, vs, dpi);
@@ -732,7 +842,11 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
 
     app.run();
 
-    // ★ 收尾：退出时若虚拟键盘上还按着一颗键（用户按着鼠标点的键直接关程序），
+    // ★ 显式恢复系统指针，不依赖 `Runtime::drop`。实测 `Rc` 会被 App 的回调闭环留住，
+    //   正常退出时 `Drop` 不一定执行；这里在消息循环返回后的第一行恢复，才是可靠边界。
+    crate::platform::hide_cursor::ensure_shown();
+
+    // ★ 收尾：退出时若虚拟键盘上还按着一颗键
     //   注入的"按下"会留在系统键盘状态里 —— 表现为**卡住不放的 Ctrl/Shift**，
     //   直到用户亲手再按一次那颗物理键。这里补一次抬起，代价是退出路径上的一次
     //   `SendInput`（没有键按着时连这个都不发）。
@@ -986,27 +1100,19 @@ fn save_shot_as(rt: &Rc<RefCell<Runtime>>) {
     }
 }
 
-/// 把选中的贴图另存为 PNG（Ctrl+S）。
+/// 把选中的贴图另存为 PNG（Ctrl+S）。**存的是屏幕上这一张**（m16）。
 ///
 /// 必须在 UI 线程、且经 `ctx.defer_blocking` 跑：原生保存对话框自带消息泵、会阻塞到
 /// 松开为止，从窗口过程或帧回调里直接调就是重入（与「浏览…」选图同一条纪律）。
+/// `defer_blocking` 的闭包仍在 UI 线程执行，所以这里能读到画布的登记（`pin::PINS` 是
+/// `thread_local`）——像素怎么取、兜底怎么记，全部收在 [`pin::save_view_png`] 一处，
+/// 与右键「另存为」是同一份实现（同一个"保存"不许有两个含义，也不许有两份代码）。
 fn save_pin_as(rt: &Rc<RefCell<Runtime>>, seq: u32) {
-    let Some(content) = rt.borrow().pin_content(seq) else {
-        log::warn!("另存为：#{seq} 已不存在");
-        return;
-    };
-    let Some(path) = crate::platform::file_dialog::save_png(&format!("CurSeen_贴图_{seq}"))
-    else {
-        log::info!("另存为：用户在对话框里取消");
-        return;
-    };
-    let Some(shot) = crate::core::backdrop::bitmap_to_shot(content.bitmap()) else {
-        log::warn!("另存为：位图无法转回帧格式");
-        return;
-    };
-    match crate::platform::screenshot::save_png(&shot, &path) {
-        Ok(()) => log::info!("贴图 #{seq} 已另存为 {}", path.display()),
-        Err(e) => log::warn!("贴图 #{seq} 另存为失败: {e}"),
+    let content = rt.borrow().pin_content(seq);
+    match content {
+        // `bitmap()` 是 `&Rc<RgbaBitmap>`：剥 `&` 再剥 `Rc` 才拿到出厂那份像素。
+        Some(c) => crate::runtime::layer::pin::save_view_png(seq, Some(&**c.bitmap())),
+        None => log::warn!("另存为：#{seq} 已不存在"),
     }
 }
 
@@ -1529,6 +1635,7 @@ fn spawn_input_bridge(
                     InputEvent::MouseWheel { .. } => {
                         crate::platform::input::mouse::zoom_wheel_armed()
                             || crate::platform::input::mouse::mouse_echo_armed()
+                            || crate::platform::input::mouse::script_wheel_armed()
                     }
                     // ★ 按下/抬起是**低频**事件（一次点击最多两条），"放行"的代价可以忽略，
                     //   所以这里比 `_` 分支多认两道门：
@@ -2378,6 +2485,25 @@ mod tests {
 
     fn screen(x: i32, y: i32, w: i32, h: i32) -> ScreenRect {
         ScreenRect { x, y, w, h }
+    }
+
+    /// 图标字体必须在 `App::new` 之前注册：渲染引擎建窗时取一次 PUA 字体快照，
+    /// 之后再注册只影响新窗。写了但写晚了，表现就是"搜索框里一个方框"。
+    #[test]
+    fn icon_font_is_registered_before_the_app_starts() {
+        let src = include_str!("overlay.rs");
+        let call = src
+            .find("register_icon_font();")
+            .expect("缺少图标字体注册调用");
+        let app = src.find("App::new(").expect("缺少 App::new");
+        assert!(
+            call < app,
+            "图标字体注册必须在 App::new 之前（渲染引擎建窗时取快照）"
+        );
+        assert!(
+            src.contains("register_private_use_font"),
+            "要走 windui 的私用区字体注册，不能只放一个字形"
+        );
     }
 
     /// ★★ 修复回归锁（2026-10-10「特效不落在鼠标上」）：`sync_view` 必须把 `scale`

@@ -13,6 +13,8 @@
 //! - 其余 GET/PUT/DELETE：`scripting::api_ext::http_blocking`（Lua 错误语义）
 //!   与 `update/`（版本检查 / 下载）各自用自己的超时参数调 [`agent`]。
 
+use std::io::{Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
 /// 构造一个 HTTP 客户端（带全局超时）。**全仓唯一的构造点。**
@@ -75,3 +77,112 @@ pub fn post_json(url: &str, headers: &[(String, String)], body: &str) -> (i64, S
         Err(e) => (0, format!("请求失败：{e}")),
     }
 }
+
+/// 流式下载到文件：先写 `<dest>.partial`，成功后再**原子改名**；任何中途失败都删掉半成品。
+/// 返回落盘字节数。
+///
+/// 这一份是**全仓唯一的流式下载实现**（m32 从 `update/downloader` 搬来并参数化）：
+/// 更新包与脚本的 `ext:download` 都走它——分块读写（不把整包堆进内存）、
+/// `Content-Length` 校验、大小上限、失败清理，这些纪律只写一遍。
+///
+/// 三个参数的来源要说清：
+/// · `headers`：调用方给（脚本可带 `Authorization` 之类）；
+/// · `max_bytes`：调用方给（更新包用 64 MB，脚本用 [`SCRIPT_DOWNLOAD_MAX`]）；
+/// · 超时：**不限总时长**（[`agent_unbounded`]）——全局超时覆盖整个响应体读取，
+///   慢网络会半路被掐；连接建立仍受 ureq 默认连接超时约束。
+pub fn download_to_file<F: FnMut(u64, u64)>(
+    url: &str,
+    dest: &Path,
+    headers: &[(String, String)],
+    max_bytes: u64,
+    mut on_progress: F,
+) -> Result<u64, String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建下载目录失败: {e}"))?;
+    }
+    let partial = dest.with_extension("partial");
+    let _ = std::fs::remove_file(&partial);
+
+    let mut req = agent_unbounded().get(url);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let mut resp = req.call().map_err(|e| format!("下载失败: {e}"))?;
+    // `content_length()` 在分块传输/gzip 下可能为 None，那时退化成"未知总量"。
+    let total = resp.body().content_length().unwrap_or(0);
+    let mut reader = resp.body_mut().with_config().limit(max_bytes).reader();
+    let mut file = std::fs::File::create(&partial).map_err(|e| format!("创建临时文件失败: {e}"))?;
+    let mut buf = vec![0u8; CHUNK];
+    let mut received = 0u64;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| {
+            let _ = std::fs::remove_file(&partial);
+            format!("读取响应失败: {e}")
+        })?;
+        if n == 0 {
+            break;
+        }
+        if let Err(e) = file.write_all(&buf[..n]) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("写入临时文件失败: {e}"));
+        }
+        received += n as u64;
+        on_progress(received, total);
+    }
+    if let Err(e) = file.flush() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("写入临时文件失败: {e}"));
+    }
+    drop(file);
+    if received == 0 {
+        let _ = std::fs::remove_file(&partial);
+        return Err("下载内容为空".to_string());
+    }
+    // 服务端给了 Content-Length 就校验：对不上说明传输被截断。
+    if total != 0 && received != total {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!(
+            "下载不完整: 收到 {received} 字节 / 期望 {total} 字节"
+        ));
+    }
+    std::fs::rename(&partial, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        format!("保存下载文件失败: {e}")
+    })?;
+    Ok(received)
+}
+
+/// 取一段文本响应（GET，带 UA）。上限 `max_bytes`；非 2xx 或网络失败给原因。
+///
+/// 只给"小文本"用（脚本清单、版本号这类）；大文件走 [`download_to_file`]。
+///
+/// ★ **必须是带总时限的 agent**：清单拉取占用 `store_task` 的 `BusyGuard`，无总超时的
+///   agent 遇上"连上了但一直不回正文"的服务器，会让在线脚本库永远停在"正在获取清单…"
+///   （按钮全灰、也取消不了）。30 s 对一张几十 KB 的清单足够。
+///   `update::checker::get_text` 是刻意保留的同形实现（那边 10 s、且下载口另有域名白名单）。
+pub fn get_text(url: &str, max_bytes: u64) -> Result<String, String> {
+    let mut resp = agent(std::time::Duration::from_secs(30))
+        .get(url)
+        .header("User-Agent", DEFAULT_UA)
+        .call()
+        .map_err(|e| format!("请求失败: {e}"))?;
+    resp.body_mut()
+        .with_config()
+        .limit(max_bytes)
+        .lossy_utf8(true)
+        .read_to_string()
+        .map_err(|e| format!("读取响应失败: {e}"))
+}
+
+/// 每次读的块大小（64KB：够大以减少系统调用，又不至于让进度显示卡顿）。
+const CHUNK: usize = 64 * 1024;
+
+/// 脚本下载的默认上限（`ext:download`）：512 MiB。
+///
+/// 面板自动更新用的是 `update::checker::MAX_BODY`（64 MB，更新包典型 1–2MB）；
+/// 脚本要下的是"zip 素材包"这类东西，给一个更大的、但**仍然有头**的数——
+/// 没头的下载在一个常驻小工具里是失控。
+pub const SCRIPT_DOWNLOAD_MAX: u64 = 512 * 1024 * 1024;
+
+/// 默认 UA：与更新包同一串（有些站点直接拒绝 ureq 的默认 UA）。
+pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CurSeen/2.0";

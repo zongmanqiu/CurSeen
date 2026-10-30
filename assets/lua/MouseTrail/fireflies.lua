@@ -307,11 +307,9 @@ function draw(ctx, params)
   end
   if fade <= 0.02 then return end
 
-  local a_u8 = math.floor((params.opacity or 0.9) * fade * 255)
+  local r, g, b, ca = hex_to_rgb(params.color or "#FFD98A")
+  local a_u8 = math.floor((params.opacity or 0.9) * fade * 255 * ca / 255)
   if a_u8 < 1 then return end
-
-  -- ★ hex_to_rgb 返回 **4** 个值（r,g,b,a）；这里只要前 3 个，逐个接住即可
-  local r, g, b = hex_to_rgb(params.color or "#FFD98A")
 
   local tail_len = params.tail_len or 9
   local twinkle = params.twinkle or 0.45

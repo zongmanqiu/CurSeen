@@ -156,6 +156,7 @@ function draw(ctx, params)
     --   必须逐项取下标。
     local cc = colors[c]
     local r, g, b = cc[1], cc[2], cc[3]
+    local ca = cc[4] or 255
     local n = #nodes
     -- 从尾画到头，头节点压在最上面
     for i = n, 1, -1 do
@@ -177,12 +178,12 @@ function draw(ctx, params)
         end
       end
 
-      local a_u8 = math.floor(opacity * fade_k * (0.35 + 0.65 * ratio) * 255)
+      local a_u8 = math.floor(opacity * fade_k * (0.35 + 0.65 * ratio) * 255 * ca / 255)
       ctx:radial(nd.x + ox, nd.y + oy, rad, r, g, b, a_u8)
       -- 头节点再加一层辉光，让它"亮起来"
       if i == 1 then
         ctx:glow(nd.x + ox, nd.y + oy, rad * 0.9, r, g, b,
-          math.floor(opacity * fade_k * 0.8 * 255))
+          math.floor(opacity * fade_k * 0.8 * 255 * ca / 255))
       end
     end
   end

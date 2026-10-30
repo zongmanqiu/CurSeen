@@ -946,6 +946,13 @@ impl Widget for Slider {
 
 /// 输入框内边距。与下拉框的 `PAD_X` 同为 12，同一列里文字左缘对齐。
 pub(crate) const TEXT_PAD: i32 = 12;
+
+/// ★ CurSeen 补丁 097：前置图标距输入框左缘的内缩。
+///
+/// 原实现把字形**居中**在 `TEXT_PAD..TEXT_PAD+lead` 的图标区里（14px 字号下 lead=22，
+/// 字形离左缘约 16px，视觉上"离得太远"）。改为在 8px 起、宽 `lead-8` 的窄框内居中：
+/// 14px 字形正好落在 8px 处；文字起点（`TEXT_PAD+lead`）不变，命中/光标都不受影响。
+const LEADING_ICON_PAD: i32 = 8;
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -2223,7 +2230,13 @@ impl Widget for TextInput {
         // 前置图标（搜索框等）：绘于左侧留白区，垂直居中，弱化色。
         if let Some(g) = self.config.leading {
             let mut buf = [0u8; 4];
-            let icon_rect = Rect::new(bounds.x + TEXT_PAD, bounds.y, lead, bounds.h);
+            // ★ 补丁 097：图标贴左 8px（原来是 22px 图标区里居中，离左缘约 16px）。
+            let icon_rect = Rect::new(
+                bounds.x + LEADING_ICON_PAD,
+                bounds.y,
+                (lead - LEADING_ICON_PAD).max(1),
+                bounds.h,
+            );
             canvas.draw_text(
                 g.encode_utf8(&mut buf),
                 icon_rect,

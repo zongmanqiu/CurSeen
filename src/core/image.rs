@@ -557,6 +557,117 @@ impl RgbaBitmap {
     }
 }
 
+/// 圆形桌面镜片的取样方式。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LensMode {
+    /// 放大：`zoom` 是放大倍数（1.0 = 原样）。
+    Magnify { zoom: f32 },
+    /// 逐通道求差：`|源 − color|`，对应 CSS 的 `mix-blend-mode: difference`。
+    Difference { color: (u8, u8, u8) },
+}
+
+/// 从一张抓屏里取出**圆形**镜片：缩放/反色 + 1px 羽化蒙版。
+///
+/// 返回边长 `2×radius` 的非预乘 RGBA 位图，圆心 = 源图中心；圆外 alpha = 0。
+/// 采样用双线性（放大时比最近邻少一层锯齿），源坐标钳到边缘（贴屏边不会出现黑环）。
+///
+/// ★ 为什么放在 core：这是纯像素运算（输入 [`Shot`]、输出 [`RgbaBitmap`]，无平台调用），
+///   与 [`RgbaBitmap::magnify`] 同一层；`scripting` 只负责"抓哪块"和"画到哪"。
+pub fn lens_circle(shot: &Shot, radius: u32, mode: LensMode) -> Option<RgbaBitmap> {
+    if shot.is_empty() || radius == 0 {
+        return None;
+    }
+    let r = radius as i32;
+    let size = r * 2;
+    let (sw, sh) = (shot.w, shot.h);
+    if sw < 1 || sh < 1 {
+        return None;
+    }
+    let zoom = match mode {
+        LensMode::Magnify { zoom } => {
+            if !zoom.is_finite() || zoom <= 0.0 {
+                1.0
+            } else {
+                zoom
+            }
+        }
+        LensMode::Difference { .. } => 1.0,
+    };
+    let diff_color = match mode {
+        LensMode::Difference { color } => Some(color),
+        LensMode::Magnify { .. } => None,
+    };
+
+    let mut rgba = vec![0_u8; (size * size * 4) as usize];
+    let src_cx = sw as f32 / 2.0;
+    let src_cy = sh as f32 / 2.0;
+    let r_f = r as f32;
+
+    for oy in 0..size {
+        let dy = oy as f32 + 0.5 - r_f;
+        for ox in 0..size {
+            let dx = ox as f32 + 0.5 - r_f;
+            let dist = (dx * dx + dy * dy).sqrt();
+            // 边缘 1px 羽化：圆外完全透明，圆内完全保留，避免硬锯齿。
+            let cover = (r_f - dist + 0.5).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let sx = src_cx + dx / zoom;
+            let sy = src_cy + dy / zoom;
+            let (mut cr, mut cg, mut cb) = sample_bilinear(shot, sx, sy);
+            if let Some((tr, tg, tb)) = diff_color {
+                cr = cr.abs_diff(tr);
+                cg = cg.abs_diff(tg);
+                cb = cb.abs_diff(tb);
+            }
+            let d = ((oy as usize) * (size as usize) + ox as usize) * 4;
+            rgba[d] = cr;
+            rgba[d + 1] = cg;
+            rgba[d + 2] = cb;
+            rgba[d + 3] = (cover * 255.0).round() as u8;
+        }
+    }
+    RgbaBitmap::new(size as u32, size as u32, rgba)
+}
+
+/// 双线性取样（源坐标为浮点；越界钳到边缘）。
+fn sample_bilinear(shot: &Shot, x: f32, y: f32) -> (u8, u8, u8) {
+    let max_x = (shot.w - 1) as f32;
+    let max_y = (shot.h - 1) as f32;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let x1 = (x0 + 1).min(shot.w - 1);
+    let y1 = (y0 + 1).min(shot.h - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+
+    let px = |xx: i32, yy: i32| -> (f32, f32, f32) {
+        let i = ((yy as usize) * (shot.w as usize) + xx as usize) * 4;
+        (
+            shot.bgra[i + 2] as f32,
+            shot.bgra[i + 1] as f32,
+            shot.bgra[i] as f32,
+        )
+    };
+    let (r00, g00, b00) = px(x0, y0);
+    let (r10, g10, b10) = px(x1, y0);
+    let (r01, g01, b01) = px(x0, y1);
+    let (r11, g11, b11) = px(x1, y1);
+    let mix = |a: f32, b: f32, c: f32, d: f32| -> u8 {
+        let top = a + (b - a) * fx;
+        let bottom = c + (d - c) * fx;
+        (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8
+    };
+    (
+        mix(r00, r10, r01, r11),
+        mix(g00, g10, g01, g11),
+        mix(b00, b10, b01, b11),
+    )
+}
+
 /// 从本地 PNG 文件解码，得到悬浮标「图片」样式要用的位图（**保持原始宽高**）。
 ///
 /// 走 `png` crate（core 层不碰 windui）。★ 色型鲁棒性：用户随手存的 PNG 什么色型都有——
@@ -1413,5 +1524,103 @@ mod tests {
         let p2 = dir.join("junk.png");
         std::fs::write(&p2, b"not a png at all").unwrap();
         assert!(load_png(&p2).is_none());
+    }
+
+    /// 构造一张 8×8 的抓屏（BGRA）：底色 (30,20,10)，中心 4×4 是 (50,100,200)。
+    ///
+    /// 中心块让"圆心采到中心像素"可判定（8×8 的中心像素 4.5,4.5 落在块内）；
+    /// 底色让"圆外/远端"可判定。
+    fn center_block_shot() -> Shot {
+        let mut bgra = Vec::new();
+        for y in 0..8 {
+            for x in 0..8 {
+                let center = (2..6).contains(&x) && (2..6).contains(&y);
+                let (r, g, b) = if center { (50, 100, 200) } else { (30, 20, 10) };
+                bgra.extend_from_slice(&[b, g, r, 255]);
+            }
+        }
+        Shot { w: 8, h: 8, bgra }
+    }
+
+    fn px(bmp: &RgbaBitmap, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * bmp.w + x) * 4) as usize;
+        [
+            bmp.rgba[i],
+            bmp.rgba[i + 1],
+            bmp.rgba[i + 2],
+            bmp.rgba[i + 3],
+        ]
+    }
+
+    /// 圆形蒙版：圆外必须全透明；圆心必须采到源图中心块的颜色。
+    #[test]
+    fn lens_circle_masks_outside_and_samples_center() {
+        let shot = center_block_shot();
+        let bmp =
+            super::lens_circle(&shot, 4, LensMode::Magnify { zoom: 1.0 }).expect("应产出位图");
+        assert_eq!((bmp.w, bmp.h), (8, 8));
+        assert_eq!(px(&bmp, 0, 0)[3], 0, "左上角在圆外必须透明");
+        assert_eq!(px(&bmp, 7, 7)[3], 0, "右下角在圆外必须透明");
+        // 圆心像素（4,4）→ 源 (3.5,3.5) 落在中心块内。
+        let c = px(&bmp, 4, 4);
+        assert_eq!(c[3], 255, "圆心必须不透明");
+        assert_eq!(&c[..3], &[50, 100, 200], "圆心应采到中心块颜色：{c:?}");
+    }
+
+    /// difference：逐通道 |源 − 差色|；圆外仍然透明。
+    #[test]
+    fn lens_circle_difference_inverts_channels() {
+        let mut bgra = Vec::new();
+        for _ in 0..8 {
+            for _ in 0..8 {
+                bgra.extend_from_slice(&[10, 20, 30, 255]); // B=10 G=20 R=30
+            }
+        }
+        let shot = Shot { w: 8, h: 8, bgra };
+        let bmp = super::lens_circle(
+            &shot,
+            4,
+            LensMode::Difference {
+                color: (200, 100, 50),
+            },
+        )
+        .expect("应产出位图");
+        let c = px(&bmp, 4, 4);
+        assert_eq!(&c[..3], &[170, 80, 40], "R/G/B 应各自 |源−差色|");
+        assert_eq!(px(&bmp, 0, 0)[3], 0);
+    }
+
+    /// 放大：同一 dest 像素在不同 zoom 下应采到源图不同位置。
+    #[test]
+    fn lens_circle_zoom_changes_source_window() {
+        // 8×8 的横向红渐变：red = x * 30，其余通道 0。
+        let mut bgra = Vec::new();
+        for _y in 0..8 {
+            for x in 0..8 {
+                bgra.extend_from_slice(&[0, 0, (x * 30) as u8, 255]);
+            }
+        }
+        let shot = Shot { w: 8, h: 8, bgra };
+        let one = super::lens_circle(&shot, 4, LensMode::Magnify { zoom: 1.0 }).unwrap();
+        let two = super::lens_circle(&shot, 4, LensMode::Magnify { zoom: 2.0 }).unwrap();
+        // dest 像素 (6,4)：离圆心 +2.5px。zoom=1 采源 x=6.5，zoom=2 只到 x=5.25。
+        let r1 = px(&one, 6, 4)[0];
+        let r2 = px(&two, 6, 4)[0];
+        assert!(
+            r1 > r2,
+            "zoom 越大，同一 dest 像素应采到越靠近中心（更暗）：{r1} vs {r2}"
+        );
+    }
+
+    /// 退化输入不 panic：空图 / 半径 0 / 非法 zoom。
+    #[test]
+    fn lens_circle_handles_degenerate_inputs() {
+        let empty = Shot::default();
+        assert!(super::lens_circle(&empty, 4, LensMode::Magnify { zoom: 1.0 }).is_none());
+        let shot = center_block_shot();
+        assert!(super::lens_circle(&shot, 0, LensMode::Magnify { zoom: 1.0 }).is_none());
+        let bmp = super::lens_circle(&shot, 2, LensMode::Magnify { zoom: f32::NAN })
+            .expect("NaN zoom 应退回 1.0 而不是崩");
+        assert_eq!((bmp.w, bmp.h), (4, 4));
     }
 }

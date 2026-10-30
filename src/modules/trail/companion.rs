@@ -28,7 +28,7 @@
 //!
 //! - 只有 `draw` 真的产出指令才续帧（与特效同规则，空闲 0% CPU）；要持续动画就在
 //!   `draw` 里画东西。`on_key`/`on_mouse_down` 想驱动的淡出动画同理：在 `draw` 里画。
-//! - ★ 上表**一个回调都没声明**的脚本（只写 `schema()` + `run()`，例如 `scripts/ai_chat`
+//! - ★ 上表**一个回调都没声明**的脚本（只写 `schema()` + `run()`，例如 `scripts/AI/ai_chat`
 //!   —— 它开的是自己的原生窗）被当作**一次性 / 开窗脚本**：它不占覆盖层的帧，覆盖层
 //!   该休眠就休眠（整屏缓冲 1080p ≈ 8 MB + 60fps 整屏重绘，2026-09-30 内存归因）。
 //!   判据见 [`CompanionHost::any_needs_frame`]。
@@ -55,7 +55,7 @@ const HOST: &str = "panel";
 /// 覆盖层的**生命周期回调**：声明了其中**任意一个** = 这个脚本要吃覆盖层的帧。
 ///
 /// ★ 反向用途（2026-09-30 内存归因）：一个都没声明的脚本（只写 `schema()` + `run()`，
-///   例如 `scripts/ai_chat` —— 它开自己的原生窗，一个像素都不画在覆盖层上）不该让
+///   例如 `scripts/AI/ai_chat` —— 它开自己的原生窗，一个像素都不画在覆盖层上）不该让
 ///   覆盖层保持唤醒。唤醒 = 整屏缓冲常驻（1080p 约 8 MB 私有工作集）+ 60fps 整屏重绘。
 const OVERLAY_CALLBACKS: [&str; 6] = ["init", "on_move", "on_mouse_down", "on_key", "step", "draw"];
 
@@ -71,7 +71,7 @@ fn declares_overlay_callback(lua: &mlua::Lua) -> bool {
 
 /// 单个复合脚本实例 = 一个运行中的脚本（独立 VM）。
 pub struct Companion {
-    /// 脚本 id = 相对 `assets/lua` 的路径 stem（`scripts/composite_demo`）。
+    /// 脚本 id = 相对 `assets/lua` 的路径 stem（`scripts/<脚本名>`）。
     pub id: String,
     /// 引擎根（`assets/lua`）：`load_script(id)` 即根下按相对路径拼 `.lua`。
     root: PathBuf,
@@ -86,6 +86,8 @@ pub struct Companion {
     /// ★ 本脚本是否**声明过**覆盖层回调（见 [`declares_overlay_callback`]）。
     /// 一次性 / 开窗脚本（只有 `schema` + `run`）为 false —— 它们不该让覆盖层保持唤醒。
     needs_frame: bool,
+    /// 脚本是否声明了 `on_wheel`（钩子按需转发普通滚轮）。
+    wants_wheel: bool,
     hide_cursor: bool,
     /// "坏脚本只告警一次"标记（重建成功后复位）。
     fault_logged: bool,
@@ -96,6 +98,14 @@ pub struct Companion {
     cursor: (f32, f32),
     /// 出生点（首个采样点）。脚本读 `origin_x`/`origin_y` 即拿到它。
     origin: Option<(f32, f32)>,
+    /// 上一次移动的 (x,y,t)：算 `cursor_vx/vy/speed/heading` 用。
+    last_move: Option<(f32, f32, f32)>,
+    vx: f32,
+    vy: f32,
+    speed: f32,
+    heading: f32,
+    mouse_down: bool,
+    mouse_button: String,
 }
 
 /// 给实例 VM 注入 `play_sound(file, volume?) -> bool` 全局。
@@ -128,10 +138,14 @@ impl Companion {
                 f.call::<()>(())?;
             }
             let needs_frame = declares_overlay_callback(e.lua());
-            Ok((e, hide, needs_frame))
+            let wants_wheel = matches!(
+                e.lua().globals().get::<mlua::Value>("on_wheel"),
+                Ok(mlua::Value::Function(_))
+            );
+            Ok((e, hide, needs_frame, wants_wheel))
         });
         match engine {
-            Ok((engine, hide, needs_frame)) => Self {
+            Ok((engine, hide, needs_frame, wants_wheel)) => Self {
                 id: id.to_string(),
                 root: root.to_path_buf(),
                 engine: Some(engine),
@@ -140,11 +154,19 @@ impl Companion {
                 len,
                 active: false,
                 needs_frame,
+                wants_wheel,
                 hide_cursor: hide,
                 fault_logged: false,
                 wall_ms: 0.0,
                 cursor: (0.0, 0.0),
                 origin: None,
+                last_move: None,
+                vx: 0.0,
+                vy: 0.0,
+                speed: 0.0,
+                heading: 0.0,
+                mouse_down: false,
+                mouse_button: "left".to_string(),
             },
             Err(e) => {
                 log::warn!("复合脚本 {id}.lua 加载失败：{e}（该实例回调静默跳过）");
@@ -158,11 +180,19 @@ impl Companion {
                     active: false,
                     // 加载失败的脚本本来就什么也做不了，没理由让它占着覆盖层的帧。
                     needs_frame: false,
+                    wants_wheel: false,
                     hide_cursor: false,
                     fault_logged: true,
                     wall_ms: 0.0,
                     cursor: (0.0, 0.0),
                     origin: None,
+                    last_move: None,
+                    vx: 0.0,
+                    vy: 0.0,
+                    speed: 0.0,
+                    heading: 0.0,
+                    mouse_down: false,
+                    mouse_button: "left".to_string(),
                 }
             }
         }
@@ -187,6 +217,7 @@ impl Companion {
         // ★ 热重载可能**改写了脚本能力**（原本只开窗的脚本加了 draw）：这条必须跟着更新，
         //   否则改完之后覆盖层按旧印象继续休眠 / 继续空转。
         self.needs_frame = fresh.needs_frame;
+        self.wants_wheel = fresh.wants_wheel;
         self.active = false;
         self.mtime = fresh.mtime;
         self.len = fresh.len;
@@ -203,6 +234,11 @@ impl Companion {
     /// 本帧 `draw` 是否产出指令（续帧依据）。
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// 脚本是否声明了 `on_wheel`（钩子据此决定要不要转发普通滚轮）。
+    pub fn wants_wheel(&self) -> bool {
+        self.wants_wheel
     }
 
     /// 脚本是否声明 `hide_cursor = true`（激光笔类）。
@@ -232,17 +268,31 @@ impl Companion {
 
     /// 鼠标采样（原始点；快移插值由宿主统一补，见 [`CompanionHost::on_sample`]）。
     fn on_move(&mut self, x: f32, y: f32, t: f32, screen: (f32, f32)) {
+        if let Some((lx, ly, lt)) = self.last_move {
+            let dt = t - lt;
+            if dt > 1e-4 {
+                self.vx = (x - lx) / dt / 60.0;
+                self.vy = (y - ly) / dt / 60.0;
+                self.speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
+                self.heading = self.vy.atan2(self.vx);
+            }
+        }
+        self.last_move = Some((x, y, t));
         self.cursor = (x, y);
         if self.origin.is_none() {
             self.origin = Some((x, y));
         }
         let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
         let wall = self.wall_ms;
-        self.with_engine(|e, params| {
+        let (vx, vy, speed, heading, down) =
+            (self.vx, self.vy, self.speed, self.heading, self.mouse_down);
+        let button = self.mouse_button.clone();
+        self.with_engine(move |e, params| {
             e.update_env(cur, org, t, screen, HOST)?;
             // ★ 墙钟跟着环境一起注入（四类宿主一致）：用 `wall_ms` 做静止检测 /
             //   超时淡出的脚本在 `scripts/` 下也拿得到真值。
             e.set_wall_ms(wall)?;
+            e.set_pointer_state(vx, vy, speed, heading, down, &button)?;
             e.call_on_move(x, y, t, params)
         });
     }
@@ -250,12 +300,60 @@ impl Companion {
     /// 鼠标按下。
     fn on_button(&mut self, button: &str, x: f32, y: f32, t: f32, screen: (f32, f32)) {
         self.cursor = (x, y);
+        self.mouse_down = true;
+        self.mouse_button = button.to_string();
         let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
         let wall = self.wall_ms;
-        self.with_engine(|e, params| {
+        let (vx, vy, speed, heading, down) =
+            (self.vx, self.vy, self.speed, self.heading, self.mouse_down);
+        let btn = self.mouse_button.clone();
+        self.with_engine(move |e, params| {
             e.update_env(cur, org, t, screen, HOST)?;
             e.set_wall_ms(wall)?;
-            e.call_on_button(button, x, y, params)
+            e.set_pointer_state(vx, vy, speed, heading, down, &btn)?;
+            e.call_on_button(button, x, y, t, params)
+        });
+    }
+
+    /// 鼠标抬起：清按住态并转发 `on_mouse_up`（缺回调静默跳过）。
+    fn on_mouse_up(&mut self, button: &str, x: f32, y: f32, t: f32, screen: (f32, f32)) {
+        self.cursor = (x, y);
+        self.mouse_down = false;
+        self.mouse_button = button.to_string();
+        let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
+        let wall = self.wall_ms;
+        let (vx, vy, speed, heading, down) =
+            (self.vx, self.vy, self.speed, self.heading, self.mouse_down);
+        let btn = self.mouse_button.clone();
+        self.with_engine(move |e, params| {
+            e.update_env(cur, org, t, screen, HOST)?;
+            e.set_wall_ms(wall)?;
+            e.set_pointer_state(vx, vy, speed, heading, down, &btn)?;
+            e.call_on_mouse_up(button, x, y, params)
+        });
+    }
+
+    /// 滚轮：刷新光标/环境，转发 `on_wheel`（缺回调静默跳过）。
+    fn on_wheel(
+        &mut self,
+        delta: i32,
+        horizontal: bool,
+        x: f32,
+        y: f32,
+        t: f32,
+        screen: (f32, f32),
+    ) {
+        self.cursor = (x, y);
+        let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
+        let wall = self.wall_ms;
+        let (vx, vy, speed, heading, down) =
+            (self.vx, self.vy, self.speed, self.heading, self.mouse_down);
+        let btn = self.mouse_button.clone();
+        self.with_engine(move |e, params| {
+            e.update_env(cur, org, t, screen, HOST)?;
+            e.set_wall_ms(wall)?;
+            e.set_pointer_state(vx, vy, speed, heading, down, &btn)?;
+            e.call_on_wheel(delta, horizontal, x, y, params)
         });
     }
 
@@ -283,9 +381,13 @@ impl Companion {
     fn step(&mut self, dt: f32, t: f32, screen: (f32, f32)) {
         let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
         let wall = self.wall_ms;
-        self.with_engine(|e, params| {
+        let (vx, vy, speed, heading, down) =
+            (self.vx, self.vy, self.speed, self.heading, self.mouse_down);
+        let btn = self.mouse_button.clone();
+        self.with_engine(move |e, params| {
             e.update_env(cur, org, t, screen, HOST)?;
             e.set_wall_ms(wall)?;
+            e.set_pointer_state(vx, vy, speed, heading, down, &btn)?;
             e.call_step(dt, t, params)?;
             Ok(())
         });
@@ -301,6 +403,14 @@ impl Companion {
         let (cur, org) = (self.cursor, self.origin.unwrap_or(self.cursor));
         let _ = engine.update_env(cur, org, t, screen, HOST);
         let _ = engine.set_wall_ms(self.wall_ms);
+        let _ = engine.set_pointer_state(
+            self.vx,
+            self.vy,
+            self.speed,
+            self.heading,
+            self.mouse_down,
+            &self.mouse_button,
+        );
         let _ = engine.call_draw(&self.params);
         api_draw::clear_draw_target();
         // ★ 与 LuaEffect 同款：用 `len_all()`（跨层计数），脚本声明 base/top 层时
@@ -329,6 +439,10 @@ pub struct CompanionHost {
     prev: Option<(f32, f32)>,
     /// 固定步长累加器（秒）：不足 [`FIXED_DT`] 的零头留到下一帧。
     fixed_acc: f32,
+    /// 最近一次注入的真实墙钟毫秒。**必须存一份**：`set_wall_ms` 只写当时已存在的实例，
+    /// 而新脚本可能在对账时才载入 —— 不补这一份，新实例的 `wall_ms` 从 0 开始，
+    /// 刚载入那一帧的滚轮/长按会拿到错误的时间起点（实测：twinkle 的 burst 出生即过期）。
+    wall_ms: f64,
 }
 
 impl CompanionHost {
@@ -339,6 +453,7 @@ impl CompanionHost {
             synced_once: false,
             prev: None,
             fixed_acc: 0.0,
+            wall_ms: 0.0,
         }
     }
 
@@ -370,6 +485,8 @@ impl CompanionHost {
                 None => Companion::load_in(root, id),
             };
             c.set_params(params.clone());
+            // 新载入的实例补齐当前墙钟（见字段注释）。
+            c.wall_ms = self.wall_ms;
             self.instances.push(c);
         }
         self.synced = active.len();
@@ -382,6 +499,7 @@ impl CompanionHost {
 
     /// 注入真实墙钟毫秒（脚本全局 `wall_ms`）——四类宿主一致。
     pub fn set_wall_ms(&mut self, ms: f64) {
+        self.wall_ms = ms;
         for c in &mut self.instances {
             c.wall_ms = ms;
         }
@@ -419,6 +537,35 @@ impl CompanionHost {
         for c in &mut self.instances {
             c.on_button(button, x, y, t, screen);
         }
+    }
+
+    /// 鼠标抬起分发。
+    pub fn on_mouse_up(&mut self, button: &str, x: f32, y: f32, t: f32, screen: (f32, f32)) {
+        for c in &mut self.instances {
+            c.on_mouse_up(button, x, y, t, screen);
+        }
+    }
+
+    /// 滚轮分发（只发给声明了 `on_wheel` 的实例）。
+    pub fn on_wheel(
+        &mut self,
+        delta: i32,
+        horizontal: bool,
+        x: f32,
+        y: f32,
+        t: f32,
+        screen: (f32, f32),
+    ) {
+        for c in &mut self.instances {
+            if c.wants_wheel {
+                c.on_wheel(delta, horizontal, x, y, t, screen);
+            }
+        }
+    }
+
+    /// 是否有任一实例声明了 `on_wheel`（钩子武装判据）。
+    pub fn any_wheel_wanted(&self) -> bool {
+        self.instances.iter().any(|c| c.wants_wheel)
     }
 
     /// 键盘按下分发（键名与击键回显同源，`KeyCode::display_name`）。
@@ -551,6 +698,52 @@ mod tests {
         assert_eq!(h.ids(), vec!["scripts/b", "scripts/a"], "顺序随列表");
         h.sync_at(&d, &[]);
         assert!(h.ids().is_empty(), "清列表 = 全部停止");
+    }
+
+    /// 滚轮只发给声明了 `on_wheel` 的实例；`any_wheel_wanted` 是钩子武装判据。
+    #[test]
+    fn wheel_reaches_only_scripts_that_declare_it() {
+        let with_wheel = "got = 0\nfunction on_wheel(d, h, x, y, params) got = d end\n";
+        let (d, mut h) = host_with(&[("scripts/w", with_wheel)], &["scripts/w"]);
+        assert!(h.any_wheel_wanted(), "声明 on_wheel 的脚本应要求钩子武装");
+        h.on_wheel(120, false, 12.0, 34.0, 0.1, (1920.0, 1080.0));
+        let got: i32 = h.instances[0]
+            .engine
+            .as_ref()
+            .expect("实例应有引擎")
+            .lua()
+            .globals()
+            .get("got")
+            .expect("got 应是整数");
+        assert_eq!(got, 120, "滚轮增量应原样传给 Lua");
+
+        let (d2, h2) = host_with(&[("scripts/n", "function draw() end\n")], &["scripts/n"]);
+        assert!(!h2.any_wheel_wanted(), "未声明 on_wheel 的脚本不应武装滚轮");
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// 真实 `twinkle.lua`：滚轮 → step → draw 必须出画（隔离控制器路径）。
+    #[test]
+    fn real_twinkle_wheel_produces_commands() {
+        let root = crate::core::paths::lua_ext_dir();
+        let mut h = CompanionHost::new();
+        h.sync_at(
+            &root,
+            &[("scripts/MFCMouseEffect/twinkle".to_string(), HashMap::new())],
+        );
+        assert!(h.any_wheel_wanted(), "twinkle 应声明 on_wheel");
+        h.set_wall_ms(60_000.0);
+        h.on_wheel(120, false, 300.0, 200.0, 0.5, (1920.0, 1080.0));
+        h.set_wall_ms(60_100.0);
+        h.step(1.0 / 60.0, 0.6, (1920.0, 1080.0));
+        let mut list = DrawList::new();
+        h.draw(&mut list, 0.6, (1920.0, 1080.0));
+        assert!(
+            list.len_all() > 0,
+            "twinkle 收到滚轮后应产出图元，实际 {}",
+            list.len_all()
+        );
     }
 
     #[test]

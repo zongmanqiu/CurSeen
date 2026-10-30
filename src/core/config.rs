@@ -775,7 +775,7 @@ pub struct GeneralSettings {
 /// 下拉，参数在子卡正文——平铺行的参数段没有视觉分隔，用户拍板回子卡），5 个
 /// `ripple.<键>` id 回归；声音卡没有每键参数，保持平铺单卡，`sound.<键>` 仍退役。
 /// 老配置里残留的展开键（含 `sound.<键>`）被 serde 原样保留，`ripple.<键>` 直接复活。
-pub const CARD_IDS: [&str; 44] = [
+pub const CARD_IDS: [&str; 43] = [
     // 鼠标页（拖尾 / 悬浮标 / 点击效果 / 点击声音；分类判据 = 操作对象是鼠标，
     // 见 `ui::nav` 头注释。★ 卡片搬家不换 id：id 只管展开态落盘，与所属页无关）
     "trail",
@@ -826,14 +826,17 @@ pub const CARD_IDS: [&str; 44] = [
     //   由 serde 原样保留，不影响读取；见 `global_page_cards_are_merged`）。
     "global.hotkey",
     "global.switches",
-    "global.overlay",
+    // 设置页 · 「高级」卡（m69，2026-10-31）：下载源 + 图层覆盖 + 工作文件夹 + 系统
+    // 合并成一张杂项卡。原 `global.overlay` / `global.temp` / `global.system` 三个
+    // 展开态 id 随合并作废（老配置残留键由 serde 原样保留）。
+    "global.advanced",
+    // 工具页 · 计时器卡（`global.` 前缀为历史遗留，卡片现挂工具页，id 保留）
     "global.timer",
-    // 设置页 · 工作文件夹卡（2026-09-27）：显示 `<exe>/temp` 的占用 + 打开目录
-    "global.temp",
+    // 脚本页 · 官方资源下载卡（m37 建卡，m69 从设置页搬到脚本页**第一张**；卡片搬家
+    // 不换 id，展开态键沿用 `global.store`）
+    "global.store",
     // 设置页 · 帮助卡（2026-09-29）：随包文档（快捷键手册 / Lua 指南 / Lua API）的打开入口
     "global.help",
-    // 设置页 · 系统卡（2026-10-07）：管理员权限启动勾选项（`general.admin_launch`）
-    "global.system",
     // 屏幕页 · 放大镜（原「其它」页；`other.` 前缀保留，id 与页无关）
     "other.magnifier.pip",
     "other.magnifier.pip.hotkey",
@@ -1953,6 +1956,98 @@ pub const DEFAULT_PIN_RING_CAP: usize = 10;
 
 // ─── 主配置结构体 ───
 
+/// 官方脚本清单的默认地址（Gitee 镜像）。
+pub const DEFAULT_STORE_GITEE_URL: &str =
+    "https://gitee.com/qiuzongman/CurSeen-Scripts/raw/main/scripts.json";
+/// 官方脚本清单的默认地址（GitHub 镜像）。
+pub const DEFAULT_STORE_GITHUB_URL: &str =
+    "https://raw.githubusercontent.com/zongmanqiu/CurSeen-Scripts/main/scripts.json";
+
+/// 本体更新清单的默认地址（Gitee raw CDN）。
+pub const DEFAULT_UPDATE_GITEE_URL: &str =
+    "https://raw.giteeusercontent.com/qiuzongman/curseen/raw/main/update.json";
+/// 本体更新清单的默认地址（GitHub raw）。
+pub const DEFAULT_UPDATE_GITHUB_URL: &str =
+    "https://raw.githubusercontent.com/zongmanqiu/CurSeen/refs/heads/main/update.json";
+
+/// 在线脚本库（设置页「官方资源下载」）。
+///
+/// ★ 两条清单地址**进配置**（m40 用户口径）：换镜像/自建镜像都只改 `config.json`，
+///   不必重新编译；面板上的来源下拉选中的是哪一条也一并持久化（下次开面板还在）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StoreSettings {
+    /// Gitee 镜像的清单地址；空串 = 该来源不可用（界面按钮置灰、刷新跳过）。
+    pub gitee_url: String,
+    /// GitHub 镜像的清单地址；空串 = 该来源不可用。
+    pub github_url: String,
+    /// 选中的来源下标：0 = Gitee / 1 = GitHub。
+    pub source: usize,
+}
+
+impl Default for StoreSettings {
+    fn default() -> Self {
+        Self {
+            gitee_url: DEFAULT_STORE_GITEE_URL.to_string(),
+            github_url: DEFAULT_STORE_GITHUB_URL.to_string(),
+            source: 0,
+        }
+    }
+}
+
+impl StoreSettings {
+    /// 两条地址按 [`StoreSettings::source`] 的下标顺序交出（`[Gitee, GitHub]`）。
+    pub fn urls(&self) -> [String; 2] {
+        [self.gitee_url.clone(), self.github_url.clone()]
+    }
+
+    /// 夹到合法范围（配置里手写成 9 也不许把界面弄崩）。
+    pub fn source_index(&self) -> usize {
+        self.source.min(1)
+    }
+
+    /// 写入选中来源（夹到 0..=1）。**返回是否真的改了**——面板每帧对账靠它判断脏，
+    /// 恒返回 true 会让"开面板零操作也写一次盘"。
+    pub fn set_source(&mut self, source: usize) -> bool {
+        let source = source.min(1);
+        if self.source == source {
+            return false;
+        }
+        self.source = source;
+        true
+    }
+}
+
+/// 本体更新清单（About 页「版本更新」）。
+///
+/// 选中源**跟随** [`StoreSettings::source`]：同一台机器只需要在设置页「高级」卡里
+/// 选一次 Gitee/GitHub，脚本包与本体更新走同一个镜像。两条清单地址仍可分别配置，
+/// 换自建镜像不用重新编译。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Gitee 镜像的 `update.json` 地址；空串 = 该来源不可用。
+    pub gitee_url: String,
+    /// GitHub 镜像的 `update.json` 地址；空串 = 该来源不可用。
+    pub github_url: String,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            gitee_url: DEFAULT_UPDATE_GITEE_URL.to_string(),
+            github_url: DEFAULT_UPDATE_GITHUB_URL.to_string(),
+        }
+    }
+}
+
+impl UpdateSettings {
+    /// 两条地址按 `[Gitee, GitHub]` 交出。
+    pub fn urls(&self) -> [String; 2] {
+        [self.gitee_url.clone(), self.github_url.clone()]
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
@@ -1996,6 +2091,12 @@ pub struct Config {
     /// Lua 扩展脚本框架（`assets/lua/` 下的扩展脚本 + 每脚本参数记忆）。见 `LuaExtSettings`。
     #[serde(default)]
     pub lua_ext: LuaExtSettings,
+    /// 在线脚本库：两条清单地址 + 当前来源（设置页「官方资源下载」）。
+    #[serde(default)]
+    pub store: StoreSettings,
+    /// 本体更新清单：两条 `update.json` 地址；选中源跟随 [`StoreSettings::source`]。
+    #[serde(default)]
+    pub update: UpdateSettings,
     /// 便签（「工具」页顶层卡，2026-09-25 重排）。
     #[serde(default)]
     pub sticky_note: NoteSettings,
@@ -2056,11 +2157,17 @@ pub struct LuaExtSettings {
     pub composite_active: Vec<String>,
     /// ★ image 脚本**启用列表**（2026-09-27 用户口径：`scripts/` 下每个脚本都要有开关）。
     ///
-    /// 这一族是贴图右键「图片操作」里的**手动动作**：开关打开 = 菜单里出现这一条，
+    /// 这一族是贴图右键「脚本」里的**手动动作**：开关打开 = 菜单里出现这一条，
     /// 关掉 = 收起（不留空条目）。出厂为空（与"所有脚本出厂全关"同口径），所以首次
-    /// 打开时「图片操作」是空壳 + 灰色占位项——用户去脚本页勾开要用的脚本即可。
+    /// 打开时「脚本」是空壳 + 灰色占位项——用户去脚本页勾开要用的脚本即可。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_active: Vec<String>,
+    /// ★ 包卡下拉选择：`pack_id -> child_id`。
+    ///
+    /// 包卡在脚本页是**一张卡**，标题栏下拉决定当前运行哪个子脚本；`composite_active`
+    /// 仍只记"实际在跑的脚本 id"，因此开关/运行列表的判据不需要第二套。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pack_selected: HashMap<String, String>,
 }
 
 impl LuaExtSettings {
@@ -2146,9 +2253,8 @@ pub struct KeySoundSettings {
     /// 总开关。
     #[serde(default)]
     pub enabled: bool,
-    /// 脚本 id = `assets/lua/scripts/` 下的文件名 stem（2026-09-26 定稿：通用扩展脚本
-    /// 统一归档在 `scripts/` 一个文件夹，如 `scripts/unified_sound`，
-    /// 解析用 `lua_ext_dir().join(id+".lua")`）。
+    /// 脚本 id = `assets/lua/KeySound/` 下的文件名 stem（击键音效专属目录，
+    /// 如 `KeySound/unified_sound`，解析用 `lua_ext_dir().join(id+".lua")`）。
     #[serde(default = "default_key_sound_script")]
     pub script: String,
     /// 音量百分比（0–100）。
@@ -2172,7 +2278,7 @@ pub struct KeySoundSettings {
 }
 
 fn default_key_sound_script() -> String {
-    "scripts/unified_sound".into()
+    "KeySound/unified_sound".into()
 }
 fn default_key_sound_volume() -> u8 {
     // ★ 与点击音效 `default_sound_volume`（100）同值（2026-09-26 统一）：两处音量出厂
@@ -2500,7 +2606,7 @@ impl Config {
     /// 只算**四张视觉卡片**（拖尾 / 悬浮标 / 点击效果 / 点击声音），不含复合脚本。
     ///
     /// ★ 拆分的原因（2026-09-30 内存归因）：复合脚本里有一类是**一次性 / 开窗脚本**
-    /// （如 `scripts/ai_chat`，只声明 `schema()` + `run()`，不碰覆盖层）。它们进了
+    /// （如 `scripts/AI/ai_chat`，只声明 `schema()` + `run()`，不碰覆盖层）。它们进了
     /// `composite_active` 就会把 [`Self::trail_module_active`] 顶成 true —— 覆盖层
     /// 于是**整屏缓冲常驻 + 60fps 整屏重绘**（1920×1080 实测私有工作集 +8.8 MB），
     /// 而那条链路上一个像素都没画。
@@ -2756,29 +2862,32 @@ impl Config {
     /// 只认**出厂脚本**的旧名；用户自己放的自定义脚本 id 不动（没有标准答案）。
     pub fn migrate_lua_script_folders(&mut self) {
         /// (旧 id, 新 id) —— 出厂脚本 2026-09-26 归档对照表（终态 = `scripts/<名>`）。
-        const RENAMES: [(&str, &str); 16] = [
+        const RENAMES: [(&str, &str); 18] = [
             // 出厂最初的裸中文名。
-            ("统一音效", "scripts/unified_sound"),
-            ("分类音效", "scripts/class_sound"),
-            ("图片信息", "scripts/image_info"),
+            ("统一音效", "KeySound/unified_sound"),
+            ("分类音效", "KeySound/class_sound"),
+            ("图片体检", "scripts/image_report"),
             ("平均颜色", "scripts/avg_color"),
             // 当天中间版①：中文功能文件夹。
-            ("击键音效/统一音效", "scripts/unified_sound"),
-            ("击键音效/分类音效", "scripts/class_sound"),
-            ("图片操作/图片信息", "scripts/image_info"),
-            ("图片操作/平均颜色", "scripts/avg_color"),
+            ("击键音效/统一音效", "KeySound/unified_sound"),
+            ("击键音效/分类音效", "KeySound/class_sound"),
+            ("脚本/图片体检", "scripts/image_report"),
+            ("脚本/平均颜色", "scripts/avg_color"),
             // 当天中间版②：script/ 双层英文目录。
             (
                 "script/unified_sound/unified_sound",
-                "scripts/unified_sound",
+                "KeySound/unified_sound",
             ),
-            ("script/class_sound/class_sound", "scripts/class_sound"),
-            ("script/image_info/image_info", "scripts/image_info"),
+            ("script/class_sound/class_sound", "KeySound/class_sound"),
+            ("script/image_info/image_info", "scripts/image_report"),
             ("script/avg_color/avg_color", "scripts/avg_color"),
             // 当天中间版③：根目录平铺裸名。
-            ("unified_sound", "scripts/unified_sound"),
-            ("class_sound", "scripts/class_sound"),
-            ("image_info", "scripts/image_info"),
+            ("unified_sound", "KeySound/unified_sound"),
+            ("class_sound", "KeySound/class_sound"),
+            // 2026-10-30 从通用 scripts/ 迁到键音专属目录；旧终态 id 也要接力。
+            ("scripts/unified_sound", "KeySound/unified_sound"),
+            ("scripts/class_sound", "KeySound/class_sound"),
+            ("image_info", "scripts/image_report"),
             ("avg_color", "scripts/avg_color"),
         ];
         let map = |id: &str| {
@@ -3623,18 +3732,31 @@ mod tests {
         );
     }
 
-    /// 设置页两组合并卡（2026-10-07 用户口径）：**「模块开关 + 脚本开关」合为「功能开关」、
-    /// 「快捷键 + 脚本快捷键」合为「快捷键」**，各只留一个展开态 id。
+    /// 设置页卡片的合并史：**「模块开关 + 脚本开关」合为「功能开关」、「快捷键 + 脚本快捷键」
+    /// 合为「快捷键」**（2026-10-07），各只留一个展开态 id；**「图层覆盖 / 工作文件夹 / 系统」
+    /// 三张薄卡合为「高级」**（m69，2026-10-31），商店与更新共用的下载源下拉也归这张卡。
     ///
-    /// 合并前这两组各占两张卡、四个 id；现在每段只是卡**正文里的一个分组**（横线 + 段名），
-    /// 不再有独立展开态 —— 这是合并的本意（一次展开看全），代价是脚本段不能单独折叠。
-    /// 作废的两个 id 按"已废弃"登记（老配置里残留的键 serde 原样保留，不丢值也不报错）。
+    /// 合并前这几组各占多张卡；现在每段只是卡**正文里的一个分组**（横线 + 段名），不再有
+    /// 独立展开态 —— 这是合并的本意（一次展开看全），代价是脚本段不能单独折叠。
+    /// 作废的 id 按"已废弃"登记（老配置里残留的键 serde 原样保留，不丢值也不报错）。
+    /// ★ `global.store` 只是**换页**（搬家不换 id），所以它必须仍在表里。
     #[test]
     fn global_page_cards_are_merged() {
-        for id in ["global.switches", "global.hotkey"] {
+        for id in [
+            "global.switches",
+            "global.hotkey",
+            "global.advanced",
+            "global.store",
+        ] {
             assert!(CARD_IDS.contains(&id), "CARD_IDS 缺少 {id}");
         }
-        for id in ["global.script_switches", "global.script_hotkeys"] {
+        for id in [
+            "global.script_switches",
+            "global.script_hotkeys",
+            "global.overlay",
+            "global.temp",
+            "global.system",
+        ] {
             assert!(!CARD_IDS.contains(&id), "{id} 已废弃，不该再出现");
         }
         // 老配置带着作废键读进来不该炸（serde 原样保留）。
@@ -3992,15 +4114,15 @@ mod tests {
             "分类音效".into(),
             HashMap::from([("letter_sound".to_string(), Value::String("a.wav".into()))]),
         );
-        cfg.lua_ext.params.insert("图片信息".into(), HashMap::new());
+        cfg.lua_ext.params.insert("图片体检".into(), HashMap::new());
         cfg.migrate_lua_script_folders();
-        assert_eq!(cfg.key_sound.script, "scripts/unified_sound");
+        assert_eq!(cfg.key_sound.script, "KeySound/unified_sound");
         assert!(
-            cfg.key_sound.params.contains_key("scripts/class_sound"),
+            cfg.key_sound.params.contains_key("KeySound/class_sound"),
             "旧裸名参数段应整段搬到新 id 下"
         );
         assert!(!cfg.key_sound.params.contains_key("分类音效"), "旧键不残留");
-        assert!(cfg.lua_ext.params.contains_key("scripts/image_info"));
+        assert!(cfg.lua_ext.params.contains_key("scripts/image_report"));
         // 幂等：再跑一遍零变化。
         let snapshot = cfg.key_sound.clone();
         cfg.migrate_lua_script_folders();
@@ -4011,10 +4133,10 @@ mod tests {
         mid.key_sound.script = "击键音效/统一音效".into();
         mid.lua_ext
             .params
-            .insert("图片操作/平均颜色".into(), HashMap::new());
+            .insert("脚本/平均颜色".into(), HashMap::new());
         mid.migrate_lua_script_folders();
         assert_eq!(
-            mid.key_sound.script, "scripts/unified_sound",
+            mid.key_sound.script, "KeySound/unified_sound",
             "中文文件夹形态的存量应迁到 scripts/"
         );
         assert!(mid.lua_ext.params.contains_key("scripts/avg_color"));
@@ -4027,7 +4149,7 @@ mod tests {
             .params
             .insert("script/avg_color/avg_color".into(), HashMap::new());
         nested.migrate_lua_script_folders();
-        assert_eq!(nested.key_sound.script, "scripts/unified_sound");
+        assert_eq!(nested.key_sound.script, "KeySound/unified_sound");
         assert!(nested.lua_ext.params.contains_key("scripts/avg_color"));
 
         // ③' 根目录平铺裸名形态（当天中间版③）的存量也要接力。
@@ -4037,16 +4159,54 @@ mod tests {
             .params
             .insert("avg_color".into(), HashMap::new());
         flat.migrate_lua_script_folders();
-        assert_eq!(flat.key_sound.script, "scripts/unified_sound");
+        assert_eq!(flat.key_sound.script, "KeySound/unified_sound");
         assert!(flat.lua_ext.params.contains_key("scripts/avg_color"));
+
+        // ③' 上一版终态（`scripts/...`）迁到键音专属目录。
+        let mut previous = Config::default();
+        previous.key_sound.script = "scripts/unified_sound".into();
+        previous
+            .key_sound
+            .params
+            .insert("scripts/class_sound".into(), HashMap::new());
+        previous.migrate_lua_script_folders();
+        assert_eq!(previous.key_sound.script, "KeySound/unified_sound");
+        assert!(previous
+            .key_sound
+            .params
+            .contains_key("KeySound/class_sound"));
 
         // ④ 终态 id（出厂默认）不被误改。
         let mut fresh = Config::default();
         fresh.migrate_lua_script_folders();
         assert_eq!(
-            fresh.key_sound.script, "scripts/unified_sound",
+            fresh.key_sound.script, "KeySound/unified_sound",
             "出厂默认已是新 id"
         );
+    }
+
+    /// 本体更新清单两条地址进配置；选中源不在 update 里重复存，直接跟随商店。
+    #[test]
+    fn update_urls_live_in_config_and_follow_store_source() {
+        let cfg = Config::default();
+        assert!(cfg.update.gitee_url.ends_with("/update.json"));
+        assert!(cfg.update.github_url.ends_with("/update.json"));
+        assert!(cfg
+            .update
+            .gitee_url
+            .starts_with("https://raw.giteeusercontent.com/"));
+        assert!(cfg
+            .update
+            .github_url
+            .starts_with("https://raw.githubusercontent.com/"));
+        let old: Config = serde_json::from_str("{}").expect("空对象也要能读");
+        assert_eq!(old.update, UpdateSettings::default());
+        let mut custom = cfg.clone();
+        custom.update.gitee_url = "https://mirror.example/update.json".to_string();
+        custom.update.github_url = String::new();
+        let back: Config = serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(back.update, custom.update);
+        assert_eq!(back.store.source_index(), 0, "更新源跟随商店来源");
     }
 
     /// 每脚本开关（2026-09-27 起按 role 分列表）：**列表里没有 = 关**；空对象反序列化
@@ -4060,7 +4220,7 @@ mod tests {
         assert!(partial.composite_active.is_empty());
         assert!(partial.image_active.is_empty());
         assert!(!partial.role_is_active("composite", "scripts/composite_demo"));
-        assert!(!partial.role_is_active("image", "scripts/image_info"));
+        assert!(!partial.role_is_active("image", "scripts/image_report"));
         let s = serde_json::to_string(&partial).expect("序列化");
         assert!(!s.contains("composite_active"), "空列表不得落盘：{s}");
         assert!(!s.contains("image_active"), "空列表不得落盘：{s}");
@@ -4112,11 +4272,11 @@ mod tests {
         let mut lx2 = LuaExtSettings::default();
         lx2.set_role_active("composite", "scripts/a", true);
         lx2.set_role_active("composite", "scripts/b", true);
-        lx2.set_role_active("image", "scripts/image_info", true);
+        lx2.set_role_active("image", "scripts/image_report", true);
         let json = serde_json::to_string(&lx2).expect("序列化");
         let back: LuaExtSettings = serde_json::from_str(&json).expect("读回");
         assert_eq!(back.composite_active, vec!["scripts/a", "scripts/b"]);
-        assert_eq!(back.image_active, vec!["scripts/image_info"]);
+        assert_eq!(back.image_active, vec!["scripts/image_report"]);
     }
 
     /// ★ 回归（2026-09-30 用户报告）：卡片开关**关着**时 `params[id].hotkey` 依然在，
@@ -4142,8 +4302,8 @@ mod tests {
         }
         // image 与 composite 是两个不同的启用语义，任一为真即"这一个脚本开着"。
         let mut lx = LuaExtSettings::default();
-        lx.set_role_active("image", "scripts/image_info", true);
-        assert!(lx.script_active("scripts/image_info"));
+        lx.set_role_active("image", "scripts/image_report", true);
+        assert!(lx.script_active("scripts/image_report"));
         assert!(!lx.script_active("scripts/ai_chat"));
     }
 
@@ -4483,7 +4643,7 @@ mod tests {
         assert!(!default_card_expanded("drawing.hotkey"));
         assert!(!default_card_expanded("global.switches"));
         assert!(!default_card_expanded("global.hotkey"));
-        assert!(!default_card_expanded("global.overlay"));
+        assert!(!default_card_expanded("global.advanced"));
     }
 
     /// 展开态要能原样落盘再读回来（这就是"下次打开看到同样现场"的全部依据）。
@@ -4601,6 +4761,49 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, back);
+    }
+
+    /// m40：两条清单地址进配置，老配置缺 `store` 段时取默认（不因升级丢地址）。
+    /// 选中来源也要能落盘/读回——"方便切换更新源"靠的就是这个。
+    #[test]
+    fn store_urls_live_in_config_and_old_configs_get_defaults() {
+        let cfg = Config::default();
+        assert!(
+            cfg.store.gitee_url.ends_with("/main/scripts.json"),
+            "{}",
+            cfg.store.gitee_url
+        );
+        assert!(
+            cfg.store.github_url.ends_with("/main/scripts.json"),
+            "{}",
+            cfg.store.github_url
+        );
+        assert_eq!(cfg.store.source, 0);
+
+        // 老配置（没有任何 store 段）⇒ 两条默认地址 + Gitee。
+        let old: Config = serde_json::from_str("{}").expect("空对象也要能读");
+        assert_eq!(old.store, StoreSettings::default());
+
+        // 用户改地址、切来源 ⇒ 逐字读回。
+        let mut custom = cfg.clone();
+        custom.store.gitee_url = "https://mirror.example/scripts.json".to_string();
+        custom.store.github_url = String::new();
+        custom.store.source = 1;
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.store, custom.store);
+        assert_eq!(back.store.urls()[0], "https://mirror.example/scripts.json");
+        assert_eq!(back.store.source_index(), 1);
+        // 手写成 9 也不许把界面弄崩；`set_source` 夹范围并如实回答"改没改"。
+        let mut wild = custom.clone();
+        wild.store.source = 9;
+        assert_eq!(wild.store.source_index(), 1);
+        assert!(wild.store.set_source(9), "9 → 夹成 1，是真的改了");
+        assert_eq!(wild.store.source, 1);
+        assert!(!wild.store.set_source(9), "已经是 1 ⇒ 没改（不许平白写盘）");
+        assert!(wild.store.set_source(0), "1 → 0 是改");
+        assert_eq!(wild.store.source, 0);
+        assert!(!wild.store.set_source(0), "同一个值 ⇒ 没改（不许平白写盘）");
     }
 
     #[test]

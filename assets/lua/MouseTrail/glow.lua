@@ -60,7 +60,7 @@ function draw(ctx, params)
   local density = math.floor(params.density or 2)
   local step = math.max(1, 12 - density)
 
-  local fr, fg, fb = hex_to_rgb(params.fixed_color or "#FF0000")
+  local fr, fg, fb, fa = hex_to_rgb(params.fixed_color or "#FF0000")
   local idx = 0
   for i = 1, #points, step do
     local g = points[i]
@@ -69,7 +69,7 @@ function draw(ctx, params)
     local ratio = math.max(0.0, 1.0 - age / fade)
     if ratio > 0.01 then
       local r_radius = glow_radius * ratio
-      local alpha_f = ratio * opacity
+      local alpha_f = ratio * opacity * fa / 255
       local a = math.floor(alpha_f * 255)
       local r, gg, b
       if cm == "rainbow" then

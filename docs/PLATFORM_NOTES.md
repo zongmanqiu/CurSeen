@@ -34,7 +34,7 @@
 
 | 结论 | 依据 |
 |---|---|
-| 全局隐藏鼠标只能 `SetSystemCursor(全透明)`（**销毁句柄**）；恢复用 `SystemParametersInfoW` | 实测；必须挂 Drop / panic / SEH 三处兜底，否则进程异常退出后系统光标是透明的 |
+| 全局隐藏鼠标只能 `SetSystemCursor(全透明)`（**销毁句柄**）；恢复用 `SystemParametersInfoW`。2026-10-26 起只换 `OCR_NORMAL`，保留 I 形/手形/缩放提示 | 实测；恢复必须显式挂在 `app.run()` 返回后（`Rc` 闭环可能让 `Drop` 不执行），并保留 Drop / panic / SEH 三处兜底；首实例启动时无条件 `SPI_SETCURSORS` 一次，保证被强杀后下次启动一定恢复 |
 
 ## 四、输入注入 / UIPI
 

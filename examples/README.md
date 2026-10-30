@@ -26,6 +26,12 @@ cargo run --example gen_update_bat -- <程序目录> <zip 路径> <exe 文件名
   产物写到 `temp/probe_out/`。
 - `render_probe.rs`：标注 / 白板模式的离屏渲染验收，绕过窗口与输入链路，直接驱动真实
   `DrawingController` 产出 `DrawList` 再经生产翻译层渲染，产物写到 `temp/render_probe/`。
+- `cursorx_preview.rs`：CursorX 扩展包 24 个脚本的离屏预览，各跑 90 帧后渲染到合成桌面，
+  产物写到 `temp/cursorx_preview/`（单图 + `contact.png` 联系表）。`Difference Blend` /
+  `Fluid Glass` 在探针里走静态回退分支（没有覆盖层窗口可采样）。
+- `mfcmouse_preview.rs`：MFCMouseEffect 扩展包 25 个脚本的离屏预览，按通道触发
+  （Click=抬起 / Trail=移动 / Scroll=滚轮 / Hold=按住 500ms / Hover=静止 1.6s /
+  Cursor=常驻），产物写到 `temp/mfcmouse_preview/`。
 - `gen_update_bat.rs`：复用线上同一份 `bat_script`，把更新脚本写到任意沙箱目录，便于手工 /
   自动化验证更新流程。
 - `crash_probe.rs`：**故意触发一次访问冲突**，验证 `platform/crash.rs` 真的落盘。

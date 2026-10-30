@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::core::draw::DrawList;
+use crate::core::events::MouseButton;
 use crate::core::geometry::Rect;
 use crate::core::math::Rng;
 
@@ -51,6 +52,17 @@ pub trait TrailEffect {
     /// ★ 四类宿主同契约：拖尾也转发按下事件，脚本因此可以写"按下时在光标处爆一次"，
     ///   而不再只有点击效果宿主能收到按下。
     fn on_press(&mut self, _x: f32, _y: f32, _t: f32) {}
+    /// 指针抬起。用于按住态视觉（枪口后坐、加速、连发）。默认忽略。
+    fn on_mouse_up(&mut self, _button: MouseButton, _x: f32, _y: f32, _t: f32) {}
+    /// 滚轮（`delta` 一格 = ±120；`horizontal` = 倾斜滚轮）。默认忽略。
+    ///
+    /// 只有脚本声明了 `on_wheel` 时宿主才会收到滚轮（钩子按需武装，见
+    /// `platform::input::mouse::set_script_wheel_armed`）。
+    fn on_wheel(&mut self, _delta: i32, _horizontal: bool, _x: f32, _y: f32, _t: f32) {}
+    /// 脚本是否声明了 `on_wheel`（决定钩子要不要转发普通滚轮）。
+    fn wants_wheel(&self) -> bool {
+        false
+    }
     /// 固定步长推进。只能改内部状态，不能画。
     fn step(&mut self, dt: f32, ctx: &mut EffectCtx);
     /// 绘制。每个特效把指令 push 进同一个 `DrawList`。

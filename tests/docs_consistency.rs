@@ -1012,3 +1012,201 @@ fn scan_expand_ids(src: &str) -> Vec<String> {
     }
     out
 }
+
+// —— m23：`API.md` 与《Lua 脚本手册》第二部分**同一段表格的两副面孔**，等值由机器读 ——
+//
+// 两份文件描述的是同一件事（同一批接口、同一批元数据）：`assets/lua/API.md` 是查签名的参考，
+// `assets/lua/Lua脚本手册.html` 是脚本作者实际会点开的交付件。它们过去**只靠人记得同步**，
+// 于是 m10–m19 陆续开出去的 `proc` / `read_file` / `set_image` / `clip_*` / `crop` …
+// **在手册里一个都不存在**（本轮 grep 实测：手册的 `ext:` 只有 6 个名字）。
+// 判据口径：比对**名字 + 签名**（两副面孔里唯一真正重复的事实），**刻意不比"说明"栏**——
+// 那一栏两份各写各的、本来就该不一样，逼它等值只会得到两份互相抄的废话。
+
+/// 把 markdown 的一行表格按**未转义**的 `|` 切成单元格（单元格里的 `\|` 是签名的一部分）。
+fn md_row_cells(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut esc = false;
+    for ch in line.chars() {
+        if esc {
+            cur.push(ch);
+            esc = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                cur.push(ch);
+                esc = true;
+            }
+            '|' => {
+                cells.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(ch),
+        }
+    }
+    cells.push(cur);
+    cells
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// 去反引号 / 去 HTML 标签 / 解实体 / 并空白 —— 两副面孔归一到同一形态。
+fn norm_api_cell(raw: &str) -> String {
+    let mut out = String::new();
+    let cs: Vec<char> = raw.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        // 只把**真标签**（`<` 后紧跟字母或 `/`）当标记吃掉。上一版见 `<` 就进标签态，
+        // 于是签名里的 `->` 被当成标签吞掉半个字符，两副面孔比出来"不一样"——红的是量具。
+        let is_tag =
+            c == '<' && i + 1 < cs.len() && (cs[i + 1].is_ascii_alphabetic() || cs[i + 1] == '/');
+        if is_tag {
+            while i < cs.len() && cs[i] != '>' {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if c != '`' {
+            out.push(c);
+        }
+        i += 1;
+    }
+    // markdown 表格里的 `' + BS + '|` 是转义（不转义会把表格切多一列），渲染出来是 `|`；
+    // 两份比对前都还原成 `|`，否则手册与 API.md 永远"差一个反斜杠"。
+    let un = out
+        .replace("\\|", "|")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", "\"")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
+    un.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 从 `API.md` 里取"表头等于 `header` 的那张表"的 (第 1 列, 第 3 列) 清单，按出现顺序。
+fn md_table_pairs(md: &str, header: &[&str]) -> Vec<Vec<(String, String)>> {
+    let mut tables = Vec::new();
+    let lines: Vec<&str> = md.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let cells = md_row_cells(lines[i]);
+        let is_head = cells.len() >= header.len()
+            && cells[..header.len()]
+                .iter()
+                .zip(header)
+                .all(|(c, h)| *c == *h);
+        if !is_head {
+            i += 1;
+            continue;
+        }
+        let mut rows = Vec::new();
+        i += 2; // 跳过分隔行
+        while i < lines.len() && lines[i].trim_start().starts_with('|') {
+            let c = md_row_cells(lines[i]);
+            if c.len() >= 3 {
+                rows.push((norm_api_cell(&c[0]), norm_api_cell(&c[2])));
+            }
+            i += 1;
+        }
+        tables.push(rows);
+    }
+    tables
+}
+
+/// 从手册 HTML 里取"表头等于 `header` 的那张表"的同样清单。
+fn html_table_pairs(html: &str, header: &[&str]) -> Vec<Vec<(String, String)>> {
+    let mut tables = Vec::new();
+    let mut rest = html;
+    while let Some(tstart) = rest.find("<table>") {
+        let Some(tend) = rest[tstart..].find("</table>") else {
+            break;
+        };
+        let block = &rest[tstart..tstart + tend];
+        let ths: Vec<String> = block
+            .split("<th>")
+            .skip(1)
+            .map(|s| norm_api_cell(s.split("</th>").next().unwrap_or(s)))
+            .collect();
+        let matched = header.len() == ths.len() && ths.iter().zip(header).all(|(c, h)| *c == *h);
+        if matched {
+            let mut rows = Vec::new();
+            for tr in block.split("<tr>").skip(1) {
+                let tds: Vec<String> = tr
+                    .split("<td>")
+                    .skip(1)
+                    .map(|s| norm_api_cell(s.split("</td>").next().unwrap_or(s)))
+                    .collect();
+                if tds.len() >= 3 {
+                    rows.push((tds[0].clone(), tds[2].clone()));
+                }
+            }
+            tables.push(rows);
+        }
+        rest = &rest[tstart + tend..];
+    }
+    tables
+}
+
+/// 两副面孔逐张比对，返回"第 n 张表：手册少了 X、多了 Y、签名不一致 Z"这样的人话。
+fn diff_api_tables(md: &str, html: &str, header: &[&str], what: &str) -> Vec<String> {
+    let a = md_table_pairs(md, header);
+    let b = html_table_pairs(html, header);
+    if a.len() != b.len() {
+        return vec![format!(
+            "{what}：`API.md` 里有 {} 张这样的表，手册里只有 {} 张——两份的形状已经不对了",
+            a.len(),
+            b.len()
+        )];
+    }
+    let mut out = Vec::new();
+    for (idx, (ma, mb)) in a.iter().zip(b.iter()).enumerate() {
+        for (name, sig) in ma {
+            match mb.iter().find(|(n, _)| n == name) {
+                None => out.push(format!("{what} 表#{idx}：手册**缺**「{name}」")),
+                Some((_, hs)) if hs != sig => out.push(format!(
+                    "{what} 表#{idx}：「{name}」签名两份不一致\n  API.md: {sig}\n  手册: {hs}"
+                )),
+                Some(_) => {}
+            }
+        }
+        for (name, _) in mb {
+            if !ma.iter().any(|(n, _)| n == name) {
+                out.push(format!(
+                    "{what} 表#{idx}：手册里多出「{name}」（`API.md` 没有）"
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// ★ **手册必须与 `API.md` 的接口表逐签名等值**（m23）。这条读的是文本真源、不参与渲染，
+/// 所以没有"看着像对"的空间：加一个接口而忘了同步交付件，CI 当场点名是哪个名字。
+#[test]
+fn test_lua_manual_matches_the_api_reference_tables() {
+    let root = repo_root();
+    let md = read(&root.join("main/assets/lua/API.md"));
+    let html = read(&root.join("main/assets/lua/Lua脚本手册.html"));
+    let mut offences = Vec::new();
+    offences.extend(diff_api_tables(
+        &md,
+        &html,
+        &["成员", "形式", "签名 / 返回", "说明"],
+        "ext / ExtImage 成员表",
+    ));
+    offences.extend(diff_api_tables(
+        &md,
+        &html,
+        &["全局名", "类型", "读取方", "说明"],
+        "脚本可声明的顶层全局表",
+    ));
+    assert!(
+        offences.is_empty(),
+        "《Lua 脚本手册》与 `API.md` 已经飘了（两份描述同一事实，只有这一格在机器读它们）：\n{}",
+        offences.join("\n")
+    );
+}

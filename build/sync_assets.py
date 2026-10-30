@@ -45,6 +45,13 @@ def main(dry_run=False):
             f.write("\n".join(lines))
         return 1
 
+    # 目录也同步（含空目录）：`assets/lua/scripts` 在源码里是空占位，运行时才由
+    # 在线包填充；只按文件 walk 会把它弄丢。
+    for dirpath, _dirnames, _filenames in os.walk(SRC_ROOT):
+        rel = os.path.relpath(dirpath, SRC_ROOT)
+        if rel != "." and not dry_run:
+            os.makedirs(os.path.join(DST_ROOT, rel), exist_ok=True)
+
     added, updated, same = [], [], []
     for rel, (size, _mtime) in sorted(walk(SRC_ROOT).items()):
         src = os.path.join(SRC_ROOT, rel)

@@ -103,13 +103,13 @@ fn fallback_url(tag: &str, v: Version) -> Option<String> {
     Some(format!("{RELEASE_BASE}/{tag}/CurSeen_{v}.zip"))
 }
 
-/// 更新包只允许来自官方 Gitee（`https://gitee.com/...`）。
+/// 更新包只允许来自两个官方仓库（Gitee / GitHub）。
 ///
-/// 理由：`browser_download_url` 来自 Release API 响应，仓库若被控可被回填任意地址；
-/// `ureq` 默认跟随重定向、且支持 `file:` 协议，裸放开就是 SSRF 面。这里在**下载前**卡一道
-/// 前缀白名单（更深层的重定向目标暂不强校验，Gitee 官方 Release 不会跳外域）。
+/// 理由：`browser_download_url` 来自 Release API / `update.json`，仓库若被控可被回填
+/// 任意地址；`ureq` 默认跟随重定向、且支持 `file:` 协议，裸放开就是 SSRF 面。这里在
+/// **下载前**卡一道前缀白名单。`update.json` 的来源由 `manifest` 模块另行校验。
 pub(crate) fn is_safe_update_url(url: &str) -> bool {
-    url.starts_with("https://gitee.com/")
+    super::manifest::is_safe_download_url(url)
 }
 
 /// 联网取 Release 列表。
@@ -143,7 +143,7 @@ pub fn download(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("读取响应失败: {e}"))
 }
 
-fn get_text(url: &str) -> Result<String, String> {
+pub(crate) fn get_text(url: &str) -> Result<String, String> {
     let agent = agent();
     let mut resp = agent
         .get(url)

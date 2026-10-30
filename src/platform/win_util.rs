@@ -39,6 +39,34 @@ pub fn set_cursor_cross() {
 }
 
 /// 虚拟桌面矩形（含多显示器负坐标）：(left, top, right, bottom)。
+/// 与 `hwnd` **同一块显示器**的工作区（物理像素，去掉任务栏），返回 `(x, y, 宽, 高)`。
+///
+/// ★ 注意与 [`virtual_screen_rect`] 的**返回值形状不同**：那个是 `(left, top, right, bottom)`
+///   （历史口径，别改它的调用方）；这个是脚本结果窗居中用的，写成宽高更不容易算错。
+///   拿不到（句柄无效且没有主屏）就返回 `None`，调用方自己回退。
+pub fn monitor_work_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let mon = if hwnd == 0 {
+            MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST)
+        } else {
+            MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST)
+        };
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut info).as_bool() {
+            return None;
+        }
+        let r = info.rcWork;
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+}
+
 pub fn virtual_screen_rect() -> (i32, i32, i32, i32) {
     unsafe {
         let x = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
@@ -608,6 +636,87 @@ pub fn open_doc(path: &std::path::Path) -> bool {
     ok
 }
 
+/// 用系统默认关联程序打开一个文件（`ShellExecuteW "open"`）。返回是否成功发起。
+///
+/// 只负责"交出去"：不等待程序退出，也不判断目标程序能不能真的解码这个文件。
+/// 调用方负责限制路径与扩展名（脚本层只允许临时目录里的光栅图片）。
+pub fn open_with_default(path: &std::path::Path) -> bool {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` 在调用期间存活（局部变量），`PCWSTR` 只借用它的首地址。
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let ok = r.0 as usize > 32;
+    if !ok {
+        log::warn!(
+            "用默认程序打开失败（ShellExecuteW 返回 {}）：{}",
+            r.0 as usize,
+            path.display()
+        );
+    }
+    ok
+}
+
+/// 用系统默认浏览器打开一个 `http/https` 网址。返回是否成功发起。
+///
+/// 只认两种 scheme；`file:` / `javascript:` / 自定义协议一律拒绝——二维码内容不可信，
+/// 不能让"扫一下"变成执行本机文件或脚本。
+pub(crate) fn validate_http_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!("只允许 http/https 网址：{url}"));
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("网址里不能有空白/控制字符".to_string());
+    }
+    Ok(())
+}
+
+pub fn open_url(url: &str) -> Result<(), String> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    validate_http_url(url)?;
+    let url = url.trim();
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` 在调用期间存活（局部变量），`PCWSTR` 只借用它的首地址。
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if r.0 as usize > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "系统没接住这个网址（ShellExecuteW 返回 {}）",
+            r.0 as usize
+        ))
+    }
+}
+
 pub fn menu_new() -> MenuHandle {
     use windows::Win32::UI::WindowsAndMessaging::CreatePopupMenu;
     unsafe { CreatePopupMenu().map(|m| m.0 as isize).unwrap_or(0) }
@@ -652,7 +761,7 @@ pub fn menu_append_checked(menu: MenuHandle, id: i32, text: &str) -> bool {
 /// 追加一条**分隔线**（`MF_SEPARATOR`）。
 /// 追加一条**禁用（置灰）占位项**（`MF_STRING | MF_GRAYED`）。
 ///
-/// 「图片操作」子菜单一个脚本都没有时用：子菜单本身要恒在（2026-09-26 晚用户口径），
+/// 「脚本」子菜单一个脚本都没有时用：子菜单本身要恒在（2026-09-26 晚用户口径），
 /// 但空的子菜单弹出来是一片白，看着像坏了——放一条灰色说明项，把“这里本该有东西、
 /// 现在没有”讲清楚。命令号恒为 0（不可点，`TrackPopupMenu` 不会返回 0 号命令）。
 pub fn menu_append_disabled(menu: MenuHandle, text: &str) -> bool {
@@ -1527,4 +1636,24 @@ fn monitor_summary() -> String {
         y,
         dpi * 100 / 96
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_http_url;
+
+    /// 只放 http/https 过门；这些必须被拒在 ShellExecute 之前。
+    #[test]
+    fn open_url_rejects_non_web_schemes() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ms-settings:privacy",
+            "https://example.com/a b",
+            "",
+        ] {
+            assert!(validate_http_url(url).is_err(), "不该放行：{url}");
+        }
+    }
 }

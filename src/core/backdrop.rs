@@ -163,6 +163,8 @@ impl Backdrop {
 /// 全项目唯一一处"帧转位图"（借用 / 消费两版，语义逐字节相同），截图链与注释链都走它，
 /// 避免两处各写一次 α 补全。还要继续用原帧的调用方用这一版；只转一次就用
 /// [`shot_to_bitmap_owned`]——它省掉一份 `w*h*4` 的分配与拷贝。
+///
+/// ★ 读**文件**得到的图不许走这一档：见 [`shot_to_bitmap_with_alpha`]。
 pub fn shot_to_bitmap(shot: &Shot) -> Option<RgbaBitmap> {
     if shot.w <= 0 || shot.h <= 0 {
         return None;
@@ -172,6 +174,21 @@ pub fn shot_to_bitmap(shot: &Shot) -> Option<RgbaBitmap> {
         a[3] = 255;
     }
     RgbaBitmap::new(shot.w as u32, shot.h as u32, rgba)
+}
+
+/// GDI 帧（BGRA）→ 非预乘 RGBA 位图，**α 原样保留**——读**文件**得到的图走这一档。
+///
+/// ★ 为什么要两个函数而不是将就一个：[`shot_to_bitmap`] 那两版都会把 α 一律刷成 255，
+///   那是**抓屏**要的语义（GDI 交回来的帧 α 恒 0，不补就是一整幅"透明"的黑）。而 PNG 文件里
+///   的 α 是内容本身——去背景的结果、圆角图标、GIF 帧全指着它。
+///   2026-10-28 给 `ext:load_image` 做对拍（自家编码器写 PNG、自家解码器读回来逐字节比）
+///   时暴露：当时顺手复用了 `shot_to_bitmap`，半透明像素全变成实心，读回来那份和写出去的
+///   不是同一张图。**同一个 `Shot` 有两种正确语义，就该有两个函数。**
+pub fn shot_to_bitmap_alpha(shot: &Shot) -> Option<RgbaBitmap> {
+    if shot.w <= 0 || shot.h <= 0 {
+        return None;
+    }
+    RgbaBitmap::new(shot.w as u32, shot.h as u32, shot.to_rgba())
 }
 
 /// [`shot_to_bitmap`] 的消费版：在帧自己的缓冲上换序 + 补 α，不再多分配一份。
@@ -212,6 +229,37 @@ pub fn bitmap_to_shot(bmp: &RgbaBitmap) -> Option<Shot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ 同一个 `Shot` 有**两种正确语义**，所以有两档转换，各测一格（混着用就是 bug）：
+    /// [`shot_to_bitmap`] 把 α 一律刷成 255——抓屏要的（GDI 交回来的帧 α 恒 0，不补就是
+    /// 一整幅"透明"的黑）；[`shot_to_bitmap_alpha`] 保住 α——读文件要的（去背景的结果、
+    /// 圆角图标全指着它）。
+    ///
+    /// 这一格是 2026-10-28 **被对拍逼出来的**：`ext:load_image` 最初顺手用了抓屏那一档，
+    /// "自家编码器写 PNG、自家解码器读回来逐字节比"当场红，症状就是半透明像素全变实心。
+    /// 颜色通道两档必须一致，否则红的是换序而不是 α——所以两边都断言。
+    #[test]
+    fn the_two_bitmap_conversions_differ_only_on_alpha() {
+        let shot = Shot {
+            w: 1,
+            h: 2,
+            bgra: vec![10, 20, 30, 0, 40, 50, 60, 128],
+        };
+        let grab = shot_to_bitmap(&shot).expect("抓屏档该转得动");
+        let file = shot_to_bitmap_alpha(&shot).expect("文件档该转得动");
+        // BGRA → RGBA 的换序在两档里完全一样（R/B 换位、G 不动）。
+        assert_eq!(&grab.rgba[..3], &file.rgba[..3], "前两像素的颜色不该分档");
+        assert_eq!(&grab.rgba[4..7], &file.rgba[4..7], "后两像素的颜色不该分档");
+        assert_eq!(&grab.rgba[0..3], &[30, 20, 10], "BGRA 要换成 RGBA");
+        // α 才是两档的唯一区别。
+        assert_eq!(grab.rgba[3], 255, "抓屏档补全不透明");
+        assert_eq!(
+            grab.rgba[7], 255,
+            "抓屏档连半透明也刷成 255（这是它的语义）"
+        );
+        assert_eq!(file.rgba[3], 0, "文件档必须保住透明像素，不然去背景白做");
+        assert_eq!(file.rgba[7], 128, "文件档不许动半透明的 α");
+    }
 
     fn bmp(w: u32, h: u32) -> Rc<RgbaBitmap> {
         let rgba = vec![0x80_u8; (w * h * 4) as usize];

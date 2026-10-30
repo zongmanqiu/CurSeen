@@ -401,7 +401,7 @@ mod tests {
         let mut m = KeySoundModule::new();
         m.sync(&KeySoundSettings {
             enabled: true,
-            script: "scripts/unified_sound".into(),
+            script: "KeySound/unified_sound".into(),
             volume: 50,
             file: "click3".into(),
             params: HashMap::new(),
@@ -419,10 +419,10 @@ mod tests {
         let mut p = HashMap::new();
         p.insert("repeat_sound".to_string(), serde_json::json!(false));
         let mut script_params = HashMap::new();
-        script_params.insert("scripts/unified_sound".to_string(), p);
+        script_params.insert("KeySound/unified_sound".to_string(), p);
         m.sync(&KeySoundSettings {
             enabled: true,
-            script: "scripts/unified_sound".into(),
+            script: "KeySound/unified_sound".into(),
             volume: 50,
             file: "click3".into(),
             params: script_params,
@@ -445,12 +445,12 @@ mod tests {
         p.insert("digit_sound".to_string(), serde_json::json!("dig.wav"));
         p.insert("letter_sound".to_string(), serde_json::json!("let.wav"));
         let mut script_params = HashMap::new();
-        script_params.insert("scripts/class_sound".to_string(), p);
+        script_params.insert("KeySound/class_sound".to_string(), p);
 
         let mut m = KeySoundModule::new();
         m.sync(&KeySoundSettings {
             enabled: true,
-            script: "scripts/class_sound".into(),
+            script: "KeySound/class_sound".into(),
             volume: 50,
             file: "click3".into(),
             params: script_params,
@@ -478,7 +478,7 @@ mod tests {
         let mut m = KeySoundModule::new();
         m.sync(&KeySoundSettings {
             enabled: true,
-            script: "scripts/class_sound".into(),
+            script: "KeySound/class_sound".into(),
             volume: 50,
             file: "click3".into(),
             params: HashMap::new(),
@@ -547,14 +547,14 @@ mod tests {
         let ks = reg.role_of("keysound");
         let ids: Vec<&str> = ks.iter().map(|s| s.id.as_str()).collect();
         assert!(
-            ids.contains(&"scripts/unified_sound"),
+            ids.contains(&"KeySound/unified_sound"),
             "统一音效应在 keysound 列表：{ids:?}"
         );
         assert!(
-            ids.contains(&"scripts/class_sound"),
+            ids.contains(&"KeySound/class_sound"),
             "分类音效应在 keysound 列表：{ids:?}"
         );
-        let u = reg.get("scripts/unified_sound").expect("统一音效 schema");
+        let u = reg.get("KeySound/unified_sound").expect("统一音效 schema");
         assert_eq!(
             u.params.len(),
             2,
@@ -566,7 +566,7 @@ mod tests {
                 .any(|p| p.key == "sound" && p.ptype == crate::scripting::ParamType::File),
             "统一音效的音源应是 file 浏览参数"
         );
-        let c = reg.get("scripts/class_sound").expect("分类音效 schema");
+        let c = reg.get("KeySound/class_sound").expect("分类音效 schema");
         assert!(
             !c.params.iter().any(|p| matches!(
                 p.ptype,

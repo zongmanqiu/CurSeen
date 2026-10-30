@@ -100,8 +100,8 @@ function draw(ctx, params)
   if #bubbles == 0 then return end
   local opacity = params.opacity or 0.9
   local sw = params.stroke or 2
-  local fr, fg, fb = hex_to_rgb(params.fill or "#E6F1F7")
-  local lr, lg, lb = hex_to_rgb(params.line or "#3A92C5")
+  local fr, fg, fb, fa = hex_to_rgb(params.fill or "#E6F1F7")
+  local lr, lg, lb, la = hex_to_rgb(params.line or "#3A92C5")
 
   for i = 1, #bubbles do
     local b = bubbles[i]
@@ -112,10 +112,10 @@ function draw(ctx, params)
     local a = math.floor(opacity * k * in_k * 255)
     if a > 0 and b.r > 0.5 then
       -- 描边圆 + 极淡的填充 + 左上角一点高光
-      ctx:ring(b.x, b.y, b.r, sw, lr, lg, lb, a)
-      ctx:circle(b.x, b.y, math.max(0.5, b.r - sw * 0.5), fr, fg, fb, math.floor(a * 0.22))
+      ctx:ring(b.x, b.y, b.r, sw, lr, lg, lb, math.floor(a * la / 255))
+      ctx:circle(b.x, b.y, math.max(0.5, b.r - sw * 0.5), fr, fg, fb, math.floor(a * 0.22 * fa / 255))
       ctx:circle(b.x - b.r * 0.35, b.y - b.r * 0.35, math.max(0.5, b.r * 0.16), 255, 255, 255,
-        math.floor(a * 0.8))
+        math.floor(a * 0.8 * fa / 255))
     end
   end
 end

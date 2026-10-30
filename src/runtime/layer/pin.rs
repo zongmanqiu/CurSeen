@@ -114,8 +114,10 @@
 //! （`&mut` 别名 UB，见 `PinWidget`）。
 //!
 //! 菜单落地在 `show_context_menu` + `PinWidget`（`Rc<RefCell<PinCanvas>>`
-//! 封装让延后任务能访问画布）。Ctrl+S 另存的是**选中的那一张**，右键「另存为」存的是**这张**
-//! 当前（含变换后）的位图，两者并存、互不冲突。
+//! 封装让延后任务能访问画布）。Ctrl+S 与右键「另存为」**都存当前（含变换后）的位图**：
+//! Ctrl+S 作用于选中的那一张，右键作用于这一张。m16 之前 Ctrl+S 存的是出厂那一份，
+//! 于是"我看到灰度的图、存出来是彩色的"——脚本能回写之后这会变成常态，故收敛成一条语义。
+//! 出厂那份仍可从「恢复原图」拿回来（它存在 `OpenPin.content` 里，不受变换影响）。
 //!
 //! # 为什么不用 `Element::window_drag()`
 //!
@@ -190,14 +192,19 @@ const CMD_MIRROR_V: i32 = CMD_BASE + 4;
 /// 取色：进入吸管模式（2026-10-02 用户口径）。光标变十字，悬停显示光标下图片像素的
 /// 颜色（`#RRGGBB`），单击复制并显示「已复制」，`Esc` / 再右键 / 点图片外退出。
 const CMD_PICK: i32 = CMD_BASE + 5;
+/// 恢复原图：把这张贴图的像素换回**钉进来那一刻那张**。走的是与旋转/镜像/脚本回写
+/// **同一条缝**（`set_canvas_bitmap`），所以尺寸重算、两段式借用一格都不省。
+/// 占的是回收掉的 0x2006 空号（`取色`=+5 与 `锁定`=+7 之间那个洞，全仓无其它引用；
+/// 命令号唯一性由 `menu_command_ids_are_unique_and_reserve_zero` 钉住，两个菜单项同号是最难查的一类串味）。
+const CMD_RESTORE: i32 = CMD_BASE + 6;
 /// 锁定图片：**完全锁定**（2026-09-29 用户口径）——Esc / 双击关不掉、拖不动、
 /// 滚轮缩放与 Ctrl+滚轮透明度全部禁掉；只有右键菜单「锁定图片」解除或「关闭」才会变。
 const CMD_LOCK: i32 = CMD_BASE + 7;
 /// 透明度子菜单项基底：`CMD_ALPHA_BASE + alpha/10`（10%→1 … 100%→10）。
 const CMD_ALPHA_BASE: i32 = CMD_BASE + 8;
-/// 「图片操作」子菜单项基底：`CMD_LUA_MENU_BASE + idx`（脚本在 `menu_items()` 里的稳定索引）。
+/// 「脚本」子菜单项基底：`CMD_LUA_MENU_BASE + idx`（脚本在 `menu_items()` 里的稳定索引）。
 const CMD_LUA_MENU_BASE: i32 = CMD_BASE + 100;
-/// 「图片操作」子菜单**没有任何脚本**时的灰色占位项文本（用户口径："没有相关脚本就留空"）。
+/// 「脚本」子菜单**没有任何脚本**时的灰色占位项文本（用户口径："没有相关脚本就留空"）。
 ///
 /// 子菜单恒挂载，但不允许"点了弹一片白"——留一条置灰说明，把"目录里没脚本"讲清楚。
 /// ★ 改这个串要同步下面的宽度估算表（它是按字面宽度算右缘让位的）。
@@ -1067,7 +1074,7 @@ fn anchor_x_with_submenu_room(x: i32, root_w: i32, sub_w: i32, wa_x: i32, wa_w: 
     x.min(limit).max(wa_x)
 }
 
-/// 「图片操作」子菜单要挂的行：`(命令号, 文本, 是否置灰)`。
+/// 「脚本」子菜单要挂的行：`(命令号, 文本, 是否置灰)`。
 ///
 /// 抽成纯函数是为了能把"恒挂载 + 没脚本就留空"钉在单测里——这类菜单 bug 只能看见、
 /// 摸不到，靠手点验一轮就丢。
@@ -1102,6 +1109,12 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
     crate::platform::win_util::menu_append(menu, CMD_ROT_CW, "顺时针 90°");
     crate::platform::win_util::menu_append(menu, CMD_MIRROR_H, "水平镜像");
     crate::platform::win_util::menu_append(menu, CMD_MIRROR_V, "垂直镜像");
+    // 「恢复原图」只在**确实不同**时出现：一张从没动过的贴图挂着这么条灰项，会让人怀疑
+    // "我是不是改过了"。判据含逐字节比较（不是只比宽高）——脚本换一张同尺寸的灰度图，
+    // 光看宽高是看不出来的。
+    if pin_was_transformed(rc, seq) {
+        crate::platform::win_util::menu_append(menu, CMD_RESTORE, "恢复原图");
+    }
     // ★ 取色 = 开关（用户口径 2026-10-02："选项前面打勾，再选一次就退出"）：吸管激活时
     //   打勾，再选一次即退出。
     let picking = rc.borrow().pick.get();
@@ -1129,15 +1142,15 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
             a += ALPHA_STEP;
         }
     }
-    // ── 图片操作：Lua 扩展（`assets/lua` 里声明了 menu 的脚本），子菜单项 ID=基底+稳定索引 ──
-    // ★ 透明度与图片操作之间只留一条间隔线（2026-09-26 用户口径：两条太挤）。
+    // ── 脚本：Lua 扩展（`assets/lua` 里声明了 menu 的脚本），子菜单项 ID=基底+稳定索引 ──
+    // ★ 透明度与脚本之间只留一条间隔线（2026-09-26 用户口径：两条太挤）。
     // ★ 子菜单**恒挂载**，一个脚本都没勾开时才"留空"（挂一条灰色占位项，而不是把整个
     //   子菜单撤掉：撤掉 = 用户以为功能坏了 / 入口随配置漂移）。
     //   哪些脚本在里面由 `lua_ext_menu_items` 决定（= 磁盘扫描 ∧ `image_active` 开关），
     //   这里不再自己加第二道闸——两道闸同号才会一致。
     let lua_items = rc.borrow().rt.borrow().lua_ext_menu_items();
     crate::platform::win_util::menu_separator(menu);
-    let lua_sub = crate::platform::win_util::menu_submenu(menu, "图片操作");
+    let lua_sub = crate::platform::win_util::menu_submenu(menu, "脚本");
     if lua_sub != 0 {
         for (cmd, text, disabled) in lua_submenu_rows(&lua_items) {
             if disabled {
@@ -1154,10 +1167,10 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
     } else {
         crate::platform::win_util::menu_append(menu, CMD_LOCK, "锁定图片");
     }
-    crate::platform::win_util::menu_append(menu, CMD_SAVE, "另存为…");
+    crate::platform::win_util::menu_append(menu, CMD_SAVE, "另存为（当前画面）…");
     crate::platform::win_util::menu_append(menu, CMD_CLOSE, "关闭");
 
-    // ★ 子菜单防遮挡（2026-09-26 用户口径）：锚点太靠屏幕右缘时，「透明度 / 图片操作」
+    // ★ 子菜单防遮挡（2026-09-26 用户口径）：锚点太靠屏幕右缘时，「透明度 / 脚本」
     //   的子菜单会被 Windows 向左翻转、盖住父菜单。把锚点往屏内挪，给子菜单留出
     //   向右展开的空间（宽度用宁大勿小的估算，见 `est_menu_width`）。根级标签必须与
     //   上面逐字一致——它就在同一个函数里，改一处忘另一处编译不报错、这里会估错。
@@ -1168,7 +1181,7 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
         "垂直镜像",
         "取色",
         "透明度",
-        "图片操作",
+        "脚本",
         "锁定图片",
         "另存为…",
         "关闭",
@@ -1177,7 +1190,7 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
     .map(|s| label_cols(s))
     .max()
     .unwrap_or(0);
-    // 「图片操作」子菜单的宽度：有脚本取最长脚本名，无脚本时那条灰色占位项就是最宽的。
+    // 「脚本」子菜单的宽度：有脚本取最长脚本名，无脚本时那条灰色占位项就是最宽的。
     // 两个分支都保留 "100%"（透明度子菜单）作为下限——两张子菜单共享同一份估算。
     let mut sub_cols = label_cols("100%");
     if lua_items.is_empty() {
@@ -1209,7 +1222,7 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
         set_pin_alpha(rc, pct);
         return;
     }
-    // 「图片操作」脚本区间：`CMD_LUA_MENU_BASE + idx`（idx 对应 `lua_items` 的稳定索引）。
+    // 「脚本」脚本区间：`CMD_LUA_MENU_BASE + idx`（idx 对应 `lua_items` 的稳定索引）。
     let lua_len = lua_items.len() as i32;
     if (CMD_LUA_MENU_BASE..CMD_LUA_MENU_BASE + lua_len).contains(&cmd) {
         if let Some((id, _)) = lua_items.get((cmd - CMD_LUA_MENU_BASE) as usize) {
@@ -1219,10 +1232,11 @@ fn show_context_menu(rc: &Rc<RefCell<PinCanvas>>, x: i32, y: i32) {
     }
     match cmd {
         CMD_LOCK => toggle_pin_locked(rc, seq),
-        CMD_SAVE => save_pin_current(rc, seq),
+        CMD_SAVE => save_view_png(seq, None),
         CMD_CLOSE => {
             crate::platform::win_util::post_close_by_title(&pin_title(seq));
         }
+        CMD_RESTORE => restore_pin_original(rc, seq),
         CMD_ROT_CW => transform_pin(rc, |b| b.rotate_cw90()),
         CMD_MIRROR_H => transform_pin(rc, |b| b.flip_h()),
         CMD_MIRROR_V => transform_pin(rc, |b| b.flip_v()),
@@ -1265,16 +1279,20 @@ fn toggle_pin_locked(rc: &Rc<RefCell<PinCanvas>>, seq: u32) {
     log::info!("贴图 #{seq} 锁定状态 -> {}", !cur);
 }
 
-/// 把贴图（当前位图）另存为 PNG。复用截图保存链（`bitmap_to_shot` + `save_png`），
-/// 与 overlay.rs 的 Ctrl+S 同款——但这里保存的是**变换后**的当前位图（旋转/镜像已应用）。
-fn save_pin_current(rc: &Rc<RefCell<PinCanvas>>, seq: u32) {
-    let bmp = rc.borrow().bitmap.clone();
+/// 存 PNG：「另存为」与 Ctrl+S **共用这一条**（m16 语义收敛的落点）。
+///
+/// 只管"给一张位图 → 对话框 → 落盘"，像素由调用方交进来。线程边界因此只有一处要说清：
+/// 画布像素只能从 [`current_bitmap`]（`thread_local` 登记表）取，而 windui 的
+/// `defer_blocking` 排的闭包**同样在 UI 线程**跑（走 `DispatchResult::dialog`，不是新线程），
+/// 所以两条入口都在本线程，不需要把图搬过线程。
+pub fn save_bitmap_png(seq: u32, bmp: &RgbaBitmap) {
     let Some(path) = crate::platform::file_dialog::save_png(&format!("CurSeen_贴图_{seq}"))
     else {
         log::info!("另存为：用户在对话框里取消");
         return;
     };
-    let Some(shot) = crate::core::backdrop::bitmap_to_shot(&bmp) else {
+    // 复用截图保存链（`bitmap_to_shot` + `save_png`）；α 原样带过去，不刷成实心。
+    let Some(shot) = crate::core::backdrop::bitmap_to_shot(bmp) else {
         log::warn!("另存为：位图无法转回帧格式");
         return;
     };
@@ -1284,6 +1302,26 @@ fn save_pin_current(rc: &Rc<RefCell<PinCanvas>>, seq: u32) {
     }
 }
 
+/// 存**画面上那一张**（旋转 / 镜像 / 脚本回写都算数）。UI 线程调。
+///
+/// 画布已经不在了（那张窗刚关）才退回 `fallback`——那是 Ctrl+S 那条路上唯一可能的兜底，
+/// 且一定记一条日志：**静默把用户看到的内容换成别的**比失败更坏。右键菜单那条入口画布必然
+/// 在（菜单就挂在那扇窗上），所以传 `None`：真取不到就如实报"存不了"，不拿出厂图冒充。
+pub fn save_view_png(seq: u32, fallback: Option<&RgbaBitmap>) {
+    let live = current_bitmap(seq);
+    let src = match live.as_ref().or(fallback) {
+        Some(s) => s,
+        None => {
+            log::warn!("另存为：#{seq} 既没有画布也没有出厂图，存不了");
+            return;
+        }
+    };
+    if live.is_none() {
+        log::warn!("另存为：#{seq} 的画布已经不在了，存出厂那一份");
+    }
+    save_bitmap_png(seq, src);
+}
+
 /// 套用一次几何变换（旋转 / 镜像）到当前位图，并重建渲染对象、同步窗口尺寸。
 ///
 /// 旋转会把宽高互换，所以变换后窗口必须跟着重设（保持左上角不动、缩放百分比不变）。
@@ -1291,18 +1329,46 @@ fn save_pin_current(rc: &Rc<RefCell<PinCanvas>>, seq: u32) {
 /// 活动的事件回调。变换是**原地生效**（不新贴一张）：`bitmap` 替换成新图、`img` 重建，
 /// 窗口尺寸按新图 × 当前百分比重新计算。
 fn transform_pin(rc: &Rc<RefCell<PinCanvas>>, f: impl FnOnce(RgbaBitmap) -> RgbaBitmap) {
-    let (new_bmp, hwnd, dpi, pct) = {
+    let new_bmp = f((*rc.borrow().bitmap).clone());
+    set_canvas_bitmap(rc, new_bmp);
+}
+
+/// **换掉一张贴图的像素**——右键「旋转 / 镜像」与脚本 `ext:set_image` 共用这一条缝。
+///
+/// 顺序照 [`transform_pin`] 原本的形状，一处都不许省：
+/// 1. 先重建渲染对象（`img` 与 `bitmap` 必须是同一份像素，漏了就拉伸）；
+/// 2. 新窗口尺寸 = 新图 × 当前缩放 + 2×`FRAME`（左上角不动）；
+/// 3. **写完画布状态、释放可变借用，再动窗口**——`SetWindowPos` 会同步重入本窗的 paint，
+///    还持着 `borrow_mut` 就是 `RefCell already mutably borrowed` → panic 整进程崩
+///    （用户实测：右键旋转必崩，见下方两段式借用注释）；
+/// 4. 踢一次全局重排。
+///
+/// 返回 `false` = 渲染对象没建起来（像素为 0 或后端拒绝），此时**什么都不改**。
+/// 一张位图以 `pct` 缩放显示时，贴图窗**外框**该是多大。
+///
+/// 单独抽出来是为了能被单测钉住：换图（旋转、脚本回写）最容易坏的就是这一步——
+/// 算小了露黑边、算大了留空白，而两者都没有报错，只有眼睛看得见。
+fn window_size_for_bitmap(iw: u32, ih: u32, pct: u32) -> (i32, i32) {
+    let (iw2, ih2) = zoomed_size(iw, ih, pct);
+    (iw2 + 2 * FRAME, ih2 + 2 * FRAME)
+}
+
+fn set_canvas_bitmap(rc: &Rc<RefCell<PinCanvas>>, new_bmp: RgbaBitmap) -> bool {
+    let (hwnd, dpi, pct) = {
         let c = rc.borrow();
-        (f((*c.bitmap).clone()), c.own_hwnd(), c.dpi, c.pct.get())
+        (c.own_hwnd(), c.dpi, c.pct.get())
     };
     let Ok(new_img) = WImage::from_rgba(new_bmp.w, new_bmp.h, &new_bmp.rgba) else {
-        log::warn!("贴图变换：重建渲染对象失败");
-        return;
+        log::warn!(
+            "贴图换图：重建渲染对象失败（尺寸 {}×{}）",
+            new_bmp.w,
+            new_bmp.h
+        );
+        return false;
     };
     let (iw, ih) = (new_bmp.w, new_bmp.h);
     // 窗口 = 图片 + 2×FRAME 描边；只取尺寸（位置保持左上角不动）。
-    let (iw2, ih2) = zoomed_size(iw, ih, pct);
-    let (nw, nh) = (iw2 + 2 * FRAME, ih2 + 2 * FRAME);
+    let (nw, nh) = window_size_for_bitmap(iw, ih, pct);
     {
         let mut c = rc.borrow_mut();
         c.bitmap = Rc::new(new_bmp);
@@ -1323,6 +1389,118 @@ fn transform_pin(rc: &Rc<RefCell<PinCanvas>>, f: impl FnOnce(RgbaBitmap) -> Rgba
         }
     }
     windui::anim::request_relayout();
+    true
+}
+
+// 贴图画布登记表：`seq → 那张窗的画布`。两个读者（m15 脚本回写、m16 的 Ctrl+S）
+// 都要"给我一个 seq/hwnd，我把活干在那扇窗上"，而画布平时只活在贴图窗自己的闭包里。
+//
+// ★ 为什么是 `thread_local` 而不是 `static Mutex`：`Weak<RefCell<PinCanvas>>` 不是 `Send`
+//   （`RefCell` 不是 `Sync`），写进 `static` 直接编不过；而登记（建窗时）与消费（覆盖层
+//   消息回调、贴图自己的菜单任务）本来就都在 UI 线程。
+//
+// 存 `Weak`：贴图窗随时可能被用户关掉。握强引用会把关掉的窗吊住不销，那是比"这次没改成"
+// 严重得多的泄漏；升级失败 ⇒ 如实报"那张贴图不在了"。死条目在下一次登记时顺手清掉。
+thread_local! {
+    static PINS: std::cell::RefCell<std::collections::HashMap<u32, std::rc::Weak<RefCell<PinCanvas>>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 建窗时登记（`seq` 在建窗之前就定了，而 `own_hwnd` 要到第一次事件才有值——所以登记
+/// 挂在这里，不挂在"脚本触发时"：那会让 Ctrl+S / 回写只对"跑过脚本的贴图"生效）。
+fn register_pin(seq: u32, rc: &Rc<RefCell<PinCanvas>>) {
+    PINS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.retain(|_, w| w.strong_count() > 0);
+        m.insert(seq, Rc::downgrade(rc));
+    });
+}
+
+/// 按 `seq` 取画布（Ctrl+S 用：它作用于"选中的那一张"）。
+fn pin_by_seq(seq: u32) -> Option<Rc<RefCell<PinCanvas>>> {
+    PINS.with(|m| m.borrow().get(&seq).and_then(|w| w.upgrade()))
+}
+
+/// 按 HWND 取画布（脚本回写用：脚本手里只有 `ctx.hwnd`）。
+///
+/// 扫值而不是再开一张 `hwnd → …` 的表：贴图数量是个位到几十的量，两把表只会有一天
+/// 一把新一把旧（加图/关图各要记得改两处）。
+fn pin_by_hwnd(hwnd: isize) -> Option<Rc<RefCell<PinCanvas>>> {
+    if hwnd == 0 {
+        return None;
+    }
+    PINS.with(|m| {
+        let m = m.borrow();
+        m.values()
+            .filter_map(|w| w.upgrade())
+            .find(|rc| rc.borrow().own_hwnd() == hwnd)
+    })
+}
+
+/// UI 线程侧执行一次脚本回写。`Err` 里是给人看的原因（调用方原样回给脚本线程）。
+pub fn apply_script_image(hwnd: isize, bitmap: RgbaBitmap) -> Result<(), String> {
+    if hwnd == 0 {
+        return Err("这一项要在贴图上右键触发：没有指定的那张贴图".to_string());
+    }
+    // ★ "必须在 UI 线程"这条不需要单独判据：登记表是线程局部的，站错线程只会查不到条目，
+    //   自然落到下面那句"找不到那张贴图"。再立一套线程 id 比对，只会有一天两把尺子各说一遍。
+    let rc = pin_by_hwnd(hwnd).ok_or_else(|| "找不到那张贴图（可能已经关掉了）".to_string())?;
+    if set_canvas_bitmap(&rc, bitmap) {
+        Ok(())
+    } else {
+        Err("换图失败：渲染对象没建起来（像素尺寸为 0 或后端拒绝）".to_string())
+    }
+}
+
+/// 那张贴图**此刻**的像素（旋转 / 镜像 / 脚本回写之后的样子）。`None` = 那张窗已经不在了。
+///
+/// 给 Ctrl+S 用：m16 起它存的就是"用户屏幕上看到的那一张"，与右键「另存为」同一语义。
+pub fn current_bitmap(seq: u32) -> Option<RgbaBitmap> {
+    pin_by_seq(seq).map(|rc| (*rc.borrow().bitmap).clone())
+}
+
+/// 那张贴图此刻的窗口句柄（0 / 查不到 ⇒ `None`）。
+///
+/// 给热键触发的脚本用：脚本拿到 `ctx.hwnd` 才能把结果**回写到被处理的那一张**。
+pub fn current_hwnd(seq: u32) -> Option<isize> {
+    pin_by_seq(seq)
+        .map(|rc| rc.borrow().own_hwnd())
+        .filter(|h| *h != 0)
+}
+
+/// 这张贴图与"钉进来那一刻"是否已经不同（决定「恢复原图」要不要出现在菜单里）。
+fn bitmap_differs(a: &RgbaBitmap, b: &RgbaBitmap) -> bool {
+    a.w != b.w || a.h != b.h || a.rgba != b.rgba
+}
+
+/// 这张贴图与出厂那份不同吗？（决定「恢复原图」出不出现在菜单里）
+///
+/// 两段式：先把出厂那份**取成 owned**（`pin_content` 返回克隆），再碰画布。把
+/// `rc.borrow().rt.borrow()` 写进 `match` 的 scrutinee 会让这两层借用活到整个 match 体，
+/// 臂内再 `borrow()` 就是 panic——门禁 `no_refcell_borrow_in_a_let_chain_scrutinee` 拦的正是这个形状。
+fn pin_was_transformed(rc: &Rc<RefCell<PinCanvas>>, seq: u32) -> bool {
+    let orig = rc.borrow().rt.borrow().pin_content(seq);
+    let cur = rc.borrow().bitmap.clone();
+    match orig {
+        Some(orig) => bitmap_differs(&cur, orig.bitmap()),
+        // 记账里已经没有出厂内容 ⇒ 宁可让这一项出现，也别悄悄不可用。
+        None => true,
+    }
+}
+
+/// 把像素换回**钉进来那一刻那张**。与旋转 / 脚本回写共用 [`set_canvas_bitmap`]，所以窗口
+/// 尺寸重算、两段式借用、重排提示都不另立规矩。已经是原图就直接返回（幂等，不闪一下）。
+fn restore_pin_original(rc: &Rc<RefCell<PinCanvas>>, seq: u32) {
+    if !pin_was_transformed(rc, seq) {
+        return;
+    }
+    let Some(orig) = rc.borrow().rt.borrow().pin_content(seq) else {
+        log::warn!("恢复原图：#{seq} 的出厂内容已经不在了");
+        return;
+    };
+    // `bitmap()` 是 `&Rc<RgbaBitmap>`：先剥 `&` 再剥 `Rc`，否则 `.clone()` 复制的是引用。
+    let target = (**orig.bitmap()).clone();
+    set_canvas_bitmap(rc, target);
 }
 
 /// 设置整窗透明度（右键子菜单项 / 兜底入口）。
@@ -1334,10 +1512,12 @@ fn set_pin_alpha(rc: &Rc<RefCell<PinCanvas>>, pct: u8) {
     }
 }
 
-/// 从「图片操作」子菜单选中脚本 `id`，把当前贴图 + 该脚本的参数脱手给后台执行器跑。
+/// 从「脚本」子菜单选中脚本 `id`，把当前贴图 + 该脚本的参数脱手给后台执行器跑。
 /// 全程不碰 UI 线程（脚本可能阻塞 HTTP 60s），结果由执行器线程自己弹框。
 fn run_lua_ext(rc: &Rc<RefCell<PinCanvas>>, id: &str) {
     let (bmp, hwnd) = (rc.borrow().bitmap.clone(), rc.borrow().own_hwnd());
+    // 回写靠 [`pin_by_hwnd`] 找回画布；登记在建窗时（见 `open` 里的 `register_pin`）而不是
+    // 这里——否则只有"跑过一次脚本的贴图"才回写得动，而 Ctrl+S /「恢复原图」用的是同一张表。
     let ext_dir = rc.borrow().rt.borrow().lua_ext_dir().to_path_buf();
     let params = rc.borrow().rt.borrow().lua_ext_params(id);
     crate::scripting::ext_runner::run_ext_detached(
@@ -1471,6 +1651,8 @@ pub fn open(
         pick_at: Cell::new(None),
         pick_copied: Cell::new(false),
     })));
+    // 登记画布（m16）：脚本回写按 `hwnd` 找、Ctrl+S 与「恢复原图」按 `seq` 找，都靠这张表。
+    register_pin(seq, &widget.0);
     let key = format!("snap_pin_{seq}");
     // 关窗收尾：不管谁关的（自身双击/右键、Esc 经 `post_close_by_title`、超上限淘汰），
     // 都要把记账摘掉。以前只有控件自己的 `close()` 摘——Esc 走的是 `WM_CLOSE`，
@@ -2175,10 +2357,10 @@ mod tests {
         );
     }
 
-    /// ★ 2026-09-26 晚用户口径：贴图右键「图片操作」子菜单**恒挂载**，没有脚本就"留空"。
+    /// ★ 2026-09-26 晚用户口径：贴图右键「脚本」子菜单**恒挂载**，没有脚本就"留空"。
     ///
     /// 这里是钉过一次的形状：此前菜单按脚本开关过滤（开关出厂全关 → 磁盘上明明有
-    /// `图片信息 / 平均颜色`，菜单里却一项没有），用户报"有脚本但没显示"。
+    /// `图片体检 / 平均颜色`，菜单里却一项没有），用户报"有脚本但没显示"。
     #[test]
     fn lua_submenu_rows_keep_the_entry_even_when_empty() {
         // 空表：不塌成 0 行（调用方恒挂载子菜单），而是留一条禁用说明项。
@@ -2199,8 +2381,8 @@ mod tests {
         // 有脚本：命令号必须与 `lua_ext_menu_items` 的下标严格对齐，否则点 A 跑 B。
         let items = vec![
             (
-                String::from("scripts/1.image_info"),
-                String::from("图片信息"),
+                String::from("scripts/1.image_report"),
+                String::from("图片体检"),
             ),
             (
                 String::from("scripts/2.avg_color"),
@@ -2209,7 +2391,224 @@ mod tests {
         ];
         let rows = lua_submenu_rows(&items);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], (CMD_LUA_MENU_BASE, "图片信息".into(), false));
+        assert_eq!(rows[0], (CMD_LUA_MENU_BASE, "图片体检".into(), false));
         assert_eq!(rows[1], (CMD_LUA_MENU_BASE + 1, "平均颜色".into(), false));
+    }
+    /// ★ 回写贴图（m15）的两档失败必须在**动任何画布之前**给人话原因。
+    ///
+    /// `hwnd=0` 的成因是"这脚本不是从贴图上触发的"（脚本页里点运行、或热键触发时没选中窗）——
+    /// 那种情况不许猜"那就换最近那一张吧"，猜错就是改了用户没打算改的贴图。
+    /// 陌生句柄的成因是"那张窗已经关了，登记表里的 `Weak` 升级失败"；这条同时证明
+    /// **登记表只握弱引用**：窗没了不许留下还能写的壳。
+    #[test]
+    fn writeback_refuses_unknown_targets_before_touching_a_canvas() {
+        let bmp = RgbaBitmap::new(2, 1, vec![7u8; 8]).expect("构造测试位图");
+        let e0 = apply_script_image(0, bmp.clone()).expect_err("hwnd=0 必须被拒");
+        assert!(e0.contains("右键"), "要说清该从哪儿触发：{e0}");
+        let e1 = apply_script_image(-0x777, bmp).expect_err("没登记过的句柄必须被拒");
+        assert!(e1.contains("找不到"), "要说清是那张贴图不在了：{e1}");
+        // 登记动作本身也不许写脏表：0 句柄直接跳过。
+        let n = PINS.with(|m| m.borrow().len());
+        assert_eq!(
+            n, 0,
+            "不许有幽灵条目（0 句柄也登记，回写就会互相串到别的贴图）"
+        );
+    }
+    /// ★ 换图后的窗口算式（m15）：**新图的宽高必须真的带动新尺寸**。
+    ///
+    /// 旋转与脚本回写共用这一条（`set_canvas_bitmap` 里只留这一个算式）。
+    /// 三格分开量：100% 时精确"图 + 描边"、放大时描边**不跟着长**（它是窗体装饰不是图），
+    /// 宽高互换时两维一起换。任何一处写死旧尺寸都会在这里红——而那正是
+    /// "长图换过去只长了边框"的形状。
+    #[test]
+    fn a_new_bitmap_drives_the_new_window_size() {
+        let f = 2 * FRAME;
+        assert_eq!(
+            window_size_for_bitmap(300, 40, 100),
+            (300 + f, 40 + f),
+            "100% 时窗口 = 图片 + 描边，一条像素都不许多"
+        );
+        assert_eq!(
+            window_size_for_bitmap(300, 40, 250),
+            (750 + f, 100 + f),
+            "描边不随缩放长：只有图片部分 ×2.5"
+        );
+        // 宽高互换（= 右键旋转 90°，也= 脚本换一张横竖相反的图）。
+        assert_eq!(
+            window_size_for_bitmap(60, 720, 100),
+            (60 + f, 720 + f),
+            "竖长图：高该远大于宽"
+        );
+        assert_eq!(
+            window_size_for_bitmap(720, 60, 100),
+            (720 + f, 60 + f),
+            "同一张图换个宽高，窗口两维必须一起换"
+        );
+        // 极小图不许算出 0（`SetWindowPos` 拿 0 尺寸的行为不做保证）。
+        assert!(window_size_for_bitmap(1, 1, 1).0 > f);
+        assert!(window_size_for_bitmap(1, 1, 1).1 > f);
+    }
+    /// ★ 菜单命令号必须互不相同（m16 加了「恢复原图」= 回收 0x2006 那个洞）。
+    ///
+    /// 两个菜单项同号是最难查的一类串味：点「恢复原图」去做「另存为」，功能全都还在，
+    /// 只是串了——用户只会说"菜单乱了"。`0` 要留给 `TrackPopupMenu` 的"没选中"哨兵。
+    /// 这条门禁读的是**常量本身**，加新命令却不登记就会被这里拦住。
+    #[test]
+    fn menu_command_ids_are_unique_and_reserve_zero() {
+        let ids = [
+            ("另存为", CMD_SAVE),
+            ("关闭", CMD_CLOSE),
+            ("顺时针 90°", CMD_ROT_CW),
+            ("水平镜像", CMD_MIRROR_H),
+            ("垂直镜像", CMD_MIRROR_V),
+            ("恢复原图", CMD_RESTORE),
+            ("取色", CMD_PICK),
+            ("锁定图片", CMD_LOCK),
+        ];
+        for (name, id) in ids {
+            assert!(id > 0, "{name} 的命令号不能是 0 哨兵");
+            assert!(id < CMD_LUA_MENU_BASE, "{name} 越进了「脚本」子菜单的号段");
+            for (other, oid) in ids {
+                assert!(name == other || oid != id, "{name} 与 {other} 同号 {id:#x}");
+            }
+        }
+        // 号段边界由**局部变量**读出（直接 `assert!(常量比较)` 会被 clippy 的
+        // `assertions_on_constants` 判成"编译期就能算完的断言"——门禁要 0 警告）。
+        let (alpha_end, lua_base, restore, lock, pick) = (
+            CMD_ALPHA_BASE + 10,
+            CMD_LUA_MENU_BASE,
+            CMD_RESTORE,
+            CMD_LOCK,
+            CMD_PICK,
+        );
+        // 透明度子菜单占 [CMD_ALPHA_BASE, +10]，脚本子菜单从 +100 起：留出可见的空隙。
+        assert!(alpha_end < lua_base, "透明度号段与脚本号段重叠");
+        // 「恢复原图」占的是回收掉的那个空号（`取色`=+5 与 `锁定`=+7 之间的洞）。
+        assert_eq!(CMD_BASE + 6, restore, "「恢复原图」用的是回收的那个空号");
+        assert!(restore != lock && restore != pick, "恢复原图与邻号撞了");
+    }
+
+    /// ★★ 「脚本按**当前图片**处理」的地基（2026-10-28 用户口径：镜像了，就按镜像后的图处理）。
+    ///
+    /// 旋转 / 镜像 / 脚本回写全都走 `set_canvas_bitmap` 改**同一个** `canvas.bitmap`，
+    /// 而 `run_lua_ext`（贴图右键）与 `Runtime::run_script_hotkey`（热键）读的都是
+    /// `current_bitmap(seq)` ⇒ 这两条入口看到的必然是**变换之后**的像素。
+    /// 这一格把其中一半钉死：换过像素之后，`current_bitmap` 交出来的必须就是新的那张，
+    /// 而不是"钉进来那一刻"的出厂图（出厂图另有归属：「恢复原图」与贴图环）。
+    #[test]
+    fn current_bitmap_tracks_canvas_transforms() {
+        let w = canvas();
+        let rc = w.0.clone();
+        rc.borrow_mut().seq = 93;
+        register_pin(93, &rc);
+        let before = current_bitmap(93).expect("登记后应有像素");
+        assert!(before.rgba.iter().all(|v| *v == 255), "夹具出厂是 2×2 纯白");
+        // 换成一张 4×2 全黑：既是"像素变了"，也是"尺寸变了"（与旋转同形）
+        let black = RgbaBitmap::new(4, 2, [0u8, 0, 0, 255].repeat(8)).expect("位图");
+        assert!(set_canvas_bitmap(&rc, black.clone()), "换像素必须成功");
+        let after = current_bitmap(93).expect("换过之后仍取得到");
+        assert_eq!(
+            (after.w, after.h, after.rgba),
+            (4, 2, black.rgba),
+            "脚本拿到的必须是**换过之后**的像素"
+        );
+        // 出厂那份仍在（回写/旋转不动它）：这是「恢复原图」能工作的前提。
+        assert!(
+            rc.borrow().rt.borrow().pin_content(93).is_none(),
+            "夹具没登记出厂内容，这条只是确认取的是画布而不是出厂记账"
+        );
+    }
+
+    /// ★ 「恢复原图」的判据：**同尺寸但像素不同**也算变过。
+    ///
+    /// 只比宽高是最自然的写法，也正好是错的——脚本把贴图换成一张同样大小的灰度图，
+    /// 宽高一模一样，菜单里就没有「恢复原图」了，用户等于丢了原图。
+    #[test]
+    fn the_restore_criterion_watches_pixels_not_just_size() {
+        let a = RgbaBitmap::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        let same = RgbaBitmap::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        let gray = RgbaBitmap::new(2, 1, vec![9, 9, 9, 255, 9, 9, 9, 255]).unwrap();
+        let other_size = RgbaBitmap::new(1, 2, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        assert!(!bitmap_differs(&a, &same), "一字不差就不该出现「恢复原图」");
+        assert!(
+            bitmap_differs(&a, &gray),
+            "同尺寸换了像素也算变过（这条就是灰度图那一格）"
+        );
+        assert!(bitmap_differs(&a, &other_size), "尺寸不同当然更算");
+    }
+
+    /// ★ 登记表是三条入口共同的地基：脚本回写按 `hwnd`、Ctrl+S 按 `seq`、「恢复原图」按 `seq`。
+    ///
+    /// m15 把登记从"跑过脚本那一刻"挪到**建窗那一刻**、键从 `hwnd` 换成 `seq`，当时一格测试都没有
+    /// ——写坏了不会有人红，症状只是"某张贴图的 Ctrl+S 存了出厂那一张"，而那要真窗才看得见。
+    /// 这条把三件事钉住：按两种身份都找得到同一张、`0` 句柄一律不认、窗口关掉就查不到（而不是
+    /// 被 `Weak` 的另一面——强引用——吊住不销）。
+    #[test]
+    fn the_canvas_registry_answers_seq_and_hwnd_and_dies_with_the_window() {
+        let w = canvas();
+        let rc = w.0.clone();
+        rc.borrow_mut().seq = 91; // 换一个不会与别的测试撞的号
+        rc.borrow_mut().hwnd.set(0x005A_0001); // 夹具没有真窗，句柄自己填
+        register_pin(91, &rc);
+        // 第二张：表里同时有两张活画布，"扫到哪个算哪个"这种写法必须在这条上红。
+        let w2 = canvas();
+        let rc2 = w2.0.clone();
+        rc2.borrow_mut().seq = 92;
+        rc2.borrow_mut().hwnd.set(0x005A_0002);
+        register_pin(92, &rc2);
+
+        let live = current_bitmap(91).expect("登记的画布应能按 seq 取到");
+        assert_eq!(
+            live.rgba,
+            rc.borrow().bitmap.rgba,
+            "按 seq 取到的就是画布此刻那一份"
+        );
+        assert!(
+            Rc::ptr_eq(
+                &pin_by_hwnd(0x005A_0001).expect("按 hwnd 也该找到同一张"),
+                &rc
+            ),
+            "两种身份必须指向同一个画布，否则回写改的是另一扇窗"
+        );
+        assert!(
+            Rc::ptr_eq(
+                &pin_by_hwnd(0x005A_0002).expect("第二张也要按句柄认得出"),
+                &rc2
+            ),
+            "两张都在表里时句柄要认得清是哪一张——认错了就是改了用户没点的那张贴图"
+        );
+        assert_eq!(
+            pin_by_seq(92).expect("按 seq 也要认得第二张").borrow().seq,
+            92,
+            "两张都在表里时 seq 不许串"
+        );
+        assert!(
+            pin_by_hwnd(0).is_none(),
+            "0 句柄 = 没有贴图上下文，不许猜\"最近那一张\""
+        );
+        assert!(
+            pin_by_seq(999_999).is_none(),
+            "没登记过的号不能凭空造出画布"
+        );
+        // 「恢复原图」的兜底分支：记账里已经没有出厂内容 ⇒ 宁可让这一项出现。
+        assert!(
+            pin_was_transformed(&rc, 91),
+            "查不到出厂内容时要让入口出现，不能悄悄不可用"
+        );
+
+        drop(rc);
+        drop(w);
+        assert!(
+            pin_by_seq(91).is_none(),
+            "窗关掉后必须查不到（存的是 Weak，不是吊着画布）"
+        );
+        assert!(
+            current_bitmap(91).is_none(),
+            "回写/Ctrl+S 那条路要如实落到\"那张贴图不在了\""
+        );
+        assert!(
+            pin_by_hwnd(0x005A_0001).is_none(),
+            "关掉的那张不能再被句柄找回（第二张还活着，扫到活的就红）"
+        );
     }
 }

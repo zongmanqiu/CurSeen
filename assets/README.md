@@ -7,17 +7,18 @@
 | 文件夹 | 归谁 | 放什么 |
 |---|---|---|
 | `lua/` | 统一脚本 | **唯一 Lua 脚本根**（递归）。所有 role=effect/keysound/image/composite 的 `.lua` 都放这里（可按子目录整理） |
-| `lua/scripts/` | 通用扩展脚本 | `role=image`（贴图右键「图片操作」）与 `role=composite`（复合脚本）。**文件名即 id**，
+| `lua/scripts/` | 通用扩展脚本 | `role=image`（贴图右键「脚本」）与 `role=composite`（复合脚本）。**文件名即 id**，
   菜单是否出现由 `runtime::Runtime::lua_ext_menu_items` 按 `role_is_active("image", id)` 过滤；
-  出厂样例：`image_info` / `avg_color` / `composite_demo` / `unified_sound` / `class_sound` |
+  官方资源（AI 写脚本 / 图片体检 / OCR / 条码识别 / 鼠标包）都在 CurSeen-Scripts，安装后落在 `scripts/<id>/` |
+| `lua/KeySound/` | 击键音效 | 键盘页「击键音效」下拉的两个内置脚本：统一音效 / 分类音效 |
 | `lua/MouseTrail/` | 鼠标拖尾 | 拖尾特效脚本，文件名即特效 id |
 | `lua/HoverDot/` | 悬浮标 | 悬浮标脚本 + PNG 图片（`.png`，「PNG 图片」样式从这里取图，用户选的图也会复制进来） |
 | `lua/ClickFx/` | 点击效果 | 点击效果脚本 |
 
-> ★★ **挂在哪由目录决定**：上面四个目录 = 四个挂载点，**同一份 `.lua` 复制到哪个目录，
-> 就在哪个下拉 / 卡片里生效**。脚本里没有任何字段能改挂载点，`role` 只用来区分
-> 开关语义（`image` = 贴图右键菜单可见性、`keysound` = 键盘页、其余 = 常驻运行开关）。
-> 反之，`role="image"` / `role="keysound"` 的脚本不会被鼠标下拉列出来。
+> ★★ **挂在哪由目录 / role 决定**：`MouseTrail/` `HoverDot/` `ClickFx/` 是特效目录，
+> `scripts/` 是通用脚本目录，`KeySound/` 是键盘页键音目录。脚本复制到对应目录并在
+> `role` / `menu` 上声明语义，就出现在对应页面；`role="image"` / `role="keysound"` 的
+> 脚本不会被鼠标下拉列出来。
 | `Sounds/` | 声音素材（共用） | 音频文件（`.wav` 等），点击声音/键盘声音/拖尾音效的出厂音源共用本目录（2026-09-25 由 `ClickSound/` 改名），下拉数据源 = 目录扫描 |
 | `KeyDisplay/` | 击键回显 | `keynames.ini` 键名映射表（改文件即改回显文本，保存后按一次键生效，无需重启）；键名 ID 清单见文件头注释 |
 | `VirtualKeyboards/` | 虚拟键盘 | 出厂键盘方案 `.json`（**平铺**，一个文件一套方案，**文件名即方案 id**，规则 = `几何前缀_样式`：`ansi_104` / `ansi_104_dark` / `ansi_104_kb_double` / `ansi_104_kiosk_dark` / `ansi_104_vhand_dark` / `ansi_104_zh_light` 六套同几何，加 `ansi_60` / `wasd_gaming` 两套独立几何）；改出厂方案要同时改 `main/assets/VirtualKeyboards/*.json` 与配置里的默认方案名 |

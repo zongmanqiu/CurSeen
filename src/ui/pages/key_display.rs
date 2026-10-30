@@ -46,7 +46,7 @@ use windui::prelude::*;
 
 use crate::modules::virtual_keyboard::vk_config::ControlGroup;
 use crate::ui::card::{self, FeatureCard};
-use crate::ui::model::{self, PanelModel, VkControlSignal};
+use crate::ui::model::{self, PanelModel, VkControlSignal, VkSchemeControls};
 
 use super::trail::build_param_cell;
 
@@ -63,14 +63,17 @@ use super::trail::build_param_cell;
 /// 全局「圆角」后面，于是「显示」卡里是"先通用尺寸、后命名样式圆角"）。一卡一组之后，页面
 /// 对行序**不再有任何承诺** —— `controls_of` 调整顺序只会让卡内行序跟着变，不会串到别的卡。
 ///
-/// 为什么不是"只给当前方案建一组"：下拉切换方案时页面并不重建（面板只在打开时建一次
-/// 元素树），只建一组的话切完方案还是旧方案的控件。多建几组 + `visible_when` 门控，
-/// 换方案即刻生效，代价只是几个隐藏的信号。
-fn control_rows(m: &PanelModel, group: ControlGroup, col1_w: i32) -> Element {
-    // 闭包要 `move`，而 `m` 是借用 —— 只把"当前方案下标"这个 Copy 句柄带进去。
-    let layout = m.vk_layout;
+/// 为什么不是"只给当前方案建一组"：下拉切换方案时页面元素树不重建；多建几组 +
+/// `visible_when` 门控，换方案即刻生效（新方案由 `host_signal` 换表时重建）。
+fn control_rows(
+    sc: &VkSchemeControls,
+    layout: Signal<usize>,
+    group: ControlGroup,
+    col1_w: i32,
+) -> Element {
+    let i = sc.index;
     let mut col = Element::col();
-    for (i, sc) in m.vk_controls.iter().enumerate() {
+    {
         for it in &sc.items {
             if it.def.group != group {
                 continue;
@@ -319,11 +322,8 @@ pub fn build_key_display_page(m: &PanelModel) -> Element {
     let (vk_title, vk_body, vk_exp) = FeatureCard::new("虚拟键盘", vk_expanded)
         .switch(m.vk_enabled)
         // 下拉的选项 = **方案目录扫描结果**（`assets/VirtualKeyboards/*.json` 加出厂内嵌
-        // 兜底）。用户往目录里丢一个方案，重开面板就能在这里看到并选中。
-        .title_dropdown(
-            m.vk_schemes.iter().map(|e| e.label.clone()).collect(),
-            m.vk_layout,
-        )
+        // 兜底）。用信号：往目录里丢一个方案，目录监听重扫后这里直接出现。
+        .title_dropdown_signal(m.vk_scheme_names, m.vk_layout)
         .body({
             let mut col = Element::col();
             // ── 位置（子卡：四个方位的下拉 + 四向偏移）──
@@ -383,15 +383,21 @@ pub fn build_key_display_page(m: &PanelModel) -> Element {
             // ── 显示（子卡：方案声明的**数值**项 —— 键帽尺寸 / 圆角 / 透明度 / 字号）──
             //
             // 与「击键回显 → 显示」同名：同一个问题（"显示成什么样"）在两处都叫这个名字。
+            let look_layout = m.vk_layout;
             let (sub_title, sub_body, sub_exp) = FeatureCard::new("显示", vk_look_expanded)
-                .body(control_rows(m, ControlGroup::Look, col1_w))
+                .body(Element::host_signal(m.vk_controls, move |sc| {
+                    control_rows(&sc, look_layout, ControlGroup::Look, col1_w)
+                }))
                 .build_title_row(col1_w, 0);
             col = col
                 .child(sub_title)
                 .child(sub_body.visible_when(move || sub_exp.get()));
             // ── 颜色（子卡：方案声明的全部配色 —— 兜底色 + 命名样式色）──
+            let color_layout = m.vk_layout;
             let (sub_title, sub_body, sub_exp) = FeatureCard::new("颜色", vk_color_expanded)
-                .body(control_rows(m, ControlGroup::Color, col1_w))
+                .body(Element::host_signal(m.vk_controls, move |sc| {
+                    control_rows(&sc, color_layout, ControlGroup::Color, col1_w)
+                }))
                 .build_title_row(col1_w, 0);
             col = col
                 .child(sub_title)

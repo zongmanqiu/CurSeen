@@ -52,6 +52,9 @@ pub fn run() {
         return;
     }
 
+    // ★ 只有首实例才做这项补恢复：二次实例在首实例仍隐藏指针时看到标记，
+    //   若在这里恢复就会把正在使用的特效光标弄回来。
+    crate::platform::hide_cursor::restore_after_crash();
     // ★ 配置落盘的「父目录 fsync」实现在这里注入（`core` 不得碰 Win32，见
     //   `core::config::DIR_SYNC` 的注释）。必须在**读配置之前**——`Config::load()`
     //   里的迁移会立刻写盘，那次写盘同样该是耐久的。
@@ -86,6 +89,8 @@ pub fn run() {
 
     runtime::overlay::run_overlay(runtime, event_rx);
     log::info!("覆盖层已退出，收尾中");
+    // 双保险：即使 `run_overlay` 的收尾路径将来被改坏，入口也知道"退出必须还指针"。
+    crate::platform::hide_cursor::ensure_shown();
     drop(hook);
 }
 

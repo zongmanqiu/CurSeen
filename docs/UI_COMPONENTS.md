@@ -157,7 +157,7 @@ x 完全相同**。`calc_col1_width` 保留仅供该护栏测试与将来调值�
 | `float`（默认） | 滑条+输入框三件套 | number，按 `step` 吸附 | `step` 决定吸附网格与小数位；未写默认 0.01 |
 | `int` | 滑条+输入框三件套 | 整数 number | 显示/落盘都是整数 |
 | `bool` | 复选框 | bool | |
-| `color` | 取色器 | `#RRGGBB`（6 位，不透明） | `alpha = true` → 带透明度条、半透明时落盘 8 位 **`#RRGGBBAA`**（alpha 在**末尾**；二选一，勿与独立"不透明度"参数并存） |
+| `color` | 取色器 | `#RRGGBB` / `#RRGGBBAA` | **默认带透明度条**（8 位 **`#RRGGBBAA`**，alpha 在末尾）；只有显式 `alpha = false` 才退回 6 位不透明 |
 
 > ★★ **颜色串的唯一口径：`#RRGGBB` / `#RRGGBBAA`（alpha 在末尾）。**
 > 与 windui `Color::to_hex_string`、`config.json`、Lua `hex_to_rgb`、配置里的
@@ -190,13 +190,14 @@ x 完全相同**。`calc_col1_width` 保留仅供该护栏测试与将来调值�
 脚本顶层声明元信息：
 
 ```lua
-effect_name = "实心圆"    -- 绘制特效（role="effect"）：下拉框显示名；无则用文件名
+effect_name = "实心圆"    -- 绘制特效（role="effect"）：下拉框显示名；name 优先，二者互为别名
 name = "图片信息"         -- run 类扩展脚本：卡片显示名；无则用文件名
 description = "…"
+kind = "trail"           -- 可选：包卡下拉的类别标签（cursor/trail/click/hover/other）
 role = "effect"          -- 可选：四个挂载目录下缺省由目录推断（effect/composite）；
                          -- ★ 只决定开关语义 / 菜单归属，**不改挂载点**（那是目录的事）
 menu = "图片信息"         -- role=image 时：贴图右键菜单文本
-hide_cursor = false      -- 悬浮标脚本声明隐藏系统指针（如激光笔）
+hide_cursor = false      -- 声明隐藏系统箭头（如激光笔）；I 形/手形/缩放提示保留
 
 function schema() return { … } end   -- 第三节的参数声明（可选）
 function run(ctx, params) … end      -- keysound / image 扩展的统一入口
@@ -210,13 +211,22 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 |---|---|
 | `init()` | 特效加载 / 参数变更后 |
 | `on_move(x, y, t, params)` | **拖尾 / 悬浮标 / 独立卡片**：指针真动了才发；**点击效果**：实现了 `on_move` 的脚本走常驻通道（每个真实采样都发），只写 `on_press` 的脚本维持"按下出生" |
-| `on_press(x, y, t, params)` | **全部宿主**：鼠标按下；老名 `on_click` 仍被识别（自动回退），新脚本一律写 `on_press` |
+| `on_press(x, y, t, params)` | **全部宿主**：鼠标按下；老名 `on_click` 仍被识别（自动回退），新脚本优先写 `on_mouse_down` |
+| `on_mouse_down(button, x, y, params)` | **全部宿主**：鼠标按下；`button` = `left/right/middle/x1/x2`；缺失回退 `on_press` |
+| `on_mouse_up(button, x, y, params)` | **全部宿主**：鼠标抬起；按住态视觉（加速/后坐/连发）用 |
+| `on_wheel(delta, horizontal, x, y, params)` | **复合 / 拖尾宿主**：滚轮。`delta` 一格 ±120（正 = 上/右），`horizontal` = 倾斜滚轮；只有脚本声明它，钩子才转发普通滚轮 |
 | `step(dt, t, params)` | 每帧逻辑；`dt` 四类宿主**一律是秒**，固定步长（1/120 秒）子步进 |
 | `draw(ctx)` | 每帧绘制；`ctx` 是 **DrawList userdata**（冒号调用，见下） |
 
 全局变量（**四类宿主同一套**，每帧更新）：`cursor_x` `cursor_y`（指针位置）、
+`cursor_vx/vy/speed/heading`（60fps 每帧像素 / 弧度）、
+`mouse_vx/vy/speed/heading`（CursorFX 别名）、`mouse_down`、`mouse_button`、
+`cursor_hover`（系统正在给出交互光标提示：I 形/手形/缩放/禁止/帮助/十字；
+桌面按钮仍是箭头，所以它不代表“指针下有按钮”）、
 `origin_x` `origin_y`（实例出生点）、`elapsed`（秒，动画相位用）、
-`wall_ms`（真实墙钟毫秒，休眠期间也推进）、`screen_w` `screen_h`、
+`wall_ms`（系统运行毫秒，休眠期间也推进）、`local_ms`（本地 Unix 毫秒，时钟用）、
+`unix_ms` / `tz_offset_min`、`screen_w` `screen_h`、`screen_x` `screen_y`（虚拟桌面原点，
+可为负：整屏暗罩/星空/镜像中心必须用它）、
 `host`（`"trail"`/`"hover"`/`"clickfx"`/`"panel"`）、
 `_params`（当前参数表）、`ctx`（DrawList）；`mouse_x`/`mouse_y` 是 `cursor_*` 的别名。
 
@@ -225,9 +235,15 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 | 命令 | 签名 | 说明 |
 |---|---|---|
 | `circle` | `(x, y, radius, r, g, b, a)` | 实心圆（SourceOver） |
+| `ellipse` | `(x, y, rx, ry, r, g, b, a)` | 填充椭圆 |
+| `ellipse_ring` | `(x, y, rx, ry, width, r, g, b, a)` | 椭圆描边 |
+| `round_rect` | `(x, y, w, h, radius, r, g, b, a)` | 填充圆角矩形 |
+| `round_rect_ring` | `(x, y, w, h, radius, width, r, g, b, a)` | 圆角矩形描边 |
 | `plus_circle` | 同上 | 加色（Plus）实心圆，辉光层用 |
 | `glow` | 同上 | 三层加色叠出的辉光（半径×2.5/×1.2/×1） |
 | `radial` | 同上 | 中心色→边缘透明的径向渐变圆 |
+| `radial_stops` | `(x, y, radius, stops)` | 多段径向渐变；stops=`{{offset=0,r=..,g=..,b=..,a=..},…}` |
+| `backdrop_circle` | `(x, y, radius, mode, zoom, r, g, b, a) -> bool` | 真桌面采样：`"magnify"` 放大镜 / `"difference"` 逐通道反色；`a` 0–255；返回 false = 抓屏不可用。运行期间覆盖层不进系统截图/录屏 |
 | `clear_circle` | `(x, y, radius)` | 挖洞：圆内清成全透明（颜色忽略传 0） |
 | `ring` | `(x, y, outer_r, width, r, g, b, a)` | 圆环，width 从外径向内收；width ≥ outer_r 退化为实心圆 |
 | `rect` | `(x, y, w, h, r, g, b, a)` | 矩形 |
@@ -250,7 +266,7 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 `false` → 强制静音；`nil` → 落回默认。`on_key(key, mods, repeated, params)` 是兼容旧式
 音效脚本的第二入口，语义同返回值。
 
-### 4.3 图片操作扩展（`role="image"`）
+### 4.3 脚本扩展（`role="image"`）
 
 贴图右键菜单（`menu` 声明菜单文本）→ `run(ctx, params)`；
 `ctx = { role="image", image=?, hwnd=? }`（有贴图上下文时注入；`hwnd` = 目标窗口句柄）。
@@ -266,12 +282,14 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 
 返回值：`run` 返回字符串 → 自动弹可复制的结果框（**多行文本直接用 `\n`**，宿主会
 归一化成 EDIT 控件要的 `\r\n`）；返回空/nil = 脚本已自己 `ext:result`。
-出厂参考脚本统一归档在 **`assets/lua/scripts/`**（通用扩展脚本只放这一个文件夹，
-id = 相对 lua 根的路径去扩展名，文件名即 id 的一部分）：`scripts/1.image_info.lua`
-（最小骨架）、`scripts/2.avg_color.lua`（像素采样）、`scripts/3.composite_demo.lua`
-（复合脚本模板）；击键音效脚本 `scripts/unified_sound.lua`、
-`scripts/class_sound.lua`。有守门测试钉住
-（`bundled_example_scripts_run_with_image_context`）。
+内置扩展脚本在 **`assets/lua/scripts/`**（通用扩展脚本目录，id = 相对 lua 根的路径去扩展名）；
+击键音效脚本在键盘页专属的 **`assets/lua/KeySound/`**：`KeySound/unified_sound.lua`、
+`KeySound/class_sound.lua`。
+**AI 写脚本 / 图片体检 / OCR 文字识别 / 条码识别已迁到 `CurSeen-Scripts` 仓库**
+（2026-10-30，作为在线包安装）：AI 包 `scripts/AI/ai_chat.lua` 连 `ai_chat_api.txt` 一起装；
+OCR 与条码包自带官方工具（源码在仓库 `tools/ocr`、`tools/barcode`，编译产物不进仓库），装包即用。
+复合示例 `3.composite_demo.lua` 已按用户口径删除，`tests/fixtures` 留了测试夹具。
+守门测试见 `tests/script_pack.rs` 与 `repo_image_report_runs_with_image_context`。
 
 ★ **与模块特效脚本（`MouseTrail/` 等）的关系**：共用同一引擎、参数机制与驱动实现
 （`FxCore`，见 `modules/trail/fx_core.rs`），**同一份脚本放哪个目录效果都一样**——差别只在
@@ -279,23 +297,6 @@ id = 相对 lua 根的路径去扩展名，文件名即 id 的一部分）：`sc
 扩展脚本走 `run(ctx, params)` 一次性调用，按 `role` 拿不同 ctx（`image`=贴图快照、
 `keysound`=击键事件）。把特效脚本复制进 `scripts/` 也能跑（脚本页出卡，开关=常驻运行）；
 反过来 `role="image"` / `"keysound"` 的脚本不会进鼠标下拉（各有归宿，被排除）。
-
-**每脚本启停开关**（2026-09-27 定稿）：**每个 role 都有开关**，语法同一形状、判定同一
-入口（`LuaExtSettings::role_is_active` / `set_role_active`），只有落点不同：
-
-| role | 开关写哪 | 勾上是什么效果 |
-|---|---|---|
-| `composite` | `config.lua_ext.composite_active` | 起一个常驻实例（见 §4.5） |
-| `image` | `config.lua_ext.image_active` | 贴图右键「图片操作」里出现这一条 |
-
-- `image` 这一族是**手动动作**：勾上 = 菜单里出现**这一条**，关掉 = **这一条**收起
-  （不是整个「图片操作」消失，见下一条）。过滤点只有 `runtime::Runtime::lua_ext_menu_items`
-  一个——`reg.scan()` 之后一律按 `role_is_active("image", id)` 过滤，**表里不许再备第二套判据**。
-- ★ 一句话记住历史：**手动动作 ≠ 自动运行，两者不许共用一张闸。** `image` 的开关只管
-  "入口存在性"，从不喂常驻实例；反过来常驻实例的运行状态也影响不到菜单。
-- 子菜单**恒挂载**——「图片操作」这一级不会因为没脚本就消失；只有**里面有没有条目**
-  同时看磁盘扫描与 `image` 开关。一条都没勾开时挂一条置灰的「（暂无脚本）」，
-  而不是把整个入口撤掉（撤掉 = 用户以为功能坏了 / 入口随配置漂移）。
 
 ### 4.4 通用 `ctx` 成员（所有 run 类脚本）
 
@@ -312,6 +313,16 @@ id = 相对 lua 根的路径去扩展名，文件名即 id 的一部分）：`sc
 可同时运行（「同时开 3 种悬浮标」= 写 3 个复合脚本全部开启）。宿主 =
 `modules::trail::companion`（常驻实例，运行列表存 `config.lua_ext.composite_active`，
 参数仍存 `params[id]`）。脚本页列出这类卡片，标题开关 = **运行/停止**。
+
+脚本卡排序（2026-10-29）：卡片先按可选 `category` 分组——`mouse` → `picture` → `text` → `ai`，
+未知分类随后、**没有 `category` 的老脚本最后**（组内仍按原 id 顺序）。分类只影响排序，
+不改显示名、不改 id；包卡从 `pack.json` 的 `category` 读，单脚本从顶层 `category = "…"` 读。
+脚本页**没有刷新按钮**（m35 定稿）：宿主用 `ReadDirectoryChangesW` 监听**整个 `assets/`**
+（`platform/dir_watch`，空闲零 CPU；2026-10-29 从 `assets/lua` 扩大），目录一变只置一个脏标记，
+由 250 ms 对账在 UI 线程上重扫：脚本卡、拖尾/悬浮标/点击效果下拉、声音与键音列表、
+虚拟键盘方案都在四分之一秒内自动更新，**不动配置与正在运行的实例**（新脚本按配置现值
+初始化卡片，要跑还得自己勾开）。选中项按 id 保留，不因新增文件静默换效果。
+贴图右键「脚本」子菜单本来就**每次右键重扫**。
 
 回调（全部可选，签名与特效脚本一致的部分直接复用）：
 
@@ -330,14 +341,48 @@ id = 相对 lua 根的路径去扩展名，文件名即 id 的一部分）：`sc
 
 帧规则与特效一致：只有 `draw` 每帧真的产出指令才续帧（空闲 0% CPU）；要持续动画就
 在 `draw` 里画。脚本文件改动按 (mtime, 字节数) **热重载**（状态清零、参数重放）；
-脚本缺失/损坏时该实例回调静默跳过，不拖垮其它实例。出厂参考：
-`scripts/3.composite_demo.lua`（拖尾 + 点击音 + 点击效果三合一模板，守门测试
-`composite_script_runs_even_when_trail_disabled` 用真文件跑通端到端；颜色参数带
+脚本缺失/损坏时该实例回调静默跳过，不拖垮其它实例。复合脚本模板：
+`tests/fixtures/lua/scripts/composite_demo_fixture.lua`（拖尾 + 点击音 + 点击效果三合一，
+守门测试 `composite_script_runs_even_when_trail_disabled` 用真文件跑通端到端；颜色参数带
 透明度条 = schema 里 `alpha = true`，默认 `#FF000040`）。
 
 **脚本默认态（2026-09-27 定稿，按 role 分列表）**：两个 role 的出厂态一律"全关"
 （缺键/空列表 = 关），用户去脚本页勾开要用的那几个。判定与写回只有
 `role_is_active` / `set_role_active` 两个入口，不许再出现第三张表。
+
+### 4.6 包卡（`scripts/<Pack>/`，2026-10-26 起）
+
+`scripts/` 的**顶层子目录 = 一张包卡**，目录内**平铺的直接 `.lua` = 标题栏下拉项**；
+下拉选中哪一项，下面就显示该子脚本的 `schema()` 参数。子脚本仍是普通脚本（可复制到
+`MouseTrail/`/`HoverDot/`/`ClickFx/`），包卡只是 UI/运行容器。
+
+- `pack.json`（可选）：`name` / `version` / `license` / `default` / `effects[]`（顺序与白名单）。
+- 同一时间只跑当前选中的**一个**子脚本；开关 = 启动/停止它。
+- **切换子脚本 = 恢复该脚本的 schema 默认**：先清掉本包全部旧参数，再按空表重建 UI；
+  只有“当前脚本”的设定会落 `lua_ext.params`（与内置鼠标特效卡「切换即刷新」一致）。
+- 实际运行 id = `scripts/<Pack>/<file>`，存 `composite_active`；下拉选择存
+  `lua_ext.pack_selected[pack_id]`; 停在 `default` 时不落盘（零冗余）。
+- 同名子脚本（如 `bubbles` / `stars` 各有点击与拖尾版）文件名可加后缀，但 `name` 保持原名；
+  下拉只对重名项追加类别括号。
+- **每个 role 都有开关**：语法同一形状、判定同一
+入口（`LuaExtSettings::role_is_active` / `set_role_active`），只有落点不同：
+
+| role | 开关写哪 | 勾上是什么效果 |
+|---|---|---|
+| `composite` | `config.lua_ext.composite_active` | 起一个常驻实例（见 §4.5） |
+| `image` | `config.lua_ext.image_active` | 贴图右键「脚本」里出现这一条 |
+
+- `image` 这一族是**手动动作**：勾上 = 菜单里出现**这一条**，关掉 = **这一条**收起
+  （不是整个「脚本」消失，见下一条）。过滤点只有 `runtime::Runtime::lua_ext_menu_items`
+  一个——`reg.scan()` 之后连过两道：`role_is_active("image", id)`（勾没勾）**与** `s.available()`
+  （脚本声明的 `requires` 外置文件在不在，m13）。**"过滤"这件事仍然只有这一处**，
+  两道都只是这一个点上的判据；别在 `scan()` 里丢弃条目（脚本页那列复选框要用 `list()`），
+  也别在 `pin.rs` 拼表时再判一次。
+- ★ 一句话记住历史：**手动动作 ≠ 自动运行，两者不许共用一张闸。** `image` 的开关只管
+  "入口存在性"，从不喂常驻实例；反过来常驻实例的运行状态也影响不到菜单。
+- 子菜单**恒挂载**——「脚本」这一级不会因为没脚本就消失；只有**里面有没有条目**
+  同时看磁盘扫描与 `image` 开关。一条都没勾开时挂一条置灰的「（暂无脚本）」，
+  而不是把整个入口撤掉（撤掉 = 用户以为功能坏了 / 入口随配置漂移）。
 
 ## 五、给面板加新组件的固定流程
 
