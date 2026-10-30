@@ -45,7 +45,7 @@ body{padding-left:280px}
 <h1 id="CurSeen-隐藏快捷键与技巧手册">CurSeen 隐藏快捷键与技巧手册</h1>
 <blockquote>
 <p>本手册收录<strong>界面里没有写出来</strong>的快捷键与操作。为了让控制面板保持干净，<br />
-这些键不占用任何 UI 空间——它们<strong>是固定的、不可修改的</strong>（与「设置 → 快捷键」卡里<br />
+这些键不占用任何 UI 空间——它们<strong>是固定的、不可修改的</strong>（与「设置」页「快捷键」卡里<br />
 那些可以在面板里查看、重绑的全局热键不同）。</p>
 <p>适用版本：随本手册同包的 CurSeen（AGPL-3.0）。不同版本若调整了快捷键，以程序实际行为为准。</p>
 </blockquote>
@@ -64,7 +64,7 @@ body{padding-left:280px}
 <tr>
 <td><code>Ctrl + S</code></td>
 <td>把<strong>当前选中的那张</strong>贴图另存为 PNG</td>
-<td>仅当存在「被选中的贴图」时生效；没有选中则忽略，按键照常透传。</td>
+<td>存的是<strong>当前画面</strong>（脚本换图后也存换后的结果，不是出厂原图）；仅当存在「被选中的贴图」时生效，没有选中则忽略，按键照常透传。</td>
 </tr>
 <tr>
 <td><code>Esc</code></td>
@@ -79,11 +79,12 @@ body{padding-left:280px}
 </tbody>
 </table>
 <blockquote>
-<p>提示：贴图选中后，用鼠标拖拽可移动，滚轮可缩放（若已开启对应开关）</p>
+<p>提示：贴图选中后，用鼠标拖拽可移动，滚轮可缩放（若已开启对应开关）。<br />
+如果贴图被脚本换过图（<code>ext:set_image</code>），右键会出现「恢复原图」——换回钉进来那一刻的画面。</p>
 </blockquote>
 <h2 id="二-屏幕标注-画笔-白板">二、屏幕标注（画笔 / 白板）</h2>
 <p>屏幕标注模块内部的工具切换键（画笔 1–3、橡皮、直线、箭头、矩形、椭圆、文字、马赛克、<br />
-开/关屏幕标注、开/关白板）是<strong>配置驱动</strong>的，在「设置 → 屏幕」卡里可见、可改，这里不重复。<br />
+开/关屏幕标注、开/关白板）是<strong>配置驱动</strong>的，在「屏幕」页的对应卡片里可见、可改，这里不重复。<br />
 下面这些是<strong>固定、不写在 UI 里</strong>的编辑键：</p>
 <table>
 <thead>
@@ -175,7 +176,7 @@ body{padding-left:280px}
 </tbody>
 </table>
 <blockquote>
-<p>打开面板本身的快捷键是<strong>配置驱动</strong>的（「设置 → 工具」里的「剪贴板历史」热键，出厂留空）。</p>
+<p>打开面板本身的快捷键是<strong>配置驱动</strong>的（「工具」页里的「剪贴板历史」热键，出厂留空）。</p>
 </blockquote>
 <hr />
 <h2 id="五-便签">五、便签</h2>
@@ -194,17 +195,50 @@ body{padding-left:280px}
 </tbody>
 </table>
 <blockquote>
-<p>呼出便签本身的快捷键是<strong>配置驱动</strong>的（「设置 → 工具」里的「便签」热键，出厂留空）。</p>
+<p>呼出便签本身的快捷键是<strong>配置驱动</strong>的（「工具」页里的「便签」热键，出厂留空）。</p>
 </blockquote>
 <hr />
-<h2 id="六-与-可配置热键-的区别">六、与「可配置热键」的区别</h2>
-<p>上面所有键都是<strong>固定、不可修改</strong>的。与之相对，「设置 → 快捷键」卡里列出的那些是<br />
+<h2 id="六-脚本文本窗与-AI-对话窗">六、脚本文本窗与 AI 对话窗</h2>
+<table>
+<thead>
+<tr>
+<th>快捷键</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ctrl + A</code></td>
+<td>文本窗全选</td>
+</tr>
+<tr>
+<td><code>Ctrl + C</code></td>
+<td>复制选中文本</td>
+</tr>
+<tr>
+<td><code>Esc</code></td>
+<td>关闭文本窗 / AI 对话窗</td>
+</tr>
+<tr>
+<td><code>Ctrl + Enter</code></td>
+<td>AI 对话窗发送消息（普通 <code>Enter</code> 只换行）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>文本窗是脚本的结果 / 输入窗（「图片体检」「OCR 文字识别」等官方脚本都会用）：<br />
+内容可直接选中复制，也可以改完再点「复制」，交出去的是<strong>当前</strong>内容。<br />
+AI 对话窗来自官方「AI 写脚本」包，多轮上下文只在窗内保留、关窗即弃。</p>
+</blockquote>
+<hr />
+<h2 id="七-与-可配置热键-的区别">七、与「可配置热键」的区别</h2>
+<p>上面所有键都是<strong>固定、不可修改</strong>的。与之相对，「设置」页「快捷键」卡里列出的那些是<br />
 <strong>可配置</strong>的全局热键（例如呼出/收起控制面板、截图、录屏、放大镜、便签、剪贴板历史等），<br />
 它们的出厂默认<strong>大多留空（= 停用）</strong>，需要你在面板里自行绑定后才生效，并且可以随时重绑。</p>
 <p>如果你想要的是「怎么改那些能改的键」，请打开 <strong>控制面板 → 设置 → 快捷键</strong>，<br />
 点击任意一行进入捕获态、按下想要的键即可。</p>
 <hr />
-<h2 id="七-小提示">七、小提示</h2>
+<h2 id="八-小提示">八、小提示</h2>
 <ul>
 <li>所有隐藏键都不依赖控制面板是否打开（除了剪贴板历史面板的 <code>↑↓/Enter/Esc</code> 需要面板开着）。</li>
 <li>若某个隐藏键「没反应」，先确认对应功能开关已开启（如「画笔」「放大镜」）。</li>
@@ -220,8 +254,9 @@ body{padding-left:280px}
 <li class="toc-l2"><a href="#三-放大镜">三、放大镜</a></li>
 <li class="toc-l2"><a href="#四-剪贴板历史面板">四、剪贴板历史面板</a></li>
 <li class="toc-l2"><a href="#五-便签">五、便签</a></li>
-<li class="toc-l2"><a href="#六-与-可配置热键-的区别">六、与「可配置热键」的区别</a></li>
-<li class="toc-l2"><a href="#七-小提示">七、小提示</a></li>
+<li class="toc-l2"><a href="#六-脚本文本窗与-AI-对话窗">六、脚本文本窗与 AI 对话窗</a></li>
+<li class="toc-l2"><a href="#七-与-可配置热键-的区别">七、与「可配置热键」的区别</a></li>
+<li class="toc-l2"><a href="#八-小提示">八、小提示</a></li>
 </ul>
 </nav>
 

@@ -33,10 +33,12 @@ pub use state::UpdateState;
 pub use version::Version;
 
 /// 检查到新版本时交给 UI 的弹窗数据（纯数据，不持有 UI 类型）。
+///
+/// `urls` 顺序 = 先首选源、再备用源（可能有一条空串）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePrompt {
     pub latest: String,
     pub notes: String,
-    pub url: String,
+    pub urls: [String; 2],
     pub sha256: String,
 }

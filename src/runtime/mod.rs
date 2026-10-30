@@ -1620,4 +1620,25 @@ requires = { \"./tools/x.exe\" }
             "切源不该联网：重放即可"
         );
     }
+
+    /// m72：点「更新」后 UI 必须先切到下载态（按钮→进度条），再等网络。
+    #[test]
+    fn download_start_event_flips_the_update_row_immediately() {
+        let p = include_str!("panel.rs");
+        let at = p
+            .find("UpdateEvent::DownloadStarted =>")
+            .expect("panel 未处理 DownloadStarted");
+        let rest = &p[at..];
+        let end = rest
+            .find("UpdateEvent::DownloadProgress")
+            .unwrap_or(rest.len());
+        let arm = &rest[..end];
+        for needle in [
+            "self.update.downloading.set(true)",
+            "self.update.progress.set(0.0)",
+            "self.update.busy.set(true)",
+        ] {
+            assert!(arm.contains(needle), "下载开始缺少：{needle}");
+        }
+    }
 }

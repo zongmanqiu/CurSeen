@@ -50,38 +50,50 @@ body{padding-left:280px}
 <p class="meta">怎么写、放哪个目录、怎么热加载、有哪些现成例子。</p>
 <h1 id="CurSeen-Lua-脚本指南-脚本作者向">CurSeen Lua 脚本指南（脚本作者向）</h1>
 <blockquote>
-<p>本文件随 <code>assets/</code> 一起分发（部署后位于 <code>&lt;程序目录&gt;/assets/lua/README.md</code>），<br />
-写给<strong>写脚本的人</strong>：把 <code>.lua</code> 丢进本目录即可被面板扫到，不用改代码、不用重编译。</p>
-<p>内部实现契约（每个 API 的精确语义、宿主侧字段）见 <code>main/docs/UI_COMPONENTS.md</code> §三、§四；<br />
-逐条穷尽的 <strong>API 参考清单</strong> 见同目录 <code>API.md</code>（本文件是它的"作者向摘要"）。<br />
-三者不一致时以源码与本仓库文档为准。</p>
+<p>本手册随程序分发（<code>&lt;程序目录&gt;/assets/lua/Lua脚本手册.html</code>，控制面板 → 设置 → 帮助可直接打开），<br />
+写给<strong>写脚本的人</strong>：把 <code>.lua</code> 放进对应目录，或从「脚本」页顶部的「官方资源下载」安装 v2 包；不用改代码、不用重编译。</p>
+<p>逐条穷尽的 <strong>API 参考清单</strong> 见同目录 <code>API.md</code>（本手册第二部分是它的镜像）；<br />
+内部实现契约见 <code>main/docs/UI_COMPONENTS.md</code> §四。三者不一致时以源码与本仓库文档为准。</p>
 </blockquote>
 <h2 id="一-脚本放哪-怎么生效">一、脚本放哪、怎么生效</h2>
 <ul>
-<li><strong>唯一脚本根 = <code>assets/lua/</code>（递归扫描）</strong>。丢一个 <code>.lua</code> 进去，<strong>重开控制面板</strong>就出现在<br />
-  对应卡片（拖尾 / 悬浮标 / 点击效果 / 击键音效 / 脚本页）。</li>
+<li><strong>唯一脚本根 = <code>assets/lua/</code>（递归扫描）</strong>。丢一个 <code>.lua</code> 进去，约 250 ms 内<br />
+  就出现在对应卡片（拖尾 / 悬浮标 / 点击效果 / 击键音效 / 脚本页），<strong>面板开着也自动刷新</strong>，<br />
+  不用重开——目录监听覆盖整个 <code>assets/</code>。</li>
+<li><strong>官方资源从「脚本」页安装</strong>：脚本页第一张卡是「官方资源下载」，按 Gitee / GitHub 双源<br />
+  在线安装；v2 包解压成 <code>assets/lua/scripts/&lt;id&gt;/</code>（<code>pack.json</code> + 平铺脚本 +<br />
+  <code>info/</code> 文档），装完立即出卡，升级整包替换、不碰无关脚本。</li>
 <li>★★ <strong>归属由目录决定</strong>（2026-09-28 定稿，与实现一致）：<code>MouseTrail/</code> 拖尾、<br />
-<code>HoverDot/</code> 悬浮标、<code>ClickFx/</code> 点击效果、<code>scripts/</code> 脚本页。<strong>同一份脚本复制到哪个<br />
-  文件夹就能在哪用</strong>（四类宿主共用同一份驱动实现 <code>FxCore</code>，目录只决定挂在哪）；<code>role</code><br />
-  只影响开关语义与菜单归属，<strong>脚本里没有任何字段能改变挂载点</strong>。</li>
+<code>HoverDot/</code> 悬浮标、<code>ClickFx/</code> 点击效果、<code>KeySound/</code> 击键音效、<code>scripts/</code> 脚本页。<br />
+<strong>同一份脚本复制到哪个文件夹就能在哪用</strong>（四类宿主共用同一份驱动实现 <code>FxCore</code>，<br />
+目录只决定挂在哪）；<code>role</code> 只影响开关语义与菜单归属，<strong>脚本里没有任何字段能改变挂载点</strong>。</li>
 <li><code>scripts/</code> 下任何脚本都在脚本页出卡（<code>keysound</code> 除外——它由键盘页承接）：<br />
 <code>role="image"</code> 开关 = 右键菜单可见性；<strong>其余一切（<code>composite</code> / <code>effect</code> / 未声明<br />
     role）开关 = 常驻运行</strong>。往 <code>scripts/</code> 里复制一份特效脚本，开关打开就能跑。</li>
-<li><strong>未声明 <code>role</code> 也能跑</strong>：四个挂载目录下缺 <code>role</code> 都有缺省——<code>scripts/</code> 当可运行<br />
+<li><strong>未声明 <code>role</code> 也能跑</strong>：各挂载目录下缺 <code>role</code> 都有缺省——<code>scripts/</code> 当可运行<br />
     卡片，<code>MouseTrail/</code> <code>HoverDot/</code> <code>ClickFx/</code> 当拖尾特效（目录已经说明了一切，不必<br />
-    再写一遍）。只有丢在这四个目录<strong>之外</strong>、又没有 <code>menu</code> 的散件才会被跳过（告警）。</li>
-<li><code>scripts/</code> 下的脚本 <strong>id = 相对 <code>assets/lua/</code> 的路径（去扩展名，如 <code>scripts/fireflies</code>）</strong>，<br />
-  脚本页与配置按这个 id 记开关；改名 = 换 id（用户的旧开关会失效）。</li>
-<li>脚本文件改动按 (mtime, 字节数) <strong>热重载</strong>：状态清零、参数重放，不用重启程序。</li>
+    再写一遍）。只有丢在这些目录<strong>之外</strong>、又没有 <code>menu</code> 的散件才会被跳过（告警）。</li>
+<li><code>scripts/</code> 下的脚本 <strong>id = 相对 <code>assets/lua/</code> 的路径（去扩展名，如 <code>scripts/AI/ai_chat</code>）</strong>，<br />
+  脚本页与配置按这个 id 记开关；改名 = 换 id（用户的旧开关会失效）。在线包的脚本 id 以包内<br />
+  <code>pack.json</code> 与安装目录为准，升级不会换 id。</li>
+<li>脚本文件改动按 (mtime, 字节数) <strong>热重载</strong>：状态清零、参数重放，不用重启程序；<br />
+  新装 / 卸载的包也走同一条刷新通路。</li>
 </ul>
 <h2 id="二-顶层声明-元信息">二、顶层声明（元信息）</h2>
 <pre><code class="language-lua">name = &quot;显示名&quot;           -- 可选；缺省用文件名（脚本页显示）
 effect_name = &quot;实心圆&quot;     -- role=&quot;effect&quot; 时：拖尾/悬浮标/点击效果**下拉框**里的显示名
 description = &quot;一句话说明&quot; -- 可选；面板脚本页显示
-role = &quot;effect&quot;          -- 可选：四个挂载目录下缺省由目录推断（effect/composite），其余场合才必填
+role = &quot;effect&quot;          -- 可选：各挂载目录下缺省由目录推断（effect/composite），其余场合才必填
 menu = &quot;图片信息&quot;         -- role=&quot;image&quot; 时：贴图右键「脚本」里的菜单文本
+category = &quot;mouse&quot;       -- 可选：脚本页分组（mouse / picture / text / ai），不写就排在最后
+requires = { &quot;./tool/x.exe&quot; } -- 可选：缺任一文件就不进贴图右键菜单（路径判据同 ctx.fs）
 hide_cursor = true       -- 悬浮标脚本声明&quot;隐藏系统箭头&quot;（I 形/缩放提示保留）（如激光笔样式）
 </code></pre>
+<blockquote>
+<p>★ 在线包的 <code>pack.json</code> 另有 <code>id</code> / <code>name</code> / <code>version</code> / <code>layout: 2</code> / <code>files</code> /
+<code>category</code> / <code>single</code> / <code>api</code> / <code>min_host</code>；<code>single: true</code> 的单脚本包在脚本页显示为
+普通脚本卡（不再套一层包下拉）。完整打包规则见本文第九节。</p>
+</blockquote>
 <h2 id="三-四类脚本的契约">三、四类脚本的契约</h2>
 <h3 id="3-1-绘制特效-role-effect-拖尾-悬浮标-点击效果">3.1 绘制特效 <code>role="effect"</code>（拖尾 / 悬浮标 / 点击效果）</h3>
 <p>生命周期回调（<strong>全部可选</strong>，按帧驱动）：</p>
@@ -268,14 +280,17 @@ end<br />
 （6 位串 a 恒 255）、<code>rng(min,max)</code>、<code>rng_int(min,max)</code>（区间非法退化为 <code>min</code>）、<br />
 <code>clamp(v,lo,hi)</code>、<code>lerp(a,b,t)</code>。</p>
 <h3 id="3-2-击键音效-role-keysound">3.2 击键音效 <code>role="keysound"</code></h3>
-<p>入口 <code>on_key(key, mods, repeated, params)</code>（键名与击键回显同源；<code>mods = {ctrl,alt,shift,win}</code>，<br />
+<p><strong>键音脚本住在 <code>assets/lua/KeySound/</code></strong>（键盘页「击键音效」卡），不是脚本页；<br />
+入口 <code>on_key(key, mods, repeated, params)</code>（键名与击键回显同源；<code>mods = {ctrl,alt,shift,win}</code>，<br />
 老式三形参脚本也兼容）。新式统一入口是 <code>run(ctx, params)</code>，<br />
 <code>ctx = { role, sounds={文件名,…}, key, mods, repeated, dt }</code>。</p>
 <p><strong>返回值语义</strong>（两个入口一致）：返回 <code>ctx.sounds</code> 里的文件名或索引 → 播放它；<br />
 返回 <code>false</code> → <strong>强制静音</strong>（连宿主默认音也不响）；返回 <code>nil</code> / <code>true</code> / 其它 → 落回默认音效。</p>
 <h3 id="3-3-脚本扩展-role-image">3.3 脚本扩展 <code>role="image"</code></h3>
 <p>入口 <code>run(ctx, params)</code>；<code>ctx = { role="image", image=?, hwnd=? }</code>（<code>hwnd</code> = 目标窗口句柄）。<br />
-<code>image</code> 是<strong>只读快照</strong>，改动不回写贴图：</p>
+<code>image</code> 是<strong>只读快照</strong>，改动不回写贴图；<strong>要让屏幕上那张贴图变，必须显式调<br />
+<code>ext:set_image(结果)</code></strong>——它只换视图（不写盘、不动出厂原图），像素变过之后右键会出现<br />
+「恢复原图」。图片解码走 WIC（PNG / JPEG / BMP / GIF / TIFF，WebP 看机器），<strong>原尺寸、保 alpha</strong>：</p>
 <table>
 <thead>
 <tr>
@@ -301,8 +316,16 @@ end<br />
 <td>base64 编码的 PNG 文本（喂在线接口）</td>
 </tr>
 <tr>
-<td><code>save(path)</code></td>
-<td>存成 PNG（父目录不存在则创建）</td>
+<td><code>save(path, quality?)</code></td>
+<td>按扩展名写文件：<code>.png</code> 无损，<code>.jpg/.jpeg</code> 有损（quality 1–100，默认 90，透明合成白底）；父目录不存在则创建</td>
+</tr>
+<tr>
+<td><code>crop(x, y, w, h)</code></td>
+<td>裁出子矩形；越界不钳制，返回 <code>nil, 原因</code> 并点名是哪个角</td>
+</tr>
+<tr>
+<td><code>rotate_cw90()</code> / <code>flip_h()</code> / <code>flip_v()</code></td>
+<td>旋转 / 镜像，返回<strong>新图</strong>；手里这张快照不动</td>
 </tr>
 </tbody>
 </table>
@@ -419,6 +442,11 @@ end
 <td>图片路径输入</td>
 <td>图片标识</td>
 </tr>
+<tr>
+<td><code>hotkey</code></td>
+<td>快捷键捕获框</td>
+<td>规范化按键串（如 <code>Ctrl+Alt+H</code>；空串 = 停用）</td>
+</tr>
 </tbody>
 </table>
 <blockquote>
@@ -426,14 +454,23 @@ end
 项目里<strong>不存在</strong> <code>#AARRGGBB</code>——写成 <code>#FF000040</code> 会被读成"红 + 25% 透明"，<br />
 而不是"不透明红后面跟蓝"。<br />
 未识别的 <code>type</code> 按 <code>float</code> 处理。参数落盘：拖尾特效共用一张表（键 <code>{特效id}.{key}</code>），<br />
-其余 role 各自一张表（直接用 <code>key</code>）。</p>
+其余 role 各自一张表（直接用 <code>key</code>）。<br />
+★ <code>default</code> 在<strong>交棒给脚本那一刻</strong>合并：声明过的键一定存在，用户显式填的 <code>false</code> /<br />
+<code>0</code> / 空串原样交；<code>int</code> 交的是整数。只有 <code>scripts/</code> 的独立脚本会把 <code>hotkey</code> 当成<br />
+<strong>全局热键</strong>触发运行，特效 / 贴图脚本声明它只存一个键位串。</p>
 </blockquote>
 <h2 id="五-通用-ctx-成员-所有-run-类脚本">五、通用 <code>ctx</code> 成员（所有 <code>run</code> 类脚本）</h2>
 <ul>
 <li><code>ctx.fs</code>：<strong>只读</strong>文件接口，相对脚本目录解析（<code>read / read_bytes / exists / list</code>）；<br />
   含 <code>../</code> 或绝对路径一律返回 <code>nil</code>（逃逸校验，防手滑）。</li>
-<li><code>ctx.ext</code> / 全局 <code>ext</code>：宿主扩展——<code>ext:get_image()</code>（截屏）、<code>ext:log(...)</code>、<br />
-<code>ext:http(...)</code>（返回 <code>status</code> / <code>body</code> / <code>result</code>）。</li>
+<li><code>ctx.ext</code> / 全局 <code>ext</code>：宿主扩展，完整清单见第二部分 §4。常用分组：<br />
+  <strong>对话框</strong>（<code>result</code> / <code>input</code> / <code>chat_window</code> / <code>open_file</code> / <code>save_file</code>）、<br />
+  <strong>文件与进程</strong>（<code>read_file</code> / <code>write_file</code> / <code>load_image</code> / <code>set_image</code> / <code>unzip</code> /<br />
+  <code>proc</code> / <code>script_dir</code> / <code>tmpdir</code> / <code>data_dir</code>）、<br />
+  <strong>网络与剪贴板</strong>（<code>http</code> / <code>download</code> / <code>clip_get</code> / <code>clip_set</code> / <code>clip_image</code>）、<br />
+  <strong>系统打开</strong>（<code>open_temp</code> / <code>open_url</code>）与 JSON（<code>json_encode</code> / <code>json_decode</code>）。<br />
+  ★ 阻塞类调用（HTTP / 下载 / 外部程序 / 模态窗）只能在 <code>run</code> 模型里用；<code>draw</code> 逐帧跑在 UI<br />
+  线程，宿主会拒绝，避免冻住整个屏幕。</li>
 </ul>
 <h2 id="六-性能与正确性规则">六、性能与正确性规则</h2>
 <ol>
@@ -444,6 +481,9 @@ end
 <li>手动动作 ≠ 自动运行：<code>image</code> 脚本的开关只管"菜单里有没有这一条"，与常驻运行无关。</li>
 </ol>
 <h2 id="七-出厂参考脚本">七、出厂参考脚本</h2>
+<p>下列是<strong>随程序分发</strong>的内置参考脚本；标「官方资源包」的需在「脚本」页的「官方资源下载」里<br />
+安装（装到 <code>assets/lua/scripts/&lt;id&gt;/</code>）。<code>assets/lua/scripts/</code> 出厂为空，它同时是<br />
+通用扩展脚本与在线包的安装根。</p>
 <table>
 <thead>
 <tr>
@@ -454,7 +494,7 @@ end
 </thead>
 <tbody>
 <tr>
-<td><code>scripts/AI/ai_chat.lua</code></td>
+<td>安装后 <code>scripts/AI/ai_chat.lua</code></td>
 <td><code>composite</code></td>
 <td><strong>AI 写脚本</strong>（官方资源包）：卡片里填 API Key / 地址 / 模型 / 快捷键，热键呼出多轮对话（<code>ext:chat_window</code>），系统提示词带同目录的 <code>ai_chat_api.txt</code> 速查，可让 AI 辅助写脚本</td>
 </tr>
@@ -496,7 +536,7 @@ end
 <tbody>
 <tr>
 <td>脚本页没有它</td>
-<td>文件是否真在 <code>assets/lua/scripts/</code> 下；<code>role</code> 是否拼对（扩展 / 复合脚本<strong>必填</strong>）</td>
+<td>文件是否在 <code>assets/lua/scripts/</code>（或其下 <code>&lt;id&gt;/</code> 包目录）里；在线包装完约 250 ms 出卡，先等一次自动刷新；<code>role</code> 是否拼对（扩展 / 复合脚本<strong>必填</strong>）</td>
 </tr>
 <tr>
 <td>拖尾下拉里没有</td>
@@ -504,11 +544,19 @@ end
 </tr>
 <tr>
 <td>贴图右键里没有</td>
-<td><code>role="image"</code> + <code>menu="…"</code>；脚本页里这一条是否已勾开</td>
+<td><code>role="image"</code> + <code>menu="…"</code>；脚本页里这一条是否已勾开；<code>requires</code> 声明的外置文件是否齐全（缺一个就整条不出现）</td>
 </tr>
 <tr>
 <td>放进某目录后选了没反应</td>
 <td>挂载点由目录决定：目标是拖尾就得放 <code>MouseTrail/</code>，放错目录不会自动归位（复制一份过去即可，同一份脚本可以多目录共存）</td>
+</tr>
+<tr>
+<td>在线包下载 / 升级失败</td>
+<td>先看「高级」卡当前下载源（默认 Gitee）；网络失败会自动换另一源，两路都失败时状态行给两边的原因；离线时已装包仍可卸载</td>
+</tr>
+<tr>
+<td>自己打包的 zip 装不上</td>
+<td>v2 包要求单个顶层文件夹、<code>pack.json</code>（<code>layout: 2</code> + 完整 <code>files</code> 清单）与 <code>info/</code> 文档齐全；结构不对会被整包拒绝（见第九节）</td>
 </tr>
 <tr>
 <td>参数没出现在面板</td>
@@ -528,6 +576,31 @@ end
 </tr>
 </tbody>
 </table>
+<h2 id="九-打包与分享-v2-包">九、打包与分享（v2 包）</h2>
+<p>官方资源与用户分享都走同一种 v2 包：一个 zip，解压后是<strong>单个顶层文件夹</strong>，安装到<br />
+<code>assets/lua/scripts/&lt;id&gt;/</code>。目录结构：</p>
+<pre><code class="plain">MyPack_1.0.0.zip
+└─ MyPack/
+   ├─ pack.json
+   ├─ *.lua + 同目录资源
+   ├─ &lt;tool_dest&gt;/…          （可选：随包工具）
+   └─ info/{LICENSE,README.md,HISTORY.md}
+</code></pre>
+<p><code>pack.json</code> 最小字段：</p>
+<pre><code class="language-json">{
+  "id": "MyPack", "name": "我的包", "version": "1.0.0",
+  "layout": 2,
+  "files": ["MyPack/main.lua", "MyPack/info/LICENSE",
+            "MyPack/info/README.md", "MyPack/info/HISTORY.md"],
+  "category": "mouse",   // 可选：mouse / picture / text / ai
+  "single": true,        // 可选：单脚本包直接出普通脚本卡
+  "api": 3,              // 需要的 Lua API 级别（高于宿主 ⇒ 行置灰）
+  "min_host": "2.1.0"    // 可选：宿主最低版本
+}
+</code></pre>
+<p>规则：<strong><code>id</code> = 顶层文件夹名</strong>；<code>files</code> 必须与实际条目逐一一致（少一个整包拒绝）；<br />
+<strong>至少一个 <code>.lua</code></strong>；<code>info/</code> 三件套必须齐全；升级是整包替换，不碰别的包与用户<br />
+自己放进来的脚本。打包脚本见 CurSeen-Scripts 仓库 <code>tools/build_packs.py</code>（<code>--check</code> 自检）。</p>
 <hr>
 <h1 id="第二部分Lua-API-参考"><span class="part">第二部分</span>Lua API 参考</h1>
 <p class="meta">每个函数 / 字段 / 回调的精确签名与行为。</p>
@@ -909,6 +982,12 @@ end
 <td>开同一扇宿主文本窗的<strong>输入</strong>档（多行，Enter 换行；进窗即全选，提交只走「确定」按钮）。确定 = 返回输入文本；取消 / <code>Esc</code> / 关窗 = 返回 <code>nil</code>。★ 只有 <code>run</code> 模型（<code>image</code> / <code>keysound</code>，跑在工作线程）能等到回答：<code>draw</code> 模型逐帧跑在 UI 线程，在那里阻塞会自锁，所以那种调用只开窗、立即返回 <code>nil</code>。</td>
 </tr>
 <tr>
+<td><code>chat_window</code></td>
+<td>方法</td>
+<td><code>ext:chat_window(url: string, model: string, key: string, sys: string)</code></td>
+<td>原生 <strong>AI 对话窗</strong>：顶部多轮对话区、中部「清除 / 发送」、底部输入框；<code>Ctrl+Enter</code> 发送、<code>Esc</code> 关窗，等待回复时标题栏读秒。HTTP 在该窗自己的线程里跑，界面全程不卡；多轮上下文只在窗内自持，关窗即弃。★ 阻塞到关窗，只适合从 <code>run</code> 模型（工作线程）调用（官方「AI 写脚本」包就是这么用的）；<code>url</code> / <code>model</code> / <code>key</code> / <code>sys</code> 原样交给窗口，宿主不校验也不保存。</td>
+</tr>
+<tr>
 <td><code>proc</code></td>
 <td>方法</td>
 <td><code>ext:proc(opts: table) -&gt; table | nil, err</code></td>
@@ -930,7 +1009,7 @@ end
 <td><code>data_dir</code></td>
 <td>方法</td>
 <td><code>ext:data_dir() -&gt; string</code></td>
-<td>本脚本自己的<strong>持久数据目录</strong>：<code>&lt;程序目录&gt;/data/lua/&lt;脚本 id&gt;/</code>（绝对路径，按需创建）。缓存/历史/上次选择放这里；不在 <code>assets/</code> 下，写它不会触发目录监听，也不会被 <code>temp/</code> 清理。用户设置仍写 <code>config.json</code> 的 <code>lua_ext.params[id]</code>。</td>
+<td>本脚本自己的<strong>持久数据目录</strong>：<code>&lt;程序目录&gt;/data/lua/&lt;脚本 id&gt;/</code>（绝对路径，按需创建）。缓存/历史/上次选择放这里；不在 <code>assets/</code> 下，写它不会触发目录监听，也不会被 <code>temp/</code> 清理。<strong>用户可见设置仍写 <code>config.json</code> 的 <code>lua_ext.params[id]</code>，不要拿这里代替设置。</strong></td>
 </tr>
 <tr>
 <td><code>open_file</code></td>
@@ -948,13 +1027,13 @@ end
 <td><code>open_temp</code></td>
 <td>方法</td>
 <td><code>ext:open_temp(bytes: string, ext: string) -&gt; string | nil, err</code></td>
-<td>把字节写成 <code>ext:tmpdir()</code> 里的临时文件，并用<strong>系统默认程序</strong>打开；成功返回路径。<code>ext</code> 只允许光栅图片（<code>png/jpg/jpeg/gif/bmp/webp/tif/tiff/ico</code>），其余一律拒——二维码内容不可信，不能借 <code>.exe</code> / <code>.lnk</code> / <code>.url</code> 变成一次执行。写盘回读长度；打开失败时文件仍在，原因里带路径。</td>
+<td>把字节写成 <code>ext:tmpdir()</code> 里的临时文件，并用<strong>系统默认程序</strong>打开；成功返回路径。<code>ext</code> 只允许光栅图片（<code>png/jpg/jpeg/gif/bmp/webp/tif/tiff/ico</code>），其余一律拒——二维码内容不可信，不能借 <code>.exe</code>/<code>.lnk</code>/<code>.url</code> 变成一次执行。写盘回读长度；打开失败时文件仍在，原因里带路径。</td>
 </tr>
 <tr>
 <td><code>open_url</code></td>
 <td>方法</td>
 <td><code>ext:open_url(url: string) -&gt; true | nil, err</code></td>
-<td>用系统默认浏览器打开网址。<strong>只允许 <code>http</code> / <code>https</code></strong>；<code>file:</code>、<code>javascript:</code>、自定义协议与含空白/控制字符的串一律拒。</td>
+<td>用系统默认浏览器打开网址。<strong>只允许 <code>http</code> / <code>https</code></strong>；<code>file:</code>、<code>javascript:</code>、自定义协议与含空白/控制字符的串一律拒。由调用方决定是否把它做成开关（默认不要自动打开）。</td>
 </tr>
 <tr>
 <td><code>read_file</code></td>
@@ -1224,7 +1303,7 @@ end
 <td><code>category</code></td>
 <td>string</td>
 <td>脚本页卡片排序</td>
-<td>可选分组：<code>mouse</code> / <code>picture</code> / <code>text</code> / <code>ai</code>。有值的卡片先按固定组顺序排；<strong>没有声明的老脚本排在最后</strong>、组内仍按原 id。只影响排序，不改显示名与 id。</td>
+<td>可选分组：<code>mouse</code> / <code>picture</code> / <code>text</code> / <code>ai</code>。有值的卡片先按固定组顺序排；<strong>没有声明的老脚本排在最后</strong>、组内仍按原 id。只影响排序，不改显示名，也不改 id。</td>
 </tr>
 <tr>
 <td><code>role</code></td>
@@ -1597,7 +1676,7 @@ end
 </tbody>
 </table>
 <hr>
-<p class="meta">CurSeen 随包文档 · 由仓库 <code>assets/lua/README.md</code> 与 <code>assets/lua/API.md</code> 生成 · 界面文案与实现一致</p>
+<p class="meta">CurSeen 随包文档 · 第一部分为脚本作者指南，第二部分镜像 <code>API.md</code> · 界面文案与实现一致</p>
 <nav class="toc" aria-label="目录">
 <div class="toc-title">目录</div>
 <ul>
@@ -1615,6 +1694,7 @@ end
 <li class="toc-l2"><a href="#六-性能与正确性规则">六、性能与正确性规则</a></li>
 <li class="toc-l2"><a href="#七-出厂参考脚本">七、出厂参考脚本</a></li>
 <li class="toc-l2"><a href="#八-快速排错">八、快速排错</a></li>
+<li class="toc-l2"><a href="#九-打包与分享-v2-包">九、打包与分享（v2 包）</a></li>
 <li class="toc-l1"><a href="#第二部分Lua-API-参考">第二部分Lua API 参考</a></li>
 <li class="toc-l1"><a href="#CurSeen-Lua-脚本-API-参考-完整版">CurSeen Lua 脚本 API 参考（完整版）</a></li>
 <li class="toc-l2"><a href="#0-两个-ctx-的约定-极易混淆">0. 两个 ctx 的约定（极易混淆）</a></li>

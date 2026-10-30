@@ -42,12 +42,14 @@ pub struct UpdateUrls {
 }
 
 /// 一次确认可用的更新计划（由后台线程送到 UI）。
+///
+/// `urls` 顺序 = **先首选源、再备用源**（备用可能为空串）；下载失败可换另一路。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePlan {
     pub latest: String,
     pub notes: String,
     pub sha256: String,
-    pub url: String,
+    pub urls: [String; 2],
 }
 
 /// 检查结果。`latest` 在已是最新时也要带回（状态行显示 `已是最新 x.y.z`）。
@@ -140,10 +142,18 @@ fn outcome_from(
     }
     let (first, second) = (source.min(1), 1 - source.min(1));
     let urls = [&manifest.urls.gitee, &manifest.urls.github];
-    let url = [urls[first], urls[second]]
+    let candidates: Vec<String> = [urls[first], urls[second]]
         .into_iter()
-        .find(|u| !u.is_empty() && is_safe_download_url(u))
-        .ok_or_else(|| format!("update.json 没有可信任的 zip 地址（来源 {}）", source))?;
+        .filter(|u| !u.is_empty() && is_safe_download_url(u))
+        .cloned()
+        .collect();
+    let Some(first_url) = candidates.first().cloned() else {
+        return Err(format!(
+            "update.json 没有可信任的 zip 地址（来源 {}）",
+            source
+        ));
+    };
+    let second_url = candidates.get(1).cloned().unwrap_or_default();
     if manifest.sha256.len() != 64 || !manifest.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("update.json 的 sha256 缺失或不是 64 位十六进制".to_string());
     }
@@ -151,7 +161,7 @@ fn outcome_from(
         latest: manifest.version.clone(),
         notes: manifest.notes.clone(),
         sha256: manifest.sha256.to_ascii_lowercase(),
-        url: url.clone(),
+        urls: [first_url, second_url],
     }))
 }
 
@@ -221,8 +231,20 @@ mod tests {
             panic!("应发现新版");
         };
         assert_eq!(p.latest, "2.1.0");
-        assert!(p.url.starts_with("https://github.com/"));
+        assert!(p.urls[0].starts_with("https://github.com/"), "首选源排第一");
+        assert!(
+            p.urls[1].starts_with("https://gitee.com/"),
+            "另一路必须作为备用地址一起带回"
+        );
         assert_eq!(p.sha256.len(), 64);
+
+        // 换成 Gitee 首选，顺序也要跟着换。
+        let Outcome::Available(p) = outcome_from(&m, 0, Version::parse("2.0.5").unwrap()).unwrap()
+        else {
+            panic!("应发现新版");
+        };
+        assert!(p.urls[0].starts_with("https://gitee.com/"));
+        assert!(p.urls[1].starts_with("https://github.com/"));
     }
 
     #[test]
@@ -233,7 +255,8 @@ mod tests {
         else {
             panic!("应回退 Gitee");
         };
-        assert!(p.url.starts_with("https://gitee.com/"));
+        assert!(p.urls[0].starts_with("https://gitee.com/"));
+        assert_eq!(p.urls[1], "", "没有第二路时备用地址留空");
     }
 
     #[test]

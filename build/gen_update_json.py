@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +55,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="发布版本号，如 2.1.0")
     ap.add_argument("--zip", required=True, help="对应的 CurSeen_<version>.zip")
+    ap.add_argument(
+        "--published",
+        default=date.today().isoformat(),
+        help="发布日期（默认今天，ISO 形式）",
+    )
     ap.add_argument("--out", default=str(ROOT / "update.json"), help="输出路径")
     args = ap.parse_args()
 
@@ -66,7 +72,7 @@ def main() -> None:
     tag = version
     data = {
         "version": version,
-        "published": "2026-10-30",
+        "published": args.published,
         "notes": history_notes(version),
         "sha256": sha256_file(zip_path),
         "urls": {

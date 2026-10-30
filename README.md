@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.0.5 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.0.5/CurSeen_2.0.5.zip)**
- ｜ **[⬇️ 下载 2.0.5 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.0.5/CurSeen_2.0.5.zip)**
+**[⬇️ 下载 2.1.0 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.0/CurSeen_2.1.0.zip)**
+ ｜ **[⬇️ 下载 2.1.0 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.0/CurSeen_2.1.0.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
@@ -12,12 +12,13 @@
 - **鼠标轨迹**：鼠标拖尾、悬浮标（跟随光标，含聚光灯 / 激光笔等脚本）、点击波纹与特效。
 - **键盘呈现**：点击声音、击键回显（屏幕显示你按下的键）、虚拟键盘（主播向布局 + 高亮注入）。
 - **屏幕标注**：透明 / 白板画笔，支持撤销 / 重做 / 清空；截图后可进编辑态标注。
-- **截图与贴图**：截图进剪贴板或钉到桌面，贴图可移动 / 缩放 / 另存为（`Ctrl+S`）。
+- **截图与贴图**：截图进剪贴板或钉到桌面，贴图可移动 / 缩放 / 另存为（`Ctrl+S` 存当前画面）。
 - **录制**：MP4 视频录制（分辨率 / 帧率 / 硬件加速回退）+ GIF 录制（选区 / 帧间差量 / 裁剪另存）。
 - **辅助**：放大镜（画中画 / 全屏，滚轮调倍率）、计时器（正 / 倒计时，可调锚点与字号）、
   便签、剪贴板历史（粘贴板回顾）。
-- **可扩展**：上述鼠标 / 点击 / 悬浮标 / 击键音效 / 通用扩展几乎都是 **Lua 脚本**，丢文件即生效、
-  不重编译（脚本 API 见 `assets/lua/API.md`）。
+- **可扩展**：鼠标 / 点击 / 悬浮标 / 击键音效 / 通用扩展几乎都是 **Lua 脚本**，丢文件即生效、
+  不重编译；也可在「脚本」页顶部「官方资源下载」直接安装官方包（Gitee / GitHub 双源）。
+  脚本 API 见 `assets/lua/API.md`。
 - **轻量**：CPU 软渲染、无外部运行时依赖，单可执行文件即装即用；空闲零功耗、关闭即释放资源。
 
 > 更完整的隐藏快捷键与技巧见随包分发的 **`assets/manual/隐藏快捷键手册.html`**（安装目录 `assets/manual/` 内）。
@@ -112,7 +113,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 │   ├── scripting/                 Lua 绑定（特效脚本引擎）
 │   ├── ui/                        控制面板 UI：页面 / 模型 / 卡片组件
 │   └── update/                    自动更新：版本检查 / 下载 / 安装
-├── assets/                        资源（目录即来源）：lua/（唯一脚本根）/ Sounds（共用声音素材）/ …
+├── assets/                        资源（目录即来源）：lua/（唯一脚本根）/ Sounds（共用声音素材）/ docs（商店与更新清单缓存）/ …
 ├── tests/                         集成测试门禁（docs_consistency / config_pipeline_e2e）
 │   ├── probes/                    真机探针（11 条，需硬件或真实窗口，[[test]] 登记）
 │   └── fixtures/                  共享素材（config_v1.json）
@@ -153,8 +154,9 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 - **配置即面板**：控制面板把下拉 / 滑块解析回配置；出厂默认值已写为"解析结果"，避免首帧
   `apply_to` 误报"配置有改动"。配置落在程序目录 `config.json`（便携化：删目录 = 卸载干净）。
 - **目录即来源（扩展不重编译）**：Lua 脚本统一在 `assets/lua/`（唯一脚本根，递归：
-  `lua/MouseTrail/`、`lua/HoverDot/`、`lua/ClickFx/`、`lua/scripts/`（**通用扩展脚本**，文件名即 id）），声音素材在
-  `assets/Sounds/`（点击声音/键盘声音/拖尾音效共用，用户也可浏览选别的文件夹）
+  `lua/MouseTrail/`、`lua/HoverDot/`、`lua/ClickFx/`、`lua/KeySound/`、`lua/scripts/`
+  （通用扩展与在线包；v2 包 = `scripts/<id>/pack.json` + 平铺脚本 + `info/`）），
+  声音素材在 `assets/Sounds/`（点击声音/键盘声音/拖尾音效共用，用户也可浏览选别的文件夹）
   —— 用户丢文件即出现在 UI。
 - **覆盖层架构**：`core::Backdrop::paint_into` 是底图唯一入口（放 core 不放 runtime，因
   `modules/drawing` 不得依赖 runtime）；退出策略参数化（`ExitPolicy` + 区域类型）。
@@ -176,7 +178,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 | Win32 实测结论 | `docs/PLATFORM_NOTES.md` |
 | 发版流程 | `docs/RELEASE_CHECKLIST.md` |
 | 面板组件库 / UI·Lua API 参考 | `docs/UI_COMPONENTS.md` |
-| 写 Lua 脚本（脚本作者向，随程序分发） | `assets/lua/README.md`（`API.md` 为完整 API 参考） |
+| 写 Lua 脚本（脚本作者向，随程序分发） | `assets/lua/Lua脚本手册.html`（`API.md` 为完整 API 参考） |
 | 第三方改动 | `patches/wind-ui-rust-0.30.0/PATCHES.md` |
 | 版本历史 | `HISTORY.md` |
 | 踩坑与教训（现象 / 根因 / 判据） | `docs/踩坑记录*.md`（分册，按 §N 编号查） |

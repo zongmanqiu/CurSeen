@@ -243,44 +243,54 @@ impl Runtime {
         match ev {
             UpdateEvent::CheckStarted => {
                 self.update.busy.set(true);
-                self.update.ready.set(false);
+                self.update.downloading.set(false);
                 self.update.progress.set(-1.0);
                 self.update.status.set("正在检查更新…".to_string());
             }
             UpdateEvent::UpToDate { latest } => {
                 log::info!("检查更新：已是最新 {latest}");
                 self.update.busy.set(false);
-                self.update.ready.set(false);
+                self.update.downloading.set(false);
                 self.update.status.set(format!("已是最新版本 {latest}"));
             }
             UpdateEvent::Available {
                 latest,
-                url,
+                urls,
                 sha256,
                 notes,
             } => {
-                log::info!("检查更新：发现新版本 {latest} -> {url}");
+                log::info!(
+                    "检查更新：发现新版本 {latest} -> {}（备用 {}）",
+                    urls[0],
+                    urls[1]
+                );
                 self.update.busy.set(false);
-                self.update.ready.set(true);
-                self.update.set_url(url.clone());
+                self.update.downloading.set(false);
                 self.update
                     .status
                     .set(format!("发现新版本 {latest}，已打开更新说明"));
                 prompt = Some(crate::update::UpdatePrompt {
                     latest,
                     notes,
-                    url,
+                    urls,
                     sha256,
                 });
             }
             UpdateEvent::CheckFailed { error } => {
                 self.update.busy.set(false);
-                self.update.ready.set(false);
+                self.update.downloading.set(false);
                 self.update.status.set(format!("检查失败：{error}"));
                 log::warn!("检查更新失败: {error}");
             }
+            UpdateEvent::DownloadStarted => {
+                // 点下「更新」后的第一帧反馈：按钮立刻换成进度条，不必等网络。
+                self.update.busy.set(true);
+                self.update.downloading.set(true);
+                self.update.progress.set(0.0);
+                self.update.status.set("正在下载… 0%".to_string());
+            }
             UpdateEvent::DownloadProgress { received, total } => {
-                // `total == 0`：服务端没给长度，只报已下载的量，进度条保持"不确定"。
+                // `total == 0`：服务端没给长度，只报已下载的量，进度条走不确定态。
                 if total == 0 {
                     self.update.progress.set(-1.0);
                     self.update
@@ -305,6 +315,7 @@ impl Runtime {
             }
             UpdateEvent::DownloadFailed { error } => {
                 self.update.busy.set(false);
+                self.update.downloading.set(false);
                 self.update.progress.set(-1.0);
                 self.update.status.set(format!("下载失败：{error}"));
                 log::warn!("下载更新失败: {error}");

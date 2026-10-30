@@ -651,14 +651,18 @@ pub enum UpdateEvent {
     /// 已是最新版本。
     UpToDate { latest: String },
     /// 有新版本，且拿到了下载地址 / 校验值 / HISTORY 说明。
+    ///
+    /// `urls` 顺序 = **先首选源、再备用源**（可能只有一条）；下载失败时按序换源重试。
     Available {
         latest: String,
-        url: String,
+        urls: [String; 2],
         sha256: String,
         notes: String,
     },
     /// 检查失败（网络 / 解析 / 没有可下载的包）。
     CheckFailed { error: String },
+    /// 已开始下载（UI 立刻把按钮换成进度条，不必等第一块数据）。
+    DownloadStarted,
     /// 下载进度（`total == 0` 表示服务端未给长度）。
     DownloadProgress { received: u64, total: u64 },
     /// 下载完成，zip 已落在本地。

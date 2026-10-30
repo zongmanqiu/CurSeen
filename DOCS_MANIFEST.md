@@ -35,10 +35,9 @@
 | 16 | `assets/Sounds/README.md` | 音频格式白名单 / 配置键 / 版权归属变化 | （凡动 `SUPPORTED_EXT` 必读） |
 | 17 | `assets/KeyDisplay/README.md` | 键名映射表用法变化 | — |
 | 18 | `assets/lua/HoverDot/README.md` | 悬浮标出厂脚本清单变化 | — |
-| 18b | `assets/lua/README.md` | **Lua 脚本作者指南**（随 assets 分发）：四类 role 契约 / 回调签名 / 绘图指令 / 参数 schema / 颜色串口径 / 出厂样例清单 / 排错表变化 | —（同类参考：Pecia 的 `script/scripts/lua_api.txt`） |
 | 18c | `assets/lua/API.md` | **Lua 脚本 API 权威参考**（随 assets 分发）：全局函数 / 环境变量 / 绘图指令 / `ctx.fs` / 回调契约 / 返回值契约变化 | —（与 `scripting/api_*.rs` 实际注册逐项对账） |
-| 18e | `assets/lua/Lua脚本手册.html` | **随包 Lua 手册**（指南+API 合一）：由两份 .md 经 `temp/build_lua_manual.py` 生成，帮助卡「Lua 脚本手册」按钮直接打开；源 .md 变了要重跑生成脚本 | —（生成物，以 18b/18c 源文档为准） |
-| 18d | `assets/manual/隐藏快捷键手册.md`（+ 同名 `.html`，随 assets 分发进安装目录） | **隐藏快捷键手册**：固定不可改的隐藏键清单变化 | —（每条须对照源码实装） |
+| 18e | `assets/lua/Lua脚本手册.html` | **随包 Lua 手册**（指南+API 合一）：第一部分为脚本作者指南（含 v2 包格式、官方资源下载、热更新），第二部分三张表由 `build/gen_manual_tables.py` 从 `API.md` **机械镜像**；改 API 后必须重跑该脚本 | 门禁 `test_lua_manual_matches_the_api_reference_tables`（读生成物形状） |
+| 18d | `assets/manual/隐藏快捷键手册.md`（+ 同名 `.html`，随 assets 分发进安装目录） | **隐藏快捷键手册**：固定不可改的隐藏键清单变化（含脚本文本窗 / AI 对话窗按键） | —（每条须对照源码实装） |
 | 19 | `examples/README.md` | 离屏探针增删（整目录职责变化） | （`Cargo.toml` 的 `[[example]]` 必须同步） |
 | 20 | `开发指南.md` | 开发/发版流程、文档同步对照、提交前清单、HISTORY 登记规范、工程纪律变化 | `test_docs_checks_the_manifest_files_exist`（修改流程唯一正本） |
 
@@ -60,6 +59,8 @@
 | `build/_common.bat` | 共用路径变量与 python / tar / curl 解析（须 `call`，故意不 `setlocal`） |
 | `build/deps.txt` | 第三方源码下载登记表（`name=url\|marker-file`，**ASCII-only**，步骤 2 消费） |
 | `build/deploy.py` / `gen_licenses.py` / `sync_assets.py` / `gate.py` / `boot_check.py` / `check_deps.ps1` / `layering_scan.py` / `hygiene_scan.py` | 构建 / 部署 / 许可同步 / 按需门禁 / 启动冒烟 / 依赖体检 / 分层体检 / 静态异味体检 |
+| `build/gen_manual_tables.py` | 把 `assets/lua/API.md` 的三张接口表机械镜像进《Lua 脚本手册》第二部分；改 API 后必跑 |
+| `build/gen_update_json.py` | 发版时从 HISTORY 当前版本段取 notes、算发行 zip sha256、写 Gitee/GitHub 两个地址到 `update.json` |
 | `examples/gen_icon.rs` | 由矢量源 `assets/icons/icon*.svg`（+ `images/*.svg` 二维码）逐档光栅化出 `tray_<N>[_red].rgba`（托盘五档）+ `app.ico`（exe/窗口）+ 二维码 PNG；换图标/二维码只改 SVG 再 `cargo run --example gen_icon --features icon-gen` |
 | `build/app.rc` | 图标资源脚本（`MAINICON` ← `assets/icons/app.ico`），由 `build.rs` 经 `rc.exe` 编译；无 SDK 时跳过 |
 
@@ -76,7 +77,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `assets/lua/**` | 统一 Lua 脚本（唯一脚本根，递归；目录即来源） |
+| `assets/lua/**` | 统一 Lua 脚本（唯一脚本根，递归；目录即来源；在线包为 `<id>/pack.json` + 平铺脚本 + `info/`） |
+| `assets/docs/` | 联网清单缓存（`scripts.json` / `update.json`）：程序联网刷新时替换，离线兜底 |
 | `assets/Sounds/*.wav` | 声音素材（点击声音/键盘声音/拖尾音效共用） |
 | `build/sync_assets.py` | `build.rs` 不拷 assets，部署时靠它同步 |
 | `LICENSE` | AGPL-3.0 许可全文（随发布包分发，步骤 ⑥ 自动同步 `LICENSE` / `THIRD-PARTY-NOTICES.md` / `licenses/`）。★ 官方**逐字**、不加任何署名/说明（版权声明在 `README.md` 与 `Cargo.toml`）；受门禁校验，见 `tests/docs_consistency.rs` |

@@ -132,6 +132,7 @@
 | `download` | 方法 | `ext:download(url: string, path: string, headers?: table) -> int \| nil, err` | 把 URL 的响应体**流式**写到 `path`（二进制安全，返回字节数）。★ 先写 `path.partial`、成功再原子改名，失败清半成品；上限 512 MB；服务端给了 `Content-Length` 会校验。★ **阻塞**，只能从 `run` 模型里调（`draw` 跑在 UI 线程，会冻全屏）。★ 地址不限——和 `ext:http` 一样，下什么、从哪下是脚本作者的责任。 |
 | `unzip` | 方法 | `ext:unzip(zip_path: string, dest_dir: string) -> int \| nil, err` | 把 ZIP 解到 `dest_dir`（不存在就建），返回**文件**数（目录不算）。只认 stored / deflate；**路径逃逸一律拒**（`..`、绝对路径、盘符、符号链接），CRC 不符 / 加密条目 / 超限（单条目 256 MB、整包 2 GiB）也拒，且不留半成品。暂不支持 ZIP64。 |
 | `input` | 方法 | `ext:input(title: string, default?: string) -> string \| nil` | 开同一扇宿主文本窗的**输入**档（多行，Enter 换行；进窗即全选，提交只走「确定」按钮）。确定 = 返回输入文本；取消 / `Esc` / 关窗 = 返回 `nil`。★ 只有 `run` 模型（`image` / `keysound`，跑在工作线程）能等到回答：`draw` 模型逐帧跑在 UI 线程，在那里阻塞会自锁，所以那种调用只开窗、立即返回 `nil`。 |
+| `chat_window` | 方法 | `ext:chat_window(url: string, model: string, key: string, sys: string)` | 原生 **AI 对话窗**：顶部多轮对话区、中部「清除 / 发送」、底部输入框；`Ctrl+Enter` 发送、`Esc` 关窗，等待回复时标题栏读秒。HTTP 在该窗自己的线程里跑，界面全程不卡；多轮上下文只在窗内自持，关窗即弃。★ 阻塞到关窗，只适合从 `run` 模型（工作线程）调用（官方「AI 写脚本」包就是这么用的）；`url` / `model` / `key` / `sys` 原样交给窗口，宿主不校验也不保存。 |
 | `proc` | 方法 | `ext:proc(opts: table) -> table \| nil, err` | **外置工具通道**（m10）：起一个进程、等它跑完、把输出交回脚本。`opts = { exe, args?, cwd?, timeout_ms?, ansi? }`，返回 `{ code, stdout, stderr, timed_out, truncated, elapsed_ms }`（`code` 在被超时杀掉时是 `nil`；`elapsed_ms` 是**整次调用**的墙钟，含起进程与加载 dll——那才是用户感到的延迟）。★ `exe` 只准写**脚本自己目录（含子目录）里的相对路径 + `.exe`**：绝对路径、`..`、`.dll` / `.bat` 一律拒绝并给中文原因。`args` 是**数组**，逐个交给子进程，不拼命令行（路径里有空格与引号都不用脚本操心）。`ansi = true` 按系统码页（中文系统 = GBK）解输出，默认按 UTF-8——猜错的表现就是"锟斤拷 / 鏂囧瓧"，所以这条只能由认识那个工具的脚本来声明。`timeout_ms` 默认 30 s、上限 120 s（超时宿主一定杀掉并收尸）。工作目录默认 = exe 所在目录（工具按相对路径找自己的模型 / dll）。阻塞在脚本自己的线程上，UI 零等待。★ 只能在 `run` 模型里调（`draw` 在 UI 线程上调用会被拒绝，理由同 `ext:http`）。 |
 | `script_dir` | 方法 | `ext:script_dir() -> string` | 脚本自己所在目录的**绝对**路径。要给外置工具拼绝对路径时用它（多数工具只认绝对路径）。 |
 | `tmpdir` | 方法 | `ext:tmpdir() -> string` | 宿主专属的临时目录（绝对路径，取用时已建好）。`ext:proc` 路线的标准用法：`img:save(ext:tmpdir() .. "\\in.png")` → 把绝对路径交给工具。 |
@@ -292,9 +293,9 @@
 | `assets/lua/MouseTrail/` | `effect` | `"trail"` | 绘图回调 | `init`, `on_move`, `step`, `draw` |
 | `assets/lua/HoverDot/` | `effect` | `"hover"` | 绘图回调 | `init`, `draw`（可用 `ctx:image` 贴预载位图） |
 | `assets/lua/ClickFx/` | `effect` | `"clickfx"` | 绘图回调 | `on_press`/`on_click`, `step`, `draw` |
-| `assets/lua/scripts/` | 缺 `role` 且无 `menu` → **`composite`** | `"panel"` | 绘图回调 + `play_sound` | `init`, `on_move`, `on_mouse_down`, `on_key`, `step`, `draw` |
+| `assets/lua/scripts/`（含在线包 `<id>/` 目录） | 缺 `role` 且无 `menu` → **`composite`** | `"panel"` | 绘图回调 + `play_sound` | `init`, `on_move`, `on_mouse_down`, `on_key`, `step`, `draw` |
 | 贴图动作脚本 | 有 `menu` 无 `role` → `image` | —（走 `run`） | `run(ctx, params)` | `run` |
-| 击键音效脚本 | `keysound` | —（走 `run`） | `run(ctx, params)` | `run` |
+| `assets/lua/KeySound/` | `keysound` | —（走 `run`） | `run(ctx, params)` | `run` |
 | 其它目录散件 | 无 `role` 且无 `menu` 又不在上述目录 → **告警并跳过** | — | — | — |
 
 ---

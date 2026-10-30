@@ -41,6 +41,9 @@ const DONATE_ALIPAY_PNG: &[u8] = include_bytes!("../../../assets/images/ALiPay.p
 /// 两张并排也不挤。
 const DONATE_QR_SIZE: i32 = 160;
 
+/// 下载进度条宽度（逻辑 px）：与「检查更新」按钮同在按钮行，下载时原地替换。
+const PROGRESS_W: i32 = 220;
+
 /// 两张二维码的间距。照抄 Pecia 的 `kQrGap = 28`——刻意留宽，避免瞄着一个码扫时
 /// 手机误识别另一个。
 const DONATE_QR_GAP: i32 = 28;
@@ -172,12 +175,18 @@ pub fn build_about_page(
     );
 
     // ── 版本更新 ──
+    //
+    // ★ 2026-10-31 用户口径：点说明窗里的「更新」后，**按钮原地变成下载进度**，
+    //   不让用户盯着没反应的按钮等网络。`downloading` 从 `DownloadStarted` 开始为真
+    //   （不等第一块数据），失败时回到按钮；`progress` 为 -1 时用不确定态进度条。
+    let downloading = up.downloading;
     let check_btn = {
         let sender = sender.clone();
         Element::button("检查更新")
             .outline()
             // 正在检查/下载时置灰：网络请求是"发一次就够了"的动作，连点会开好几条线程。
             .enabled_signal(up.busy.map(|b| !*b))
+            .visible_when(move || !downloading.get())
             .on_click(move |_ctx| {
                 if let Some(sender) = &sender {
                     let _ = sender.send(UiMsg::UpdateCheck);
@@ -186,8 +195,11 @@ pub fn build_about_page(
     };
 
     let progress = Element::progress(up.progress)
-        // 没有进度（-1）时不显示进度条：只在真的开始下载后才出现。
-        .visible_signal(up.progress.map(|p| *p >= 0.0));
+        .width(PROGRESS_W)
+        .visible_when(move || downloading.get() && up.progress.get() >= 0.0);
+    let progress_unknown = Element::progress_indeterminate()
+        .width(PROGRESS_W)
+        .visible_when(move || downloading.get() && up.progress.get() < 0.0);
 
     content = content.child(
         Element::col()
@@ -199,6 +211,8 @@ pub fn build_about_page(
             .child(
                 Element::row()
                     .child(check_btn)
+                    .child(progress)
+                    .child(progress_unknown)
                     .child(Element::leaf().width(8))
                     // 当前更新源：灰字只读（与商店卡同一枚提示）；切换在设置页「高级」卡。
                     .child(crate::ui::pages::store::source_hint(source))
@@ -210,7 +224,6 @@ pub fn build_about_page(
                     .font_size(tokens::FONT_MD)
                     .fg(to_color(tokens::TEXT_SECONDARY)),
             )
-            .child(progress.margin_xy(0, 12))
             .padding(16)
             .bg(to_color(tokens::CARD_BG))
             .corner(tokens::CORNER_RADIUS)
@@ -309,6 +322,34 @@ mod tests {
         assert!(
             !p.contains("Element::dropdown("),
             "关于页不该提供第二个来源切换控件"
+        );
+    }
+
+    /// m72（用户口径）：点「更新」后**按钮原地换成进度条**——同一行里二选一，
+    /// 不是把按钮留着、下面再挂一条进度；服务端不给长度时走不确定态。
+    #[test]
+    fn download_progress_replaces_the_check_button() {
+        let p = production_src();
+        for needle in [
+            "up.downloading",
+            "visible_when(move || !downloading.get())",
+            "Element::progress_indeterminate()",
+            ".width(PROGRESS_W)",
+        ] {
+            assert!(p.contains(needle), "关于页下载反馈缺少：{needle}");
+        }
+        // 进度条与按钮必须在**同一个 row** 里（按钮之后到行尾之间）。
+        let at = p.find(".child(check_btn)").expect("找不到更新按钮行");
+        let rest = &p[at..];
+        let end = rest.find(".margin_xy(0, 12)").unwrap_or(rest.len());
+        let row = &rest[..end];
+        for needle in [".child(progress)", ".child(progress_unknown)"] {
+            assert!(row.contains(needle), "进度条不在按钮行里：{needle}");
+        }
+        // 负面：不许再把进度条单独挂成列的一行。
+        assert!(
+            !p.contains(".child(progress.margin_xy"),
+            "进度条不该再单独占一行"
         );
     }
 }

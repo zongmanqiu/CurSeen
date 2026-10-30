@@ -179,8 +179,8 @@ x 完全相同**。`calc_col1_width` 保留仅供该护栏测试与将来调值�
 
 ## 四、Lua 脚本契约（四类脚本）
 
-> 契约正本 = `assets/lua/README.md`（面向脚本作者，含示例与排查表）；本节是面向
-> 面板开发者的摘要，两处以正本为准。
+> 契约正本 = `assets/lua/Lua脚本手册.html` 第一部分（面向脚本作者，含示例与排查表）与
+> 同目录 `API.md`（逐条 API 参考）；本节是面向面板开发者的摘要，两处以正本为准。
 
 ★★ **归属由目录决定**（2026-09-28 定稿，脚本里没有任何字段能改挂载点）：统一注册表
 **只扫 `assets/lua/`**（递归），`MouseTrail/` `HoverDot/` `ClickFx/` `scripts/` 四个目录
@@ -270,7 +270,8 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 
 贴图右键菜单（`menu` 声明菜单文本）→ `run(ctx, params)`；
 `ctx = { role="image", image=?, hwnd=? }`（有贴图上下文时注入；`hwnd` = 目标窗口句柄）。
-`image` 对象（**只读快照**，改动不回写贴图）：
+`image` 对象（**只读快照**，改动不回写贴图；要换贴图视图必须显式 `ext:set_image(新图)`，
+它只换视图、不写盘，右键「恢复原图」可退回钉进来那一刻）：
 
 | 成员 | 说明 |
 |---|---|
@@ -278,11 +279,12 @@ function run(ctx, params) … end      -- keysound / image 扩展的统一入口
 | `pixel(x, y)` | → `r, g, b, a` 四个值；越界返回全 nil |
 | `bytes()` | → 原始 RGBA 缓冲（二进制字符串，长度 = w×h×4，行优先）；整图统计用它 + `string.byte` 批量读 |
 | `png_base64()` | → base64 编码的 PNG 文本（在线接口用） |
-| `save(path)` | → 存成 PNG 文件（父目录不存在则创建） |
+| `save(path, quality?)` | → 按扩展名存文件：`.png` 无损；`.jpg/.jpeg` 有损（quality 1–100，默认 90，透明合成白底）；父目录不存在则创建 |
 
 返回值：`run` 返回字符串 → 自动弹可复制的结果框（**多行文本直接用 `\n`**，宿主会
 归一化成 EDIT 控件要的 `\r\n`）；返回空/nil = 脚本已自己 `ext:result`。
-内置扩展脚本在 **`assets/lua/scripts/`**（通用扩展脚本目录，id = 相对 lua 根的路径去扩展名）；
+内置扩展脚本在 **`assets/lua/scripts/`**（通用扩展与在线包根）：散置单文件 id = 相对 lua 根的
+路径去扩展名；在线包 / 自打包是 `<id>/` 文件夹（`pack.json` + 平铺脚本 + `info/`）。
 击键音效脚本在键盘页专属的 **`assets/lua/KeySound/`**：`KeySound/unified_sound.lua`、
 `KeySound/class_sound.lua`。
 **AI 写脚本 / 图片体检 / OCR 文字识别 / 条码识别已迁到 `CurSeen-Scripts` 仓库**

@@ -11,21 +11,22 @@
 
 use windui::prelude::*;
 
-/// 面板可见的更新状态 + 更新流程的机器状态。
+/// 面板可见的更新状态。
 #[derive(Clone)]
 pub struct UpdateState {
     /// 状态行文本（"正在检查…" / "已是最新 2.0.0" / 错误信息）。
     pub status: Signal<String>,
-    /// 下载进度 0..=1；`-1` 表示未知总量或无进度。
+    /// 下载进度 0..=1；`-1` 表示未知总量、尚未开始下载或下载失败。
+    ///
+    /// About 页用它做**按钮 ↔ 进度条**的切换：`>= 0` 就是"下载已开始"。
     pub progress: Signal<f32>,
     /// 检查或下载进行中：按钮置灰，避免并发起两次。
     pub busy: Signal<bool>,
-    /// 已拿到下载地址，说明窗里的「更新」按钮可用。
-    pub ready: Signal<bool>,
-    /// 待下载的地址（由 `Available` 事件写入，`start_download` 读取）。
-    /// ★ 用 `Signal`：面板 clone 的是同一个单元格，Runtime 之后 `set_url` 写入的值
-    ///   能被按钮闭包实时读到（否则 `up.clone()` 拷的是建树时的空串，点下去永远是空）。
-    url: Signal<String>,
+    /// 下载已开始（含"还没收到第一块数据"与"服务端没给长度"两种阶段）。
+    ///
+    /// About 页用它做**按钮 ↔ 进度条**的切换；`progress` 单独不能担此任——
+    /// 服务端不给 `Content-Length` 时进度会一直是 `-1`（不确定态）。
+    pub downloading: Signal<bool>,
 }
 
 impl Default for UpdateState {
@@ -39,34 +40,29 @@ impl UpdateState {
     pub fn new() -> Self {
         // 本地清单是"离线也能知道自己旧不旧"的底账：启动时先给一句人话，
         // 点「检查更新」再联网替换它。
-        let status = match super::manifest::load_cached()
-            .and_then(|m| super::version::Version::parse(&m.version).map(|v| (m, v)))
-        {
-            Some((_, cached)) if cached > super::version::Version::current() => {
-                format!("本地清单显示 {} 可更新", cached)
-            }
-            Some((_, cached)) => format!("已是最新版本 {cached}"),
-            None => "尚未检查更新".to_string(),
-        };
+        let cached =
+            super::manifest::load_cached().and_then(|m| super::version::Version::parse(&m.version));
         Self {
-            status: signal(status),
+            status: signal(initial_status(cached)),
             progress: signal(-1.0f32),
             busy: signal(false),
-            ready: signal(false),
-            url: signal(String::new()),
+            downloading: signal(false),
         }
     }
+}
 
-    /// 待下载地址。没有时为 `""`（调用方据此判定"还不能被点"）。
-    /// 经 `Signal` 读：Runtime 之后写入的值，按钮闭包此刻能实时取到。
-    pub fn url(&self) -> String {
-        self.url.get()
-    }
-
-    /// 记录下载地址并放行说明窗的「更新」按钮（`Runtime::apply_update_event` 在
-    /// `UpdateEvent::Available` 时调用）。
-    pub fn set_url(&mut self, url: impl Into<String>) {
-        self.url.set(url.into());
+/// 启动时状态行的文案（纯函数，便于钉住"旧缓存不冒充最新"）。
+///
+/// - 缓存比当前新 ⇒ 可更新；
+/// - 相等 ⇒ 已是最新；
+/// - **缓存比当前旧 / 没有缓存 ⇒ 尚未检查**——升级后安装目录里的缓存还是上一版，
+///   这时说"已是最新版本 2.0.5"是假话（真机踩过）。
+fn initial_status(cached: Option<super::version::Version>) -> String {
+    let current = super::version::Version::current();
+    match cached {
+        Some(v) if v > current => format!("本地清单显示 {v} 可更新"),
+        Some(v) if v == current => format!("已是最新版本 {v}"),
+        _ => "尚未检查更新".to_string(),
     }
 }
 
@@ -75,18 +71,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_state_has_no_url_and_is_not_ready() {
+    fn new_state_is_idle_and_has_no_progress() {
         let s = UpdateState::new();
-        assert_eq!(s.url(), "", "初始状态不该有下载地址");
-        assert!(!s.ready.get());
         assert!(!s.busy.get());
+        assert!(!s.downloading.get());
         assert_eq!(s.progress.get(), -1.0);
+        assert!(!s.status.get().is_empty(), "启动时也该有一句人话");
     }
 
+    /// ★ 回归（2026-10-31 真机发现）：升级后缓存仍是上一版，不能因此说"已是最新"。
     #[test]
-    fn set_url_is_read_back() {
-        let mut s = UpdateState::new();
-        s.set_url("https://example.com/a.zip");
-        assert_eq!(s.url(), "https://example.com/a.zip");
+    fn stale_cache_is_not_reported_as_up_to_date() {
+        let current = crate::update::version::Version::current();
+        assert_eq!(
+            initial_status(Some(current)),
+            format!("已是最新版本 {current}")
+        );
+        assert_eq!(initial_status(None), "尚未检查更新");
+
+        let older = crate::update::version::Version::parse("0.0.1").expect("可解析");
+        assert_eq!(initial_status(Some(older)), "尚未检查更新");
+
+        let newer = crate::update::version::Version::parse("99.0.0").expect("可解析");
+        assert!(
+            initial_status(Some(newer)).contains("可更新"),
+            "缓存比当前新时必须提示可更新"
+        );
     }
 }

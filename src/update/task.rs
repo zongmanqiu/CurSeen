@@ -69,7 +69,7 @@ pub fn start_check(
         let ev = match manifest::check(&urls, source, Version::current()) {
             Ok(manifest::Outcome::Available(plan)) => UpdateEvent::Available {
                 latest: plan.latest,
-                url: plan.url,
+                urls: plan.urls,
                 sha256: plan.sha256,
                 notes: plan.notes,
             },
@@ -81,52 +81,95 @@ pub fn start_check(
     Ok(())
 }
 
-/// 发起「下载并安装」。地址由调用方给出（通常取自 [`UpdateState::url`]）。
-pub fn start_download(tx: &Option<Sender<UiMsg>>, url: &str, sha256: &str) -> Result<(), String> {
+/// 发起「下载并安装」。地址由调用方给出（通常取自 [`crate::update::UpdatePrompt`]）。
+///
+/// `urls` 顺序 = 先首选源、再备用源（可有一条空串）。首选源连不上/传输失败时
+/// **自动换另一路重试**——镜像选择只决定"先试哪个"，这与商店安装、清单拉取的语义一致。
+pub fn start_download(
+    tx: &Option<Sender<UiMsg>>,
+    urls: &[String; 2],
+    sha256: &str,
+) -> Result<(), String> {
     let tx = tx.clone().ok_or_else(|| "UI 通道尚未就绪".to_string())?;
-    if url.is_empty() {
+    let candidates = download_candidates(urls);
+    if candidates.is_empty() {
         return Err("没有可用的下载地址".to_string());
     }
     // ★ 同 `start_check`：已经在下载就不叠第二条（两条线程写同一个 zip 路径）。
     let Some(busy) = BusyGuard::take(&DOWNLOAD_BUSY) else {
         return Err("正在下载更新".to_string());
     };
-    let url = url.to_string();
     let expected_sha = sha256.to_ascii_lowercase();
 
     spawn(move || {
         let _busy = busy;
+        // 先报"已开始"：UI 立刻把按钮换成进度条，不让用户盯着没反应的按钮等网络。
+        let _ = tx.send(UiMsg::Update(UpdateEvent::DownloadStarted));
         let dest = downloader::update_zip_path();
-        // 进度节流：只在百分比变化时发消息（否则 1.5MB 会发二十几条，白刷 UI）。
-        let mut last_pct = i32::MIN;
-        let result = downloader::download_to_file(&url, &dest, |received, total| {
-            // `total == 0`（服务端未给长度）时 `checked_div` 返回 `None` → 统一记 -1，
-            // 这样"未知总量"只会发一条消息（不会每块都发）。
-            let pct = received
-                .saturating_mul(100)
-                .checked_div(total)
-                .map_or(-1, |p| p.min(100) as i32);
-            if pct != last_pct {
-                last_pct = pct;
-                let _ = tx.send(UiMsg::Update(UpdateEvent::DownloadProgress {
-                    received,
-                    total,
-                }));
+        let mut errors: Vec<String> = Vec::new();
+        let mut downloaded = false;
+        for url in &candidates {
+            // 进度节流：只在百分比变化时发消息（否则 1.5MB 会发二十几条，白刷 UI）。
+            let mut last_pct = i32::MIN;
+            let result = downloader::download_to_file(url, &dest, |received, total| {
+                // `total == 0`（服务端未给长度）时 `checked_div` 返回 `None` → 统一记 -1，
+                // 这样"未知总量"只会发一条消息（不会每块都发）。
+                let pct = received
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .map_or(-1, |p| p.min(100) as i32);
+                if pct != last_pct {
+                    last_pct = pct;
+                    let _ = tx.send(UiMsg::Update(UpdateEvent::DownloadProgress {
+                        received,
+                        total,
+                    }));
+                }
+            });
+            match result {
+                Ok(()) => {
+                    downloaded = true;
+                    break;
+                }
+                Err(e) => {
+                    let label = source_label(url);
+                    log::warn!("更新包下载失败（{label}）：{e}");
+                    errors.push(format!("{label}：{e}"));
+                }
             }
-        });
-        let ev = match result {
-            Ok(()) => match downloader::file_sha256(&dest) {
+        }
+        let ev = if !downloaded {
+            UpdateEvent::DownloadFailed {
+                error: errors.join("；"),
+            }
+        } else {
+            match downloader::file_sha256(&dest) {
                 Ok(actual) if actual == expected_sha => UpdateEvent::Downloaded { path: dest },
                 Ok(actual) => UpdateEvent::DownloadFailed {
                     error: format!("更新包 sha256 不匹配（期望 {expected_sha}，实际 {actual}）"),
                 },
                 Err(error) => UpdateEvent::DownloadFailed { error },
-            },
-            Err(error) => UpdateEvent::DownloadFailed { error },
+            }
         };
         let _ = tx.send(UiMsg::Update(ev));
     });
     Ok(())
+}
+
+/// 可尝试的下载地址（保持调用方给的顺序，跳过空串）。
+///
+/// 顺序 = 首选源 → 备用源；下载失败按序换源重试（镜像选择只决定先后）。
+fn download_candidates(urls: &[String; 2]) -> Vec<String> {
+    urls.iter().filter(|u| !u.is_empty()).cloned().collect()
+}
+
+/// 下载地址对应的镜像名（只用于日志与错误文案）。
+fn source_label(url: &str) -> &'static str {
+    if url.contains("github.com") {
+        "GitHub"
+    } else {
+        "Gitee"
+    }
 }
 
 /// 起一个分离的更新线程。线程名固定，便于在调试器里认出来。
@@ -148,7 +191,10 @@ mod tests {
         // 事件要经通道跨线程传送，必须 `Send`；`UiMsg` 靠 `Clone`，事件也得跟得上。
         let a = UpdateEvent::Available {
             latest: "1.2.3".into(),
-            url: "https://example.com/a.zip".into(),
+            urls: [
+                "https://gitee.com/a.zip".into(),
+                "https://github.com/a.zip".into(),
+            ],
             sha256: "a".repeat(64),
             notes: "notes".into(),
         };
@@ -163,7 +209,63 @@ mod tests {
     #[test]
     fn start_without_channel_reports_error() {
         assert!(start_check(&None, [String::new(), String::new()], 0).is_err());
-        assert!(start_download(&None, "https://x/a.zip", &"a".repeat(64)).is_err());
+        assert!(start_download(
+            &None,
+            &[
+                "https://gitee.com/a.zip".to_string(),
+                "https://github.com/a.zip".to_string()
+            ],
+            &"a".repeat(64)
+        )
+        .is_err());
+    }
+
+    /// 下载失败的日志/文案要能认出是哪一路镜像。
+    #[test]
+    fn source_label_names_the_mirror() {
+        assert_eq!(
+            source_label("https://gitee.com/qiuzongman/curseen/releases/download/2.0.5/x.zip"),
+            "Gitee"
+        );
+        assert_eq!(
+            source_label("https://github.com/zongmanqiu/CurSeen/releases/download/2.0.5/x.zip"),
+            "GitHub"
+        );
+    }
+
+    /// 候选地址保持顺序、跳过空串：首选源连不上时才有东西可换。
+    #[test]
+    fn download_candidates_keep_order_and_skip_empty() {
+        assert_eq!(
+            download_candidates(&[
+                "https://github.com/a.zip".to_string(),
+                "https://gitee.com/a.zip".to_string()
+            ]),
+            ["https://github.com/a.zip", "https://gitee.com/a.zip"],
+            "首选源必须排第一"
+        );
+        assert_eq!(
+            download_candidates(&["https://gitee.com/a.zip".to_string(), String::new()]),
+            ["https://gitee.com/a.zip"],
+            "备用为空时只剩一条"
+        );
+        assert!(download_candidates(&[String::new(), String::new()]).is_empty());
+    }
+
+    /// 点下「更新」后必须先发 DownloadStarted，再开始碰网络——否则 About 页要等
+    /// 第一块数据（或失败）才把按钮换成进度条，就是"点了没反馈"。
+    #[test]
+    fn download_reports_started_before_touching_the_network() {
+        let src = include_str!("task.rs");
+        let cut = src.rfind("\n#[cfg(test)]").unwrap_or(src.len());
+        let p = &src[..cut];
+        let started = p
+            .find("UpdateEvent::DownloadStarted")
+            .expect("发送端缺少 DownloadStarted");
+        let download = p
+            .find("downloader::download_to_file")
+            .expect("找不到下载调用");
+        assert!(started < download, "必须先报已开始，再开始下载");
     }
 
     /// ★ 回归（2026-09-30）：检查 / 下载各只允许一个在跑，第二次 take 必须拿不到——

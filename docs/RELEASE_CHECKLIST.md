@@ -14,6 +14,8 @@
 - [ ] 生成并提交 `update.json`：`python build/gen_update_json.py --version <版本> --zip <CurSeen_<版本>.zip>`；
       它从 HISTORY 当前版本段取 `notes`、算 zip 的 sha256，并写 Gitee/GitHub 两个 zip 地址
 - [ ] 上传 release 资产后，确认 `update.json` 的两个 zip 地址都能下载（否则更新按钮会失败）
+- [ ] 下载源默认是 **Gitee**（`StoreSettings::default().source == 0`，有配置单测钉住）；
+      `update.json` / `scripts.json` 两条地址都属于官方仓库，不允许第三方镜像
 
 ## 二、质量门禁（按顺序，全绿才继续）
 
@@ -45,6 +47,10 @@
 - [ ] `README.md` —— 顶层目录树 / 构建方式 / 技术栈
 - [ ] `THIRD-PARTY-NOTICES.md` —— 依赖版本变化（下载地址同步 `build/deps.txt`）
 - [ ] `HISTORY.md` —— 顶部追加本版本小节
+- [ ] Lua 文档 —— 改了脚本 API / 包格式：同步 `assets/lua/API.md` 后跑
+      `python build/gen_manual_tables.py`（把三张接口表镜像进 `assets/lua/Lua脚本手册.html`）；
+      作者指南里的目录 / 热重载 / v2 包规则同步更新
+- [ ] 隐藏快捷键手册 —— 改了固定键 / 脚本窗按键：`assets/manual/隐藏快捷键手册.md` 与 `.html` 两份同改
 - [ ] `patches/wind-ui-rust-0.30.0/PATCHES.md` —— 本版本动过 windui 就补章节（同步归档改后完整文件）
 
 ## 四、打包
@@ -53,6 +59,9 @@
       exe；`curseen-rec.exe` 子进程方案已废弃，deploy.py 会清掉 build/ 里遗留的旧副本）
       + `assets/` + `LICENSE` +
       `THIRD-PARTY-NOTICES.md` + `licenses/`
+- [ ] **assets 用源码树 `main/assets/`，不要直接打包 `build/assets/`**：后者是运行期目录，
+      含本机已安装的官方包与旧文件。发行 zip 排除 `assets/docs/update.json`——清单里的
+      sha256 是 zip 自身的哈希，不能放进被哈希的包里（否则自指）；`scripts.json` 可随包。
 - [ ] **许可文件随包分发已自动化**：步骤 ⑥ 同步并复核三者齐备，缺一即失败
       —— 直接整目录取用即可，**不要**再从 `main/` 手工复制、也不要手工编辑 `build/` 里的副本。
       口径与理由见《开发指南.md》§八；机制见 `build/build_readme.md` §四
@@ -99,16 +108,19 @@
       （2026-10-07 修的「应用启动中」锁存，回归点）；关闭 CurSeen 后系统剪贴板
       恢复正常（屏蔽格式不残留）—— 自动：`clip_focus_restore` / `qq_paste`（真机）
       + `clipboard_history.rs` 单测；**悬停转圈与退出后格式不残留仅人手**
-- [ ] 设置页两张**合并卡**（2026-10-07 新结构）：「功能开关」=「模块开关」+「脚本开关」
-      两段、「快捷键」=「模块快捷键」+「脚本快捷键」两段；段名是**暗红加粗**、与数据行
+- [ ] 设置页三张**合并 / 多段卡**：「功能开关」= 模块开关 + 脚本开关两段、「快捷键」= 模块快捷键 +
+      脚本快捷键两段、「高级」= 下载源 + 图层 + 工作文件夹 + 系统四段；段名是**暗红加粗**、与数据行
       **同高**（行距在段名处不能塌），段间有横线；脚本段为空时给的是提示文字而非空框
       —— 仅人手（排版判据要真机截图；卡 id 与行序有 ui 单测钉住）
-- [ ] 设置页「系统 > 管理员权限」行名随状态四态显示：`(未启用)` / `(重启后有效)` /
+- [ ] 脚本页第一张卡是「官方资源下载」：显示「N 个可下载」+ 灰字当前来源 + 刷新；下载源在
+      「高级」卡切换后，商店行尾动作与计数当帧重算
+      —— 自动：`ui::pages::lua::store_card_is_the_first_card_on_the_script_page`
+- [ ] 设置页「高级 > 管理员权限」行名随状态四态显示：`(未启用)` / `(重启后有效)` /
       `(重启后取消)` / `(已启用)`；勾选后**重启**才生效，勾上那一次启动会弹 UAC 确认；
       不勾则普通权限启动（出厂值）
-      —— 自动：`global.rs::system_card_wires_admin_launch_toggle_and_hint`（四态文案齐备）
+      —— 自动：`global.rs::advanced_card_holds_all_four_merged_groups`（四态文案齐备）
       ；UAC 弹窗与重启生效仅人手
-- [ ] 自动更新：检查 → 下载 → 安装 —— 仅人手
+- [ ] 自动更新：检查 → 说明窗 → 更新（按钮原地变进度条）→ 下载 → 校验 → 重启 —— 仅人手
 - [ ] 托盘「退出」后系统光标恢复正常；用任务管理器强杀后再启动，启动时应自动恢复
       （显式恢复在 `run_overlay` 的 `app.run()` 之后；首实例启动还会无条件重载一次系统光标）
 
@@ -117,6 +129,8 @@
 ## 六、上传与发行
 
 - [ ] 仓库只提交 `main/`（`.3rdParty/` `temp/` `build/` 都在仓库外）
+- [ ] **先上传 zip，再推送 `update.json`**：清单里的两个下载地址在资产上传前是 404，
+      提前推送会让更新按钮必然失败
 - [ ] 打 tag / 上传发行包
 - [ ] 自动更新地址与实际下载地址一致
 

@@ -107,7 +107,9 @@ pub fn download_to_file<F: FnMut(u64, u64)>(
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let mut resp = req.call().map_err(|e| format!("下载失败: {e}"))?;
+    // 这里只给"连接这一层"的上下文；"下载失败"的外层前缀由调用方加，避免出现
+    // 「下载失败：下载失败: …」这种重复（更新页与商店各自有自己的动作名）。
+    let mut resp = req.call().map_err(|e| format!("连接失败: {e}"))?;
     // `content_length()` 在分块传输/gzip 下可能为 None，那时退化成"未知总量"。
     let total = resp.body().content_length().unwrap_or(0);
     let mut reader = resp.body_mut().with_config().limit(max_bytes).reader();
