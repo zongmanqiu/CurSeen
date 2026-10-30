@@ -61,6 +61,8 @@
 | `build/deploy.py` / `gen_licenses.py` / `sync_assets.py` / `gate.py` / `boot_check.py` / `check_deps.ps1` / `layering_scan.py` / `hygiene_scan.py` | 构建 / 部署 / 许可同步 / 按需门禁 / 启动冒烟 / 依赖体检 / 分层体检 / 静态异味体检 |
 | `build/gen_manual_tables.py` | 把 `assets/lua/API.md` 的三张接口表机械镜像进《Lua 脚本手册》第二部分；改 API 后必跑 |
 | `build/gen_update_json.py` | 发版时从 HISTORY 当前版本段取 notes、算发行 zip sha256、写 Gitee/GitHub 两个地址到 `update.json` |
+| `build/pack_release.py` | **唯一发行 zip 打包器**：`build/curseen.exe` + `main/assets/` + 许可 → `CurSeen_<version>.zip`，排除自指的 `assets/docs/update.json`；禁止手工压缩 `build/` |
+| `build/check_update_asset.py` | 上传后核对：下载 Gitee/GitHub 两个 zip，逐字节 sha256 必须等于 `update.json`（`--local` 用于上传前核对本地包） |
 | `examples/gen_icon.rs` | 由矢量源 `assets/icons/icon*.svg`（+ `images/*.svg` 二维码）逐档光栅化出 `tray_<N>[_red].rgba`（托盘五档）+ `app.ico`（exe/窗口）+ 二维码 PNG；换图标/二维码只改 SVG 再 `cargo run --example gen_icon --features icon-gen` |
 | `build/app.rc` | 图标资源脚本（`MAINICON` ← `assets/icons/app.ico`），由 `build.rs` 经 `rc.exe` 编译；无 SDK 时跳过 |
 

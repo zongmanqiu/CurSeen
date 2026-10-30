@@ -143,6 +143,9 @@ build/
 | `deploy.py` | 拷 `temp/target/release/curseen.exe` → `<项目根>/build/`，MD5 + 大小对账；顺带调用 `gen_licenses.py`；报告写 `temp/deploy_report.txt` |
 | `gen_licenses.py` | 把 `LICENSE` / `THIRD-PARTY-NOTICES.md` / `licenses/`（自 `.3rdParty/` 逐字拷贝）同步进 `build/`；源缺失即返回 1；报告写 `temp/licenses_report.txt` |
 | `sync_assets.py` | `main/assets/` → `<项目根>/build/assets/` **单向**同步（只增和覆盖，**从不删**——`build/assets/` 是运行期数据目录，用户会在里面放自己的脚本/音效） |
+| `pack_release.py` | **唯一发行 zip 打包器**（在 `main/` 下）：`build/curseen.exe` + `main/assets/` + `LICENSE` + `build/licenses/` → `temp/release/CurSeen_<版本>.zip`；排除 `assets/docs/update.json`，UTF-8 包名；禁止手工压缩 `build/` |
+| `gen_update_json.py` | 由 HISTORY + 发行 zip 生成 `update.json`（notes / sha256 / 双源地址） |
+| `check_update_asset.py` | 上传后核对两个镜像：下载 zip，sha256 必须等于 `update.json`；`--local <zip>` 用于上传前核对 |
 | `gate.py` | 按需跑测试组（`python build/gate.py config runtime`），省的是**信号**不是时间 |
 | `layering_scan.py` | 分层体检（只读，`python build/layering_scan.py` → 「违规 0 处」） |
 | `hygiene_scan.py` | 静态异味体检（只读，`python build/hygiene_scan.py` → 「违规 0 处」）：硬编码绝对路径 / 调试残留（`println!` 等）/ 未完成标记（`TODO:`·`FIXME:`·`XXX:`）/ 裸 `OpenClipboard` / struct literal 里的临时宽字符缓冲 / **指针类 unsafe 缺 `// SAFETY:`** / **本机真实路径泄漏（全树，第 1~6 查之外唯一扫 `main/` 全部文本文件的检查）**；`#[cfg(test)]` 之后与纯注释性提及自动豁免 |

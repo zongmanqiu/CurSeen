@@ -11,9 +11,14 @@
 - [ ] `README.md` → 下载链接文字里的版本号（"下载最新版 x.y.z"，此处是手写字面量）
 - [ ] `HISTORY.md` → 顶部把 `（开发中）` 小节定为正式版本号，并把该节**压缩为面向使用者的
       功能 / 修复要点**（旧版本保持要点级，版本再多也不超篇幅上限）
-- [ ] 生成并提交 `update.json`：`python build/gen_update_json.py --version <版本> --zip <CurSeen_<版本>.zip>`；
-      它从 HISTORY 当前版本段取 `notes`、算 zip 的 sha256，并写 Gitee/GitHub 两个 zip 地址
-- [ ] 上传 release 资产后，确认 `update.json` 的两个 zip 地址都能下载（否则更新按钮会失败）
+- [ ] 用**唯一打包器**生成上传 zip：`python build/pack_release.py --version <版本>`。
+      ★ 禁止手工压缩 `build/`：会带入 `assets/docs/update.json`（自指哈希），且文件名编码
+      不受控（Windows 压缩工具可能写成 GBK）；打包器用源码树 `main/assets` 并以 UTF-8 写包名。
+- [ ] 生成 `update.json`：`python build/gen_update_json.py --version <版本> --zip <刚打出的 zip>`；
+      再用 `--out assets/docs/update.json` 生成随包缓存。**两次的 --zip 必须是同一个文件**
+- [ ] 上传前先核对本地包：`python build/check_update_asset.py --local <zip>` → `本地核对通过`
+- [ ] 上传 release 资产后，运行 `python build/check_update_asset.py`：Gitee / GitHub 两个镜像
+      都必须 `[ok]` 且 sha256 与 `update.json` 一致；不通过不得宣布发布
 - [ ] 下载源默认是 **Gitee**（`StoreSettings::default().source == 0`，有配置单测钉住）；
       `update.json` / `scripts.json` 两条地址都属于官方仓库，不允许第三方镜像
 
@@ -55,13 +60,12 @@
 
 ## 四、打包
 
-- [ ] 产物取自 `<项目根>/build/`：`curseen.exe`（录制载体 = **进程内线程**，只有一个
-      exe；`curseen-rec.exe` 子进程方案已废弃，deploy.py 会清掉 build/ 里遗留的旧副本）
-      + `assets/` + `LICENSE` +
-      `THIRD-PARTY-NOTICES.md` + `licenses/`
-- [ ] **assets 用源码树 `main/assets/`，不要直接打包 `build/assets/`**：后者是运行期目录，
-      含本机已安装的官方包与旧文件。发行 zip 排除 `assets/docs/update.json`——清单里的
-      sha256 是 zip 自身的哈希，不能放进被哈希的包里（否则自指）；`scripts.json` 可随包。
+- [ ] 产物用 `python build/pack_release.py --version <版本>` 生成（输出在仓库外
+      `temp/release/CurSeen_<版本>.zip`）。它取 `build/curseen.exe` + `main/assets/` +
+      `LICENSE` + `build/licenses/`，并**排除 `assets/docs/update.json`**
+- [ ] **禁止手工压缩 `build/`**：`build/assets/` 是运行期目录（含本机已装包/旧文件），
+      且 Windows 工具可能用 ANSI/GBK 写中文文件名、还会把自指的 `update.json` 带进去。
+      2026-10-31 的 2.1.1 首次更新失败就是手工包与清单哈希不一致（exe 是对的，包不是）。
 - [ ] **许可文件随包分发已自动化**：步骤 ⑥ 同步并复核三者齐备，缺一即失败
       —— 直接整目录取用即可，**不要**再从 `main/` 手工复制、也不要手工编辑 `build/` 里的副本。
       口径与理由见《开发指南.md》§八；机制见 `build/build_readme.md` §四
@@ -131,6 +135,8 @@
 - [ ] 仓库只提交 `main/`（`.3rdParty/` `temp/` `build/` 都在仓库外）
 - [ ] **先上传 zip，再推送 `update.json`**：清单里的两个下载地址在资产上传前是 404，
       提前推送会让更新按钮必然失败
+- [ ] **上传后必须跑 `python build/check_update_asset.py`**：两个镜像都 `[ok]` 才算发布完成；
+      手工包 / 传错文件 / 镜像未同步都会被它当场拦下
 - [ ] 打 tag / 上传发行包
 - [ ] 自动更新地址与实际下载地址一致
 
