@@ -78,20 +78,20 @@
   {
     "id": "AI",
     "name": "AI 写脚本",
-    "version": "0.1.0",
-    "description": "AI 写脚本：多轮对话让 AI 帮你编写、修改 CurSeen 的 Lua 脚本；系统提示词自带 CurSeen Lua API 速查，可填 API 地址、模型与 API Key，支持快捷键呼出对话窗。",
-    "size": 23606,
-    "min_host": "2.0.5",
+    "version": "0.2.0",
+    "description": "AI 写脚本：多轮对话让 AI 帮你编写、修改 CurSeen 的 Lua 脚本；系统提示词自带与 2.1.0 对齐的完整 API 速查（ext / 贴图 / 文件 / 剪贴板 / v2 包），可填 API 地址、模型与 API Key，支持快捷键呼出对话窗。",
+    "size": 28878,
+    "min_host": "2.1.0",
     "dir": "Packs/AI",
     "urls": {
-      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/AI_0.1.0/AI_0.1.0.zip",
-      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/AI_0.1.0/AI_0.1.0.zip"
+      "gitee": "https://gitee.com/qiuzongman/CurSeen-Scripts/releases/download/AI_0.2.0/AI_0.2.0.zip",
+      "github": "https://github.com/zongmanqiu/CurSeen-Scripts/releases/download/AI_0.2.0/AI_0.2.0.zip"
     },
     "author": "CurSeen",
     "license": "AGPL-3.0",
-    "released": "2026-10-30",
-    "api": 1,
-    "unpacked_size": 56462,
+    "released": "2026-10-31",
+    "api": 3,
+    "unpacked_size": 67983,
     "file_count": 6
   },
   {

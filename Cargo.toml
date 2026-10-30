@@ -1,6 +1,6 @@
 [package]
 name = "curseen-ui"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.94"
 # ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。

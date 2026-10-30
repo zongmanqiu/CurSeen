@@ -569,9 +569,10 @@ mod tests {
         assert!(!eng.get_hide_cursor());
     }
 
-    /// AI 速查里的两段完整示例必须在**真引擎**里加载并跑通回调——示例是给 AI 抄的
-    /// 模板，模板本身跑不通等于教 AI 写坏脚本（2026-09-30 用户要求补示例时一并钉住）。
-    /// 抽取规则：官方包 `Packs/AI/scripts/ai_chat_api.txt` 里的 ```lua 围栏块，应恰好两段。
+    /// AI 速查里的三段完整示例必须在**真引擎**里加载并跑通回调——示例是给 AI 抄的
+    /// 模板，模板本身跑不通等于教 AI 写坏脚本（2026-09-30 用户要求补示例时一并钉住；
+    /// 2026-10-31 补悬浮标“静止 N 秒”示例后改为三段，并允许延迟出画的示例先等时间）。
+    /// 抽取规则：官方包 `Packs/AI/scripts/ai_chat_api.txt` 里的 ```lua 围栏块，应恰好三段。
     #[test]
     fn ai_reference_examples_run_in_the_real_engine() {
         let txt = std::fs::read_to_string(concat!(
@@ -595,8 +596,8 @@ mod tests {
         }
         assert_eq!(
             blocks.len(),
-            2,
-            "速查应恰好两段完整示例（拖尾 + 复合），实得 {}",
+            3,
+            "速查应恰好三段完整示例（拖尾 + 复合 + 悬浮标），实得 {}",
             blocks.len()
         );
 
@@ -609,6 +610,8 @@ mod tests {
             ("size".to_string(), Json::from(10.0f64)),
             ("fade".to_string(), Json::from(1.2f64)),
             ("life".to_string(), Json::from(0.6f64)),
+            ("delay".to_string(), Json::from(1.0f64)),
+            ("radius".to_string(), Json::from(18.0f64)),
             ("color".to_string(), Json::String("#7FD4FFCC".into())),
         ]);
 
@@ -623,26 +626,42 @@ mod tests {
                 schema.raw_len() >= 1,
                 "示例 {i} 的 schema() 应返回非空参数表"
             );
+            eng.set_wall_ms(10_000.0).unwrap();
             // 有 init 就调（示例 2 没写 init，与宿主同口径静默跳过）。
             if let Ok(Some(f)) = eng.lua().globals().get::<Option<mlua::Function>>("init") {
                 f.call::<()>(()).unwrap();
             }
             eng.update_env((120.0, 90.0), (120.0, 90.0), 0.4, (1920.0, 1080.0), "trail")
                 .unwrap();
-            // 各回调真跑一遍（缺失的静默跳过 = 宿主同口径）；draw 必须产出指令。
+            // 各回调真跑一遍（缺失的静默跳过 = 宿主同口径）。
             let _ = eng.call_on_move(120.0, 90.0, 0.3, &params);
             let _ = eng.call_on_button("middle", 120.0, 90.0, 0.3, &params);
             let _ = eng.call_step(0.016, 0.316, &params);
-            let mut list = crate::core::draw::DrawList::new();
-            crate::scripting::api_draw::set_draw_target(&mut list);
-            let _ = eng
-                .call_draw(&params)
-                .unwrap_or_else(|e| panic!("示例 {i} 的 draw 跑挂：{e}"));
-            crate::scripting::api_draw::clear_draw_target();
-            assert!(
-                list.len_all() > 0,
-                "示例 {i} 的 draw 应产出至少一条绘图指令"
-            );
+            let draw = |eng: &ScriptingEngine| {
+                let mut list = crate::core::draw::DrawList::new();
+                crate::scripting::api_draw::set_draw_target(&mut list);
+                let v = eng
+                    .call_draw(&params)
+                    .unwrap_or_else(|e| panic!("示例 {i} 的 draw 跑挂：{e}"));
+                crate::scripting::api_draw::clear_draw_target();
+                let frames = match v {
+                    mlua::Value::Integer(n) => n,
+                    mlua::Value::Number(n) => n as i64,
+                    _ => 0,
+                };
+                (frames, list.len_all())
+            };
+            let (frames, mut drawn) = draw(&eng);
+            // 悬浮标示例要等“静止 N 秒”才出画，且必须靠 draw 返回值续帧。
+            if drawn == 0 && body.contains("still_ms") {
+                assert!(frames > 0, "示例 {i} 必须请求续帧，否则等不到时间");
+                eng.set_wall_ms(12_000.0).unwrap();
+                let _ = eng.call_step(0.016, 2.0, &params);
+                let (frames2, drawn2) = draw(&eng);
+                assert!(frames2 > 0, "示例 {i} 到时间后仍要续帧");
+                drawn = drawn2;
+            }
+            assert!(drawn > 0, "示例 {i} 的 draw 应产出至少一条绘图指令");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

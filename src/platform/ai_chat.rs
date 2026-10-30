@@ -31,13 +31,15 @@
 //! # 交互约定
 //!
 //! 输入框 `Ctrl+Enter` 发送（子类化 EDIT，仿 `sticky.rs` 的 `edit_wndproc` 链：原过程
-//! 存 `GWLP_USERDATA`），`Esc` 关窗；多轮上下文在窗口内自持，关窗即弃；「清除」清空
-//! 对话区与历史（等待回复时忽略，避免回复追加进已清空的历史造成 user/assistant 错位）。
+//! 存 `GWLP_USERDATA`），`Esc` 关窗；多轮上下文落在
+//! `<程序目录>/data/ai_chat/history.json`，关窗/重启后自动恢复，只有「清除」才清空
+//! （2026-10-31 用户口径：误关窗口后还能回来接着聊）。
 //!
 //! 状态（配置 + 历史 + 忙标记）挂**线程局部**：窗、泵、子类过程全在调用线程上
 //! 派发，thread_local 即可；同线程重复呼出（热键二连）把已开的窗提到前台，不重开。
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use windows::core::PCWSTR;
@@ -139,6 +141,98 @@ fn trim_history(history: &mut Vec<(String, String)>) {
         let drop = history.len() - max;
         history.drain(..drop);
     }
+}
+
+/// AI 对话历史缓存路径：`<程序目录>/data/ai_chat/history.json`。
+///
+/// 只存 user/assistant 消息（system 每次发送由脚本速查现拼），不存 API Key。
+/// 关窗/重启后恢复；「清除」写空数组。文件是纯缓存：坏了/过大就当没有，不影响开窗。
+const HISTORY_FILE_NAME: &str = "history.json";
+const HISTORY_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn history_path() -> PathBuf {
+    crate::core::paths::data_dir()
+        .join("data")
+        .join("ai_chat")
+        .join(HISTORY_FILE_NAME)
+}
+
+/// 解析历史 JSON（对象 `{history:[…]}` 或裸数组都认）；坏数据返回空表。
+fn parse_history(text: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let arr = v
+        .get("history")
+        .and_then(|h| h.as_array())
+        .or_else(|| v.as_array());
+    let Some(arr) = arr else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let role = item.get("role").and_then(|x| x.as_str()).unwrap_or("");
+        let content = item.get("content").and_then(|x| x.as_str()).unwrap_or("");
+        if matches!(role, "user" | "assistant") && !content.trim().is_empty() {
+            out.push((role.to_string(), content.to_string()));
+        }
+    }
+    trim_history(&mut out);
+    out
+}
+
+fn load_history_from(path: &Path) -> Vec<(String, String)> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    if meta.len() > HISTORY_FILE_MAX_BYTES {
+        log::warn!(
+            "AI 对话历史过大（{} 字节），忽略：{}",
+            meta.len(),
+            path.display()
+        );
+        return Vec::new();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_history(&text),
+        Err(e) => {
+            log::warn!("读 AI 对话历史失败（{}）：{e}", path.display());
+            Vec::new()
+        }
+    }
+}
+
+fn load_history() -> Vec<(String, String)> {
+    load_history_from(&history_path())
+}
+
+fn save_history_to(path: &Path, history: &[(String, String)]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        log::warn!("建 AI 对话历史目录失败（{}）：{e}", parent.display());
+        return;
+    }
+    let messages: Vec<serde_json::Value> = history
+        .iter()
+        .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+        .collect();
+    let text = serde_json::json!({ "version": 1, "history": messages }).to_string();
+    // 先写临时文件再替换：中途失败不会留下半截 JSON（与 config 的耐久写同一口径）。
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
+        log::warn!("写 AI 对话历史临时文件失败（{}）：{e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        log::warn!("替换 AI 对话历史失败（{}）：{e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn save_history(history: &[(String, String)]) {
+    save_history_to(&history_path(), history);
 }
 
 /// 一窗之内的全部可变状态（线程局部：窗与泵同线程）。
@@ -308,6 +402,16 @@ pub fn chat_window(owner_hwnd: isize, url: &str, model: &str, key: &str, sys: &s
     update_scrollbars(hwnd);
     // 开窗先亮出「这个窗口能做什么」（只上屏不入 history，见 WELCOME 注释）。
     append_message(hwnd, CI_DISPLAY, WELCOME);
+    // 恢复上次对话：只上屏，不重复入账；history 直接进入 ChatState。
+    // ★ 2026-10-31 用户口径：误关窗口后要能回来接着聊；只有「清除」才清空。
+    let history = load_history();
+    if !history.is_empty() {
+        append_message(hwnd, CI_DISPLAY, "── 上次对话（点「清除」清空） ──");
+        for (role, content) in &history {
+            let label = if role == "user" { "我" } else { "AI" };
+            append_message(hwnd, CI_DISPLAY, &format!("── {label} ──\n{content}"));
+        }
+    }
 
     CHAT_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
     CHAT.with(|c| {
@@ -316,7 +420,7 @@ pub fn chat_window(owner_hwnd: isize, url: &str, model: &str, key: &str, sys: &s
             key: key.to_string(),
             model: model.to_string(),
             sys: sys.to_string(),
-            history: Vec::new(),
+            history,
             busy: false,
             ticks: 0,
         })
@@ -916,14 +1020,17 @@ fn chat_send(hwnd: HWND) {
                     st.url.clone(),
                     st.key.clone(),
                     build_body(&st.model, &st.sys, &st.history),
+                    // 用户消息先落盘：请求进行中关窗/退出，重新打开仍能看到这一问。
+                    st.history.clone(),
                 ))
             }
             _ => None,
         }
     });
-    let Some((url, key, body)) = ready else {
+    let Some((url, key, body, saved)) = ready else {
         return;
     };
+    save_history(&saved);
 
     let hm = now_hms();
     append_message(hwnd, CI_DISPLAY, &format!("── {hm} 我 ──\n{text}"));
@@ -997,13 +1104,19 @@ fn chat_result(hwnd: HWND, wparam: WPARAM) {
     let hm = now_hms();
     match extract_reply(status, &body) {
         Ok(reply) => {
-            CHAT.with(|c| {
+            let saved = CHAT.with(|c| {
                 let mut b = c.borrow_mut();
                 if let Some(st) = b.as_mut() {
                     st.history.push(("assistant".to_string(), reply.clone()));
                     trim_history(&mut st.history);
+                    Some(st.history.clone())
+                } else {
+                    None
                 }
             });
+            if let Some(history) = saved {
+                save_history(&history);
+            }
             // reply.trim()：模型回复常自带前后空行——掐头去尾，块间空行交给
             // append_message 统一保证（2026-09-29 起的口径，2026-09-30 加固）。
             append_message(
@@ -1047,6 +1160,8 @@ fn chat_clear(hwnd: HWND) {
             st.history.clear();
         }
     });
+    // 「清除」同时清掉磁盘上的上次对话；否则下次开窗又回来了（2026-10-31 用户口径）。
+    save_history(&[]);
     unsafe {
         if let Ok(disp) = GetDlgItem(Some(hwnd), CI_DISPLAY) {
             let blank = wide("");
@@ -1456,6 +1571,79 @@ mod tests {
     fn truncate_tail_keeps_head_and_marks() {
         assert_eq!(truncate_tail("abcdef", 4), "abcd…");
         assert_eq!(truncate_tail("abc", 10), "abc");
+    }
+
+    fn tmp_history_path(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("curseen_ai_history_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("history.json")
+    }
+
+    /// ★ 2026-10-31 用户口径：AI 对话要保留最后一次会话，误关窗口后能回来接着聊；
+    /// 只有「清除」才清空。这里钉住磁盘往返。
+    #[test]
+    fn history_roundtrips_through_disk() {
+        let path = tmp_history_path("roundtrip");
+        let history = vec![
+            ("user".to_string(), "帮我写个拖尾".to_string()),
+            ("assistant".to_string(), "effect_name = \"x\"".to_string()),
+            ("user".to_string(), "再改一下".to_string()),
+        ];
+        save_history_to(&path, &history);
+        assert_eq!(load_history_from(&path), history);
+        // 「清除」= 写空表 ⇒ 下次开窗不再恢复。
+        save_history_to(&path, &[]);
+        assert!(load_history_from(&path).is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_or_foreign_history_is_ignored() {
+        let path = tmp_history_path("corrupt");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_history_from(&path).is_empty());
+
+        // 未知 role、空正文都要跳过；合法消息保留。
+        std::fs::write(
+            &path,
+            r#"{"history":[{"role":"system","content":"x"},{"role":"user","content":"  "},{"role":"user","content":"问"},{"role":"assistant","content":"答"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_history_from(&path),
+            vec![
+                ("user".to_string(), "问".to_string()),
+                ("assistant".to_string(), "答".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn history_is_capped_to_max_turns() {
+        let path = tmp_history_path("cap");
+        let mut history = Vec::new();
+        for i in 0..HISTORY_MAX_TURNS * 3 {
+            history.push(("user".to_string(), format!("q{i}")));
+            history.push(("assistant".to_string(), format!("a{i}")));
+        }
+        save_history_to(&path, &history);
+        let loaded = load_history_from(&path);
+        assert_eq!(loaded.len(), HISTORY_MAX_TURNS * 2);
+        assert_eq!(
+            loaded.last().unwrap().1,
+            format!("a{}", HISTORY_MAX_TURNS * 3 - 1)
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn history_path_lives_under_app_data() {
+        let p = history_path();
+        assert!(p.ends_with(Path::new("data").join("ai_chat").join("history.json")));
+        assert!(p.starts_with(crate::core::paths::data_dir()));
     }
 
     /// 通道顺序回归锁（2026-09-29）：[`win_util::colorref`] 收 `R,G,B,A`；写成

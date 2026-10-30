@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.1.0 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.0/CurSeen_2.1.0.zip)**
- ｜ **[⬇️ 下载 2.1.0 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.0/CurSeen_2.1.0.zip)**
+**[⬇️ 下载 2.1.1 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.1/CurSeen_2.1.1.zip)**
+ ｜ **[⬇️ 下载 2.1.1 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.1/CurSeen_2.1.1.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)

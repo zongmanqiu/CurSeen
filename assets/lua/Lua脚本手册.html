@@ -985,7 +985,7 @@ end
 <td><code>chat_window</code></td>
 <td>方法</td>
 <td><code>ext:chat_window(url: string, model: string, key: string, sys: string)</code></td>
-<td>原生 <strong>AI 对话窗</strong>：顶部多轮对话区、中部「清除 / 发送」、底部输入框；<code>Ctrl+Enter</code> 发送、<code>Esc</code> 关窗，等待回复时标题栏读秒。HTTP 在该窗自己的线程里跑，界面全程不卡；多轮上下文只在窗内自持，关窗即弃。★ 阻塞到关窗，只适合从 <code>run</code> 模型（工作线程）调用（官方「AI 写脚本」包就是这么用的）；<code>url</code> / <code>model</code> / <code>key</code> / <code>sys</code> 原样交给窗口，宿主不校验也不保存。</td>
+<td>原生 <strong>AI 对话窗</strong>：顶部多轮对话区、中部「清除 / 发送」、底部输入框；<code>Ctrl+Enter</code> 发送、<code>Esc</code> 关窗，等待回复时标题栏读秒。HTTP 在该窗自己的线程里跑，界面全程不卡。会话保存在 <code>&lt;程序目录&gt;/data/ai_chat/history.json</code>，<strong>关窗/重启后自动恢复</strong>，点「清除」才清空（只存 user/assistant 消息，不存 API Key）。★ 阻塞到关窗，只适合从 <code>run</code> 模型（工作线程）调用（官方「AI 写脚本」包就是这么用的）；<code>url</code> / <code>model</code> / <code>key</code> / <code>sys</code> 原样交给窗口，宿主不校验也不保存。</td>
 </tr>
 <tr>
 <td><code>proc</code></td>

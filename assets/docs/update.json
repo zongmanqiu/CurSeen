@@ -1,10 +1,10 @@
 {
-  "version": "2.1.0",
+  "version": "2.1.1",
   "published": "2026-10-31",
-  "notes": "### 脚本商店与官方资源\n\n- **「官方资源下载」进脚本页，固定第一张卡**：搜索、红字状态、下载 / 升级 / 卸载（详情窗两段确认）；Gitee / GitHub 双源（默认 Gitee），清单随包缓存，离线也能看已装与卸载；装完立即出卡。\n- **官方脚本迁到独立仓库 CurSeen-Scripts（8 个包）**：鼠标四包（CursorFX / CursorX / MFCMouseEffect / MouseEffects）、图片体检、OCR 文字识别（自带离线 RapidOCR 工具）、条码识别（自带 ZXing 工具）、AI 写脚本。包格式 v2：`<id>/pack.json` + 平铺脚本 + `info/`；整包替换升级，不碰无关脚本。\n- **脚本页支持分类排序与单脚本包**：`category = mouse/picture/text/ai` 先分组，老脚本排最后；`single: true` 的官方单脚本包直接显示为普通脚本卡。\n\n### 脚本能力\n\n- **外置工具与文件回程**：`ext:proc`（只准起脚本目录里的 exe，超时必杀）、`ext:read_file` / `write_file` / `load_image`（WIC：PNG / JPEG / BMP / GIF / TIFF，原尺寸、保 alpha）、`ext:set_image`（只换贴图视图，右键可恢复原图）、`ext:unzip`、`ext:data_dir`。\n- **对话框、剪贴板与系统打开**：`ext:open_file` / `save_file`（用户选路径）、`ext:open_temp`（光栅图白名单）、`ext:open_url`（仅 http/https）、`ext:clip_get` / `clip_set`（写后回读核对）/ `clip_image`。\n- **图片动作**：`img:crop` / `rotate_cw90` / `flip_h` / `flip_v`；`img:save` 支持 PNG / JPEG；`ext:load_image` 按原尺寸解码。\n- **宿主文本窗与 AI 窗**：`ext:result` / `ext:input` 改为记事本式文本窗（可选中、Ctrl+C、可改后复制）；新增 `ext:chat_window`（多轮 AI 对话，Ctrl+Enter 发送、Esc 关窗）。\n\n### 脚本体感\n\n- **目录监听扩到整个 `assets/`**：脚本、特效、音效、虚拟键盘方案放入后约 250 ms 自动刷新，面板不重开就能看到；选中项按 id 保留。\n- **脚本参数默认值在交棒时合并**：声明过的键一定存在，显式 `false` / `0` / 空串原样交；整数参数保持整数。\n- **键音脚本迁到 `assets/lua/KeySound/`**（键盘页专属）；`assets/lua/scripts/` 作为在线安装与通用脚本根。\n- **文本窗排版修复**：长说明不再被截断；更新说明窗文本区铺满、不再留白。\n\n### 本体更新\n\n- **改用 `update.json` 双源清单**：配置记录 Gitee / GitHub 两条 raw 地址，本地缓存 `assets/docs/update.json`；检查更新联网替换本地清单；发现新版弹说明窗（notes 取 HISTORY 当前段），点「更新」后 About 的「检查更新」按钮原地变进度条，zip 下载校验 sha256，首选源失败自动换另一源；清单与下载地址限官方域名。\n\n### 设置与界面\n\n- **设置页三张薄卡合并为「高级」**：下载源 + 图层覆盖 + 工作文件夹 + 系统；下载源默认 Gitee，商店与本体更新共用；商店卡与关于页显示灰字只读来源，切源当帧重算按钮状态。\n- **关于页只留「检查更新」**：更新说明与更新动作合并到弹窗，不再有独立的「下载并更新」按钮。",
-  "sha256": "0b98697ff8c24d514a63ac1100639dbfecd00db2c2777fdc4f9dfe87a6b7ee3f",
+  "notes": "### 新增\n\n- **AI 写脚本对话历史持久化**：会话保存在 `<程序目录>/data/ai_chat/history.json`，关窗 / 重启后自动恢复，只有「清除」才清空（只存 user/assistant 消息，不存 API Key）；最多 50 轮、文件超过 4 MiB 不读，坏文件忽略。",
+  "sha256": "eb2cd189d199d3ca35eea3cf1f689b40afbc3151d0f51ac2862aa277bac5ddd8",
   "urls": {
-    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.0/CurSeen_2.1.0.zip",
-    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.0/CurSeen_2.1.0.zip"
+    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.1/CurSeen_2.1.1.zip",
+    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.1/CurSeen_2.1.1.zip"
   }
 }

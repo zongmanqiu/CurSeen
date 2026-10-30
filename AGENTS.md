@@ -98,7 +98,7 @@ python build/hygiene_scan.py      # 期望输出：「违规 0 处」
 | cargo 偶发性 `os error 5 拒绝访问`（杀软/索引持锁） | 重跑；设 `CARGO_INCREMENTAL=0` 可少一类噪声 |
 | 一条几十个文件的批处理命令会静默失败 | 复杂操作落成 Python 脚本再执行 |
 | target-dir 由 `main/.cargo/config.toml` 指定为 `../temp/target` | 编译产物不在 `main/` 内，别去找 `main/target` |
-| ★★ **`build.rs` 的 `rerun-if-changed` 指向不存在的路径**（如 `.git/HEAD`，而 `main` 是工作副本、不是 git 仓库）→ cargo 判"永远脏"，**每次** cargo 调用都重跑构建脚本、连带整个 crate 全量重编 | **新增 `rerun-if-changed` 前先确认目标真实存在**；现有那行已按存在性下发（别改回无条件下发） |
+| ★★ **`build.rs` 的 `rerun-if-changed` 指向不存在的路径**（例如把 `main` 当成非 git 工作副本时 `.git/HEAD` 不存在）→ cargo 判"永远脏"，**每次** cargo 调用都重跑构建脚本、连带整个 crate 全量重编 | **新增 `rerun-if-changed` 前先确认目标真实存在**；现有那行已按存在性下发（别改回无条件下发） |
 | exe **不可复现**：PE 头 `TimeDateStamp` 写的是**构建时刻** | 别用 MD5 判"代码有没有变"——要抹掉 PE 头那 4 字节再比哈希。`deploy.py` 的 `MD5_MATCH=True` 证明的只是"部署的就是刚编出来的那个文件" |
 | 门禁的**成本结构**：测试本身只跑几秒，**慢的全是编译**（改任意一个 `.rs` ≈ 1m25s，过滤挡不住） | 攒一批改动再编一次，别"改一行编一次" |
 | 按需检验用 `python main/build/gate.py <组名…>`（省的是**信号**不是时间） | 内层循环 `cargo check --release --tests`（**必须带 `--tests`** 才会检查 `#[cfg(test)]` 代码） |
@@ -191,5 +191,5 @@ python build/hygiene_scan.py      # 期望输出：「违规 0 处」
 | 7 | 快照留档 | 改动正在落地前备份 `main/` 到项目根 `.bf/<MMDD-HHMM> <说明>/` | 有 |
 | 8 | 文档同步 | 改了源码就逐项核对 `DOCS_MANIFEST.md` | 清单里的文件都存在且描述成立 |
 
-> 红线：本清单只检查、不提交。★ 本仓当前**没有 git**（`.git` 不存在），留档靠 `.bf/` 快照
-> （见《开发指南.md》§二）；若日后接入 git，`commit` 必须先取得用户明确许可。
+> 红线：本清单只检查、不提交。★ 本仓已接入 git（2026-10-31，主仓 Gitee）；`git status` /
+> `git diff` 是回退基线，`.bf/` 快照仍可用于大幅改动前的额外留档。`commit` / `push` 必须先取得用户明确许可。
