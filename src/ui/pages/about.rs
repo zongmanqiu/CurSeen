@@ -8,8 +8,11 @@
 //! 见 [`crate::ui::PanelHost`]）。
 //!
 //! ★ 2026-09-27 用户口径：软件信息卡的文本是**定稿文案**（`CurSeen` / Copyright /
-//! 许可证 / Gitee 仓库 / GitHub 镜像），仓库地址是可点击链接；「更新日志」卡删除——版本变更史交给
+//! 许可证 / 仓库），仓库地址是可点击链接；「更新日志」卡删除——版本变更史交给
 //! Gitee Release，面板里手抄一份必然与线上脱节。
+//!
+//! ★ 2026-11-09：仓库链接由"两个完整 URL 分两行"收成一行 `仓库：Gitee | GitHub`
+//! （两个短名各自可点）——地址当显示文本会把卡片撑得很宽。
 
 use windui::prelude::*;
 
@@ -88,31 +91,32 @@ pub fn build_about_page(
         .cross(Align::End)
         .spacing(10);
 
-    let homepage_row = Element::row()
+    // ★ 仓库行（2026-11-09 用户口径）：原来两个完整 URL 并排两行，太长、把卡片撑得很宽，
+    //   收成一行「仓库：Gitee | GitHub」，两个名字各自可点。
+    //   显示文本必须是**短名**而不是 URL：把地址当链接文字既占宽度，又看不出哪个是哪个源。
+    let repo_row = Element::row()
         .child(
-            Element::label("Gitee仓库：")
+            Element::label("仓库：")
                 .font_size(tokens::FONT_MD)
                 .fg(to_color(tokens::TEXT_SECONDARY)),
         )
         .child(
-            Element::link(HOMEPAGE)
+            Element::link("Gitee")
                 .url(HOMEPAGE)
                 .font_size(tokens::FONT_MD),
         )
-        .cross(Align::Center);
-
-    let github_row = Element::row()
         .child(
-            Element::label("GitHub镜像：")
+            Element::label("|")
                 .font_size(tokens::FONT_MD)
                 .fg(to_color(tokens::TEXT_SECONDARY)),
         )
         .child(
-            Element::link(GITHUB_MIRROR)
+            Element::link("GitHub")
                 .url(GITHUB_MIRROR)
                 .font_size(tokens::FONT_MD),
         )
-        .cross(Align::Center);
+        .cross(Align::Center)
+        .spacing(6);
 
     content = content.child(
         Element::col()
@@ -137,8 +141,7 @@ pub fn build_about_page(
                     .font_size(tokens::FONT_MD)
                     .fg(to_color(tokens::TEXT_SECONDARY)),
             )
-            .child(homepage_row)
-            .child(github_row)
+            .child(repo_row)
             .cross(Align::Start)
             .spacing(10)
             // ★ 卡不撑满（2026-09-27 用户口径定稿）：文字等内容靠左，背景色块按内容

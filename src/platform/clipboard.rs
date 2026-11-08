@@ -1,21 +1,34 @@
 //! 系统剪贴板读取（文本 / 图像）——贴图功能的输入源。
 //!
 //! 只读不写：写入已有 `screenshot::to_clipboard`（CF_DIB）。读取走标准剪贴板 API：
-//! 文本取 `CF_UNICODETEXT`（13）；图像取 `CF_DIB`（8，BITMAPINFOHEADER + 像素数据，
-//! 自下而上 BGRA 行序是主流来源——截图工具/浏览器复制图片基本都是它）。
+//! 文本取 `CF_UNICODETEXT`（13）；图像按**来源习惯**依次试三种格式（见 [`get_image`]）：
+//! `PNG`（注册名）→ `CF_DIBV5`（17）→ `CF_DIB`（8，BITMAPINFOHEADER + 像素）。
+//!
+//! ★ 为什么不是"只认 CF_DIB"：Chromium 系（Chrome / Edge / Electron，**含 RStudio
+//!   Desktop**）复制图片时只写 `PNG` + `CF_DIBV5` 两种，一个 `CF_DIB` 都不写
+//!   （Chromium `ClipboardWin::WriteBitmap`：先 `PngType()` 再 `BitmapType()`，后者在
+//!   Windows 上就是 DIBV5）。旧实现只问 `CF_DIB` ⇒ 这类来源的图片一条都收不进来，
+//!   而别的剪贴板工具都认 DIBV5/PNG，所以从外部看不出问题（2026-11-09 用户报
+//!   "RStudio 复制图片不进历史"）。详见《踩坑记录》§27。
+//!
+//!   ⚠ 顺带一个必须知道的坑：板上有 `CF_DIBV5` 时，`IsClipboardFormatAvailable(CF_DIB)`
+//!   会**合成**出一个"可用"的答复，但 `GetClipboardData(CF_DIB)` 能不能真拿到数据并不
+//!   保证（探针实测两种结果都出现过）。所以判"有没有图"不能靠单一格式的可用性，
+//!   取数据也不能指望"可用"就等于"取得出来"。
 //!
 //! 所有函数失败一律返回 `None`（剪贴板被别的进程占用、格式不符、空剪贴板都是常态），
-//! 调用方（贴图快捷键）据此回落到贴图历史环。
+//! 调用方（贴图快捷键 / 剪贴板历史）据此回落到各自的兜底。
 //!
 //! 剪贴板格式常量沿用 `screenshot.rs` 的本地钉住惯例（为一个常量开一整个
-//! `Win32_System_Ole` feature 不值）：CF_DIB=8、CF_UNICODETEXT=13。
+//! `Win32_System_Ole` feature 不值）：CF_DIB=8、CF_UNICODETEXT=13、CF_DIBV5=17。
 
 use core::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
-    OpenClipboard,
+    OpenClipboard, RegisterClipboardFormatW,
 };
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Memory::{
@@ -25,6 +38,7 @@ use windows::Win32::System::Memory::{
 use super::screenshot::Shot;
 
 const CF_DIB: u32 = 8;
+const CF_DIBV5: u32 = 17;
 const CF_UNICODETEXT: u32 = 13;
 
 /// 剪贴板**内容序列号**（系统维护，每次内容变化 +1）。
@@ -149,11 +163,48 @@ pub fn get_text() -> Option<String> {
     })
 }
 
-/// 读取剪贴板图像（CF_DIB）。
+/// 剪贴板上是否有我们**认得的**图像格式（供调用方决定"要不要去读一次 / 要不要重试"）。
 ///
-/// 支持 32bpp（BI_RGB / BI_BITFIELDS，屏幕截图主流）与 24bpp；自下而上或
-/// `biHeight<0` 的自上而下都处理。返回的 `Shot` 已转为自上而下 BGRA、alpha 强制 255
-/// （DIB 无 alpha 通道——与 GDI 抓屏同款陷阱，见 tests/freeze_overlay_poc.rs）。
+/// 判据与 [`get_image`] 一一对应——两处必须同源，否则会出现"说有图、读不出来"
+/// 的空转（旧版就是只认 `CF_DIB`，Chromium 系写 DIBV5+PNG 时判据为假、整条逻辑
+/// 静默跳过，连重试都不触发）。
+pub(crate) fn image_available() -> bool {
+    unsafe {
+        [CF_DIB, CF_DIBV5, png_format(), png_mime_format()]
+            .into_iter()
+            .any(|f| f != 0 && IsClipboardFormatAvailable(f).is_ok())
+    }
+}
+
+/// 注册名 → 剪贴板格式 id（名字大小写不敏感）。
+///
+/// ★ `Vec<u16>` 必须先绑到 `let`：直接把临时量取址传进去，分号处即 drop，
+///   `RegisterClipboardFormatW` 拿到的是已经回收的内存（同 §24 那条坑）。
+fn register_format(name: &str) -> u32 {
+    let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(PCWSTR(w.as_ptr())) }
+}
+
+/// Chromium / Firefox 复制图片时写的 PNG 格式（注册名 `PNG`）。
+fn png_format() -> u32 {
+    static F: OnceLock<u32> = OnceLock::new();
+    *F.get_or_init(|| register_format("PNG"))
+}
+
+/// 少数应用按 MIME 名注册（`image/png`）——一并认下，代价只是一个 u32。
+fn png_mime_format() -> u32 {
+    static F: OnceLock<u32> = OnceLock::new();
+    *F.get_or_init(|| register_format("image/png"))
+}
+
+/// 读取剪贴板图像：`PNG` → `CF_DIBV5` → `CF_DIB`，按这个顺序取第一个解得开的。
+///
+/// 三档的取舍：
+/// - **`PNG`**：无损、α 就是内容本身（没有"DIB 那一套 α 到底算不算数"的歧义），
+///   Chromium 系把图片放上剪贴板时**总是**写它，所以这是最该优先的一档。
+/// - **`CF_DIBV5`**：BITMAPV5HEADER（124 字节）+ 32bpp + α 掩码。α 保留与否见
+///   [`read_dib`] 的判定——**声明了掩码且真有非零 α 才算数**。
+/// - **`CF_DIB`**：截图工具 / 画图等老路数，α 一律按 255 处理（见下）。
 ///
 /// ★★★ 2026-10-12 23:10 那次 0xC0000005 的真正成因**不是**"外部畸形数据"，而是
 ///   **我们自己的写者与读者撞车**：Windows 对同进程内的并发 `OpenClipboard`
@@ -168,104 +219,175 @@ pub fn get_text() -> Option<String> {
 ///   与页表完全一致（同一探针第 3 问），夹了只会平白丢内容。
 pub fn get_image() -> Option<Shot> {
     with_clipboard(|| unsafe {
-        if IsClipboardFormatAvailable(CF_DIB).is_err() {
-            return None;
+        if let Some(s) = read_png() {
+            return Some(s);
         }
-        let hmem = GetClipboardData(CF_DIB).ok()?;
+        if let Some(s) = read_dib(CF_DIBV5) {
+            return Some(s);
+        }
+        read_dib(CF_DIB)
+    })
+}
+
+/// 读 `PNG` / `image/png` 格式的字节并解码。拿不到或解不开都返回 `None`。
+unsafe fn read_png() -> Option<Shot> {
+    for fmt in [png_format(), png_mime_format()] {
+        if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
+            continue;
+        }
+        let Ok(hmem) = GetClipboardData(fmt) else {
+            continue;
+        };
         let ptr = GlobalLock(HGLOBAL(hmem.0));
         if ptr.is_null() {
-            return None;
+            continue;
         }
         let _guard_mem = Unlocker(ptr.cast());
-        // BITMAPINFOHEADER：biSize(4) biWidth(4) biHeight(4, 有符号) planes+bpp(4) compression(4)
-        // ★ 先取"真正能读多少"并保证装得下 20 字节的头字段，再解头——畸形 DIB（数据区比头还小）
-        //   直接拒绝，否则下面 5 个 u32 的读取本身就是越界（2026-10-11 崩溃排查防御项）。
-        let total = readable_bytes(ptr.cast(), GlobalSize(HGLOBAL(hmem.0)) as usize)?;
-        if total < 20 {
-            return None;
+        // 先拷成自己的 `Vec` 再解：解码器要 `&[u8]`，而这块内存归别的进程所有，
+        // 解码不能吊着一把随时可能被 `EmptyClipboard()` 抽走的句柄（§23）。
+        let Some(total) = readable_bytes(ptr.cast(), GlobalSize(HGLOBAL(hmem.0)) as usize) else {
+            continue;
+        };
+        if total < 8 {
+            continue;
         }
-        let base = ptr.cast::<u32>();
-        let bi_size = *base as usize;
-        let w = *base.add(1) as i32;
-        let h_raw = *base.add(2) as i32;
-        let bpp = (*base.add(3) >> 16) as u32;
-        let compression = *base.add(4);
-        // ★ `unsigned_abs`：i32::MIN 的 `abs()` 在发布版自己就是负数，`as usize` 会变成
-        //   一个天文数字，上面那道"≤16384"的门会被它绕过去。
-        if w <= 0 || w > 16384 || h_raw == 0 || h_raw.unsigned_abs() > 16384 {
-            return None;
+        let mut buf = vec![0_u8; total];
+        if !read_into(ptr.cast(), &mut buf) {
+            continue;
         }
-        let top_down = h_raw < 0;
-        let h = h_raw.unsigned_abs() as usize;
-        // BI_RGB(0) 与 BI_BITFIELDS(3) 都按无压缩像素走；其余压缩一律不认。
-        if !(compression == 0 || compression == 3) {
-            return None;
+        if let Some(s) = super::screenshot::decode_png_bytes(&buf) {
+            return Some(s);
         }
-        if !(40..=124).contains(&bi_size) {
-            return None;
-        }
-        // ★★ 像素起点：边界检查与下面的取址**必须共用这一个数**（见 [`pixel_offset`]）。
-        let pixel_offset = pixel_offset(bi_size, compression);
-        // 像素区不可超出可读长度，畸形头会越界读（UB）。
-        if pixel_offset + h * ((w as usize) * 4) > total {
-            return None;
-        }
-        match bpp {
-            32 => {
-                // 像素紧跟在头（+ BI_BITFIELDS 的 3 个 DWORD 掩码）之后，32bpp 天然 4 字节对齐。
-                let px = (ptr.cast::<u8>()).add(pixel_offset);
-                let stride = (w as usize) * 4;
-                let mut bgra = vec![0_u8; stride * h];
-                for y in 0..h {
-                    let src_row = if top_down { y } else { h - 1 - y };
-                    // 逐行直读到翻转后的位置：读不动（未提交/已被回收）就整张放弃。
-                    if !read_into(
-                        px.add(src_row * stride),
-                        &mut bgra[y * stride..(y + 1) * stride],
-                    ) {
-                        return None;
-                    }
+    }
+    None
+}
+
+/// 读一个 DIB 句柄（`CF_DIB` 或 `CF_DIBV5`）并解码成自上而下 BGRA。
+///
+/// 支持 32bpp（BI_RGB / BI_BITFIELDS）与 24bpp；自下而上或 `biHeight<0` 的自上而下
+/// 都处理。
+///
+/// ★ α 的处理分三种情况（照抄 WIC 那条经验：DIB 的 α **默认不可信**）：
+///   ① `CF_DIB`：一律刷成 255。截图工具写 32bpp 时 α 位全 0（"未定义"），
+///      当真就会整张透明 —— 与 GDI 抓屏同款陷阱。
+///   ② `CF_DIBV5` 且 V4/V5 头的 `bV5AlphaMask` 非 0 **且**像素里真有非零 α：保留。
+///      Chromium 复制带透明背景的图就走这一档。
+///   ③ `CF_DIBV5` 但像素 α 全 0 / 掩码为 0：同样按 255 处理（等价于①）。
+unsafe fn read_dib(fmt: u32) -> Option<Shot> {
+    if IsClipboardFormatAvailable(fmt).is_err() {
+        return None;
+    }
+    let hmem = GetClipboardData(fmt).ok()?;
+    let ptr = GlobalLock(HGLOBAL(hmem.0));
+    if ptr.is_null() {
+        return None;
+    }
+    let _guard_mem = Unlocker(ptr.cast());
+    // BITMAPINFOHEADER：biSize(4) biWidth(4) biHeight(4, 有符号) planes+bpp(4) compression(4)
+    // ★ 先取"真正能读多少"并保证装得下 20 字节的头字段，再解头——畸形 DIB（数据区比头还小）
+    //   直接拒绝，否则下面 5 个 u32 的读取本身就是越界（2026-10-11 崩溃排查防御项）。
+    let total = readable_bytes(ptr.cast(), GlobalSize(HGLOBAL(hmem.0)) as usize)?;
+    if total < 20 {
+        return None;
+    }
+    let base = ptr.cast::<u32>();
+    let bi_size = *base as usize;
+    let w = *base.add(1) as i32;
+    let h_raw = *base.add(2) as i32;
+    let bpp = (*base.add(3) >> 16) as u32;
+    let compression = *base.add(4);
+    // ★ `unsigned_abs`：i32::MIN 的 `abs()` 在发布版自己就是负数，`as usize` 会变成
+    //   一个天文数字，上面那道"≤16384"的门会被它绕过去。
+    if w <= 0 || w > 16384 || h_raw == 0 || h_raw.unsigned_abs() > 16384 {
+        return None;
+    }
+    let top_down = h_raw < 0;
+    let h = h_raw.unsigned_abs() as usize;
+    // BI_RGB(0) 与 BI_BITFIELDS(3) 都按无压缩像素走；其余压缩一律不认。
+    if !(compression == 0 || compression == 3) {
+        return None;
+    }
+    if !(40..=124).contains(&bi_size) {
+        return None;
+    }
+    // ★ DIBV5 的 α 掩码 = `bV5AlphaMask`，BITMAPV4/V5 头里第 52 字节（u32 索引 13）。
+    //   两道前置：`bi_size >= 108`（短头没有这个字段，第 52 字节是像素本身）与
+    //   `total >= 56`（掩码占第 52..56 字节；头声称 124 字节、实际只给了 20 字节的
+    //   畸形数据不能读出去）。
+    let alpha_mask = if bi_size >= 108 && total >= 56 {
+        *base.add(13)
+    } else {
+        0
+    };
+    // ★★ 像素起点：边界检查与下面的取址**必须共用这一个数**（见 [`pixel_offset`]）。
+    let pixel_offset = pixel_offset(bi_size, compression);
+    // 像素区不可超出可读长度，畸形头会越界读（UB）。
+    if pixel_offset + h * ((w as usize) * 4) > total {
+        return None;
+    }
+    match bpp {
+        32 => {
+            // 像素紧跟在头（+ BI_BITFIELDS 的 3 个 DWORD 掩码）之后，32bpp 天然 4 字节对齐。
+            let px = (ptr.cast::<u8>()).add(pixel_offset);
+            let stride = (w as usize) * 4;
+            let mut bgra = vec![0_u8; stride * h];
+            for y in 0..h {
+                let src_row = if top_down { y } else { h - 1 - y };
+                // 逐行直读到翻转后的位置：读不动（未提交/已被回收）就整张放弃。
+                if !read_into(
+                    px.add(src_row * stride),
+                    &mut bgra[y * stride..(y + 1) * stride],
+                ) {
+                    return None;
                 }
+            }
+            // α 是否当真：见函数头 ②/③ —— 声明了掩码**且**真有非零 α 才保留。
+            let keep_alpha = honor_alpha(
+                fmt == CF_DIBV5,
+                alpha_mask,
+                bgra.chunks_exact(4).any(|p| p[3] != 0),
+            );
+            if !keep_alpha {
                 for a in bgra.chunks_exact_mut(4) {
                     a[3] = 255;
                 }
-                Some(Shot {
-                    w,
-                    h: h as i32,
-                    bgra,
-                })
             }
-            24 => {
-                let stride = ((w as usize) * 3).div_ceil(4) * 4;
-                let px = (ptr.cast::<u8>()).add(pixel_offset);
-                // ★ 只读每行的 `w*3` 个真实像素字节：行末的对齐填充**最后一行的**有些
-                //   来源根本没写（DIB 允许），读它会白失败一次。
-                let need = (w as usize) * 3;
-                let mut bgra = vec![0_u8; (w as usize) * h * 4];
-                let mut row = vec![0_u8; need];
-                for y in 0..h {
-                    let src_row = if top_down { y } else { h - 1 - y };
-                    if !read_into(px.add(src_row * stride), &mut row) {
-                        return None;
-                    }
-                    for x in 0..w as usize {
-                        let s = x * 3;
-                        let d = y * (w as usize) * 4 + x * 4;
-                        bgra[d] = row[s];
-                        bgra[d + 1] = row[s + 1];
-                        bgra[d + 2] = row[s + 2];
-                        bgra[d + 3] = 255;
-                    }
-                }
-                Some(Shot {
-                    w,
-                    h: h as i32,
-                    bgra,
-                })
-            }
-            _ => None,
+            Some(Shot {
+                w,
+                h: h as i32,
+                bgra,
+            })
         }
-    })
+        24 => {
+            let stride = ((w as usize) * 3).div_ceil(4) * 4;
+            let px = (ptr.cast::<u8>()).add(pixel_offset);
+            // ★ 只读每行的 `w*3` 个真实像素字节：行末的对齐填充**最后一行的**有些
+            //   来源根本没写（DIB 允许），读它会白失败一次。
+            let need = (w as usize) * 3;
+            let mut bgra = vec![0_u8; (w as usize) * h * 4];
+            let mut row = vec![0_u8; need];
+            for y in 0..h {
+                let src_row = if top_down { y } else { h - 1 - y };
+                if !read_into(px.add(src_row * stride), &mut row) {
+                    return None;
+                }
+                for x in 0..w as usize {
+                    let s = x * 3;
+                    let d = y * (w as usize) * 4 + x * 4;
+                    bgra[d] = row[s];
+                    bgra[d + 1] = row[s + 1];
+                    bgra[d + 2] = row[s + 2];
+                    bgra[d + 3] = 255;
+                }
+            }
+            Some(Shot {
+                w,
+                h: h as i32,
+                bgra,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// 本进程伪句柄（-1）：`ReadProcessMemory` 用它读自己，权限恒够、也不用关。
@@ -315,6 +437,18 @@ unsafe fn readable_bytes(ptr: *const u8, claimed: usize) -> Option<usize> {
     Some(claimed.min(base + info.RegionSize - ptr as usize))
 }
 
+/// DIB 的 α 是否当真（纯函数，规则见 [`read_dib`] 函数头 ②/③）。
+///
+/// 三条缺一不可：
+/// - `fmt_is_v5`：只有 `CF_DIBV5` 这一档才有"α 是内容"的约定。`CF_DIB` 里 32bpp 的
+///   第 4 字节多数来源根本不填（截图工具填 0）——当真整张图就变全透明，这是本项目
+///   反复踩过的坑。
+/// - `alpha_mask != 0`：头里必须真的声明了 α 通道（`bV5AlphaMask`）。
+/// - `any_nonzero`：像素里真有非零 α。全 0 只可能是"来源没填"，按不透明处理。
+fn honor_alpha(fmt_is_v5: bool, alpha_mask: u32, any_nonzero: bool) -> bool {
+    fmt_is_v5 && alpha_mask != 0 && any_nonzero
+}
+
 /// 像素区相对 DIB 起点的字节偏移。
 ///
 /// ★★ 边界检查与取址**必须共用这一个返回值**：老代码检查用 `pixel_offset`、取址却写
@@ -333,6 +467,7 @@ fn pixel_offset(bi_size: usize, compression: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::honor_alpha;
     use super::pixel_offset;
 
     /// `read_into` 的两条命脉：① 正常内存要真拷对；② **不可读的地址要返回 false 而不是崩**
@@ -357,6 +492,23 @@ mod tests {
         // ★ 崩过的地方：V4/V5 头 + BI_BITFIELDS 不能再 +12（掩码已在头内）。
         assert_eq!(pixel_offset(108, 3), 108);
         assert_eq!(pixel_offset(124, 3), 124);
+    }
+
+    /// α 的三条政策逐格钉住（见 [`honor_alpha`]）。
+    ///
+    /// 第一行是**最贵的那一格**：`CF_DIB` 的 32bpp 来源（截图工具）α 位通常全 0，
+    /// 一旦当真，剪贴板历史里每张截图都会变成全透明——比"不显示"严重得多。
+    #[test]
+    fn 只有_dibv5_声明掩码并真有非零透明度才保留() {
+        const MASK: u32 = 0xFF00_0000;
+        // CF_DIB：哪怕掩码位非 0、像素里有 α，也一律按不透明。
+        assert!(!honor_alpha(false, MASK, true));
+        // CF_DIBV5 且头里声明了 α 掩码、像素真有非零 α：保留（Chromium 系这条路）。
+        assert!(honor_alpha(true, MASK, true));
+        // 声明了掩码但 α 全 0（来源没填）：按不透明。
+        assert!(!honor_alpha(true, MASK, false));
+        // V5 头没写 α 掩码：按不透明。
+        assert!(!honor_alpha(true, 0, true));
     }
 
     /// ★★★ 剪贴板门禁**真的**串行化（2026-10-13 根因修复的回归判据）。

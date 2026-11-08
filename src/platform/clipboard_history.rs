@@ -9,7 +9,7 @@
 //! `clipboard`（读文本 / 读图像）、`paths`（便携落盘）——零新依赖。
 //!
 //! 设计铁律（剪贴板工具实战 + 便签踩坑）：
-//! - 格式优先级 files(CF_HDROP) > image(CF_DIB) > text(CF_UNICODETEXT)；
+//! - 格式优先级 files(CF_HDROP) > image(PNG / CF_DIBV5 / CF_DIB) > text(CF_UNICODETEXT)；
 //! - 自写屏蔽用命名格式 `CurSeen.ClipboardSelf`（避免粘贴回环，比时间窗稳）；
 //! - 去重命中只更新时间戳并上浮，不新增；
 //! - 粘贴时序：写剪贴板 → 隐藏面板 → 150ms → `SendInput` Ctrl+V（残留 Shift 先补 KEYUP）；
@@ -990,12 +990,20 @@ fn capture_image_bg(
         if self_fmt != 0 && IsClipboardFormatAvailable(self_fmt).is_ok() {
             return (None, 0);
         }
-        if IsClipboardFormatAvailable(8).is_err() {
-            return (None, 0); // 8 = CF_DIB：投递与执行之间剪贴板可能已变。
+        if !super::clipboard::image_available() {
+            return (None, 0); // 投递与执行之间剪贴板可能已变（判据与 `get_image` 同源）。
         }
         let shot = match get_image() {
             Some(s) => s,
-            None => return (None, 0),
+            None => {
+                // ★ 这一行是 2026-11-09「RStudio 复制图片不进历史」唯一缺的证据：
+                //   以前这里只 `return (None, 0)`，于是"板上确实有图、读却是空"这种
+                //   失败在日志里一个字都没有（源程序只写 PNG/DIBV5、系统给 CF_DIB
+                //   合成一个"可用"的答复，真去 GetClipboardData 却可能拿不到）。
+                //   留着它，下次任何来源的同形故障都能一眼定位。
+                log::warn!("剪贴板: 板上图像格式存在但读不出像素，本次跳过");
+                return (None, 0);
+            }
         };
         let thumb = thumbnail_of(&shot, THUMB_MAX_W);
         // 与 `push` 完全同一套签名（kind=Image、全文 None）——面板侧 `push`
@@ -1037,6 +1045,12 @@ fn capture_image_bg(
     }
 }
 
+/// 图像内容签名的采样点数（见 [`compute_sig`]）。
+///
+/// 4096 个点、每点 4 字节 ≈ 16 KB 的读取量：面板线程（`push` 里重算）也负担得起，
+/// 而对"两张内容不同的图"来说这已经是足够密的网格（差异区域占图面 1% 就有 40 个点命中）。
+const SIG_SAMPLES: usize = 4096;
+
 fn compute_sig(
     kind: Kind,
     text: &str,
@@ -1052,8 +1066,27 @@ fn compute_sig(
     w.hash(&mut hasher);
     h.hash(&mut hasher);
     if let Some(s) = shot {
-        let n = s.bgra.len().min(4096);
-        s.bgra[..n].hash(&mut hasher);
+        // ★★★ 采样必须**覆盖整张图**（2026-11-09 修）：旧实现取前 4096 **字节**
+        //   （= 前 1024 个像素，连 720 宽缩略图的一行半都不到）。RStudio 的 Plots
+        //   面板尺寸固定（每张图同宽同高）、R 图顶部又常是白边/标题 ⇒ 两张内容
+        //   完全不同的图在这段前缀上**逐字节相同**，签名相撞，`push` 判成"重复内容"
+        //   只把旧条目上浮、新图整条丢弃（用户报"切第二张图就不进剪贴板"，
+        //   且 `images/{hash}.png` 会被同名覆盖——他猜的"重名"正是这个机制）。
+        //   改成按像素步长均匀采 [`SIG_SAMPLES`] 个点：成本恒定（约 16 KB 读取），
+        //   覆盖面从"顶部一行半"变成整张图。
+        let px = s.bgra.len() / 4;
+        if px > 0 {
+            let step = (px / SIG_SAMPLES).max(1);
+            let mut i = 0;
+            while i < px {
+                s.bgra[i * 4..i * 4 + 4].hash(&mut hasher);
+                i += step;
+            }
+            // 末像素单独掺一次：step 整除时上面的循环走不到最后一个像素，
+            // 而"只有右下角不同"的图恰恰要靠它区分。
+            let last = (px - 1) * 4;
+            s.bgra[last..last + 4].hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -2044,7 +2077,7 @@ impl ClipboardMgr {
                     return (true, true);
                 }
             }
-            if IsClipboardFormatAvailable(8).is_ok() {
+            if super::clipboard::image_available() {
                 // ★ 8 = CF_DIB。重活（DIB→RGBA 解码 + 缩略 + PNG 编码 + 写盘）全在
                 //   worker 线程（`capture_image_bg`），面板线程只投递——消息泵不停转，
                 //   悬停不再转圈（2026-09-29 用户报）。入账在 `run` 消息循环收到
@@ -5175,6 +5208,62 @@ mod tests {
             None,
         );
         assert_ne!(f1, f2);
+    }
+
+    /// ★★★ 同尺寸白底图**只有中部不同**时，签名必须不同（2026-11-09 用户报
+    /// 「RStudio 切第二张图就不进剪贴板」）。
+    ///
+    /// 形态就是 RStudio 的日常：Plots 面板尺寸固定 ⇒ 每张图同宽同高；R 图顶部是白边
+    /// ⇒ 前若干行逐字节相同。旧实现只把 `bgra[..4096]`（前 1024 像素，720 宽缩略图
+    /// 连一行半）掺进签名，于是两张内容完全不同的图签名相同 → `push` 判"重复内容"
+    /// → 新图整条丢弃（连 `images/{hash}.png` 都被同名覆盖）。
+    ///
+    /// 这条判据在旧实现下红、新实现下绿（采样覆盖整张图）。样本刻意做成
+    /// **720×394 全白 + 中部一块黑**：任何"只看前缀"的实现都会把两者算成同一条。
+    #[test]
+    fn 同尺寸白底图只有中部不同也算两条() {
+        let (w, h) = (720_i32, 394_i32);
+        let mk = |paint: bool| {
+            let mut bgra = vec![255_u8; (w as usize) * (h as usize) * 4];
+            if paint {
+                // 中部 80×60 的黑块：落在前 1024 像素**之外**。
+                for y in 150..210usize {
+                    for x in 300..380usize {
+                        let i = (y * (w as usize) + x) * 4;
+                        bgra[i] = 0;
+                        bgra[i + 1] = 0;
+                        bgra[i + 2] = 0;
+                    }
+                }
+            }
+            Shot { w, h, bgra }
+        };
+        let a = compute_sig(Kind::Image, "", &[], w, h, Some(&mk(false)));
+        let b = compute_sig(Kind::Image, "", &[], w, h, Some(&mk(true)));
+        assert_ne!(
+            a, b,
+            "两张内容不同的图撞了签名 —— 第二张会被当成重复内容丢掉（§27 用户报的正是这个）"
+        );
+        // 同一份内容重复计算必须稳定（去重语义的另一半）。
+        assert_eq!(a, compute_sig(Kind::Image, "", &[], w, h, Some(&mk(false))));
+    }
+
+    /// 末像素参与签名：右下角那一个像素不同也要算两条（采样循环走不到它）。
+    #[test]
+    fn 末像素差异也能区分() {
+        let (w, h) = (100_i32, 100_i32);
+        let mk = |last_black: bool| {
+            let mut bgra = vec![255_u8; (w as usize) * (h as usize) * 4];
+            if last_black {
+                let i = bgra.len() - 4;
+                bgra[i..i + 3].fill(0);
+            }
+            Shot { w, h, bgra }
+        };
+        assert_ne!(
+            compute_sig(Kind::Image, "", &[], w, h, Some(&mk(false))),
+            compute_sig(Kind::Image, "", &[], w, h, Some(&mk(true))),
+        );
     }
 
     /// ★★ 这条钉的是整个改动的**收益本身**：写回去的必须是全尺寸，不是那张 720px 的副本。

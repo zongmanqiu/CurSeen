@@ -39,7 +39,7 @@
 | 18e | `assets/lua/Lua脚本手册.html` | **随包 Lua 手册**（指南+API 合一）：第一部分为脚本作者指南（含 v2 包格式、官方资源下载、热更新），第二部分三张表由 `build/gen_manual_tables.py` 从 `API.md` **机械镜像**；改 API 后必须重跑该脚本 | 门禁 `test_lua_manual_matches_the_api_reference_tables`（读生成物形状） |
 | 18d | `assets/manual/隐藏快捷键手册.md`（+ 同名 `.html`，随 assets 分发进安装目录） | **隐藏快捷键手册**：固定不可改的隐藏键清单变化（含脚本文本窗 / AI 对话窗按键） | —（每条须对照源码实装） |
 | 19 | `examples/README.md` | 离屏探针增删（整目录职责变化） | （`Cargo.toml` 的 `[[example]]` 必须同步） |
-| 20 | `开发指南.md` | 开发/发版流程、文档同步对照、提交前清单、HISTORY 登记规范、工程纪律变化 | `test_docs_checks_the_manifest_files_exist`（修改流程唯一正本） |
+| 20 | `开发指南.md` | 开发/发版流程、文档同步对照、提交前清单、HISTORY 登记规范、工程纪律、**发行包内容清单（§十）** | `test_docs_checks_the_manifest_files_exist`（修改流程唯一正本） |
 
 > **成品 `docs/` 只收这七份**：`DESIGN.md` / `DESIGN_ADOPTION.md` / `PLATFORM_NOTES.md` /
 > `RELEASE_CHECKLIST.md` / `UI_COMPONENTS.md` / `踩坑记录.md` / `踩坑记录-2.md`。新增其它文档
@@ -60,9 +60,9 @@
 | `build/deps.txt` | 第三方源码下载登记表（`name=url\|marker-file`，**ASCII-only**，步骤 2 消费） |
 | `build/deploy.py` / `gen_licenses.py` / `sync_assets.py` / `gate.py` / `boot_check.py` / `check_deps.ps1` / `layering_scan.py` / `hygiene_scan.py` | 构建 / 部署 / 许可同步 / 按需门禁 / 启动冒烟 / 依赖体检 / 分层体检 / 静态异味体检 |
 | `build/gen_manual_tables.py` | 把 `assets/lua/API.md` 的三张接口表机械镜像进《Lua 脚本手册》第二部分；改 API 后必跑 |
-| `build/gen_update_json.py` | 发版时从 HISTORY 当前版本段取 notes、算发行 zip sha256、写 Gitee/GitHub 两个地址到 `update.json` |
-| `build/pack_release.py` | **唯一发行 zip 打包器**：`build/curseen.exe` + `main/assets/` + 许可 → `CurSeen_<version>.zip`，排除自指的 `assets/docs/update.json`；禁止手工压缩 `build/` |
-| `build/check_update_asset.py` | 上传后核对：下载 Gitee/GitHub 两个 zip，逐字节 sha256 必须等于 `update.json`（`--local` 用于上传前核对本地包） |
+| `build/gen_update_json.py` | 发版时从 HISTORY 当前版本段取 notes、写 Gitee/GitHub 两个地址到 `update.json`（**不记哈希**：客户端只校验版本号与包文件名） |
+| `build/pack_release.py` | **唯一发行 zip 打包器**（7-Zip `-tzip -mcu=on`）：`build/curseen.exe` + `main/assets/` + 许可 → `CurSeen_<version>.zip`；逐文件字节数 / 路径清单写到**包外** `CurSeen_<version>.manifest.txt`（不记哈希；打包者自用，不进包不上传）；回读核对（含禁 `MANIFEST.txt`）；排除运行期 `assets/docs/update.json`；禁止手工压缩 `build/`。包内容清单见《开发指南.md》§十 |
+| `build/check_update_asset.py` | 上传后确认两个镜像就位：地址通 + 返回 zip + 文件名 = `CurSeen_<version>.zip`（`--local` 用于上传前核对本地包）；不比对哈希 |
 | `examples/gen_icon.rs` | 由矢量源 `assets/icons/icon*.svg`（+ `images/*.svg` 二维码）逐档光栅化出 `tray_<N>[_red].rgba`（托盘五档）+ `app.ico`（exe/窗口）+ 二维码 PNG；换图标/二维码只改 SVG 再 `cargo run --example gen_icon --features icon-gen` |
 | `build/app.rc` | 图标资源脚本（`MAINICON` ← `assets/icons/app.ico`），由 `build.rs` 经 `rc.exe` 编译；无 SDK 时跳过 |
 

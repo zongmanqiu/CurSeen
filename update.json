@@ -1,10 +1,9 @@
 {
-  "version": "2.1.1",
-  "published": "2026-10-31",
-  "notes": "### 新增\n\n- **AI 写脚本对话历史持久化**：会话保存在 `<程序目录>/data/ai_chat/history.json`，关窗 / 重启后自动恢复，只有「清除」才清空（只存 user/assistant 消息，不存 API Key）；最多 50 轮、文件超过 4 MiB 不读，坏文件忽略。",
-  "sha256": "eb2cd189d199d3ca35eea3cf1f689b40afbc3151d0f51ac2862aa277bac5ddd8",
+  "version": "2.1.2",
+  "published": "2026-11-09",
+  "notes": "### 修复\n\n- **Chromium 系应用（Chrome / Edge / Electron，含 RStudio Desktop）复制的图片不进剪贴板历史**：这类来源只写 `PNG` + `CF_DIBV5` 两种格式，不写 `CF_DIB`；现在按 `PNG` → `CF_DIBV5` → `CF_DIB` 依次读，带透明通道的图也能保真（`CF_DIB` 仍按不透明处理，不影响截图工具）。贴图快捷键读剪贴板同样受益。\n- **同尺寸图片连续复制只记住第一张**：去重签名改为按整张图采样（原来只比较顶部 1024 个像素），RStudio 里连切两张同尺寸图不再被当成\"重复内容\"丢掉。\n\n### 界面\n\n- **快捷键呼出控制面板后被别的窗口压住**：开窗只显示不抢前台，后台进程新建的普通窗口会停在前台窗口后面；现在开窗后自动把它带到前台。\n- **关于页仓库链接收成一行**：`仓库：Gitee | GitHub`，两个名字各自可点（原来两行完整 URL 太长）。\n\n### 其它\n\n- **在线更新更省心**：检查更新只校验版本号与包文件名，不再要求发行包哈希一致——\"下载失败：哈希不匹配\"这类只卡自己的拦截彻底取消；失败只在真的下不动时发生。",
   "urls": {
-    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.1/CurSeen_2.1.1.zip",
-    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.1/CurSeen_2.1.1.zip"
+    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.2/CurSeen_2.1.2.zip",
+    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.2/CurSeen_2.1.2.zip"
   }
 }

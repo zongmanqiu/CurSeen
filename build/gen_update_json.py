@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""生成宿主更新清单 update.json（版本 / HISTORY 当前段 / sha256 / 双镜像 zip 地址）。
+"""生成宿主更新清单 update.json（版本 / HISTORY 当前段 / 双镜像 zip 地址）。
+
+清单里**不记哈希**（2026-11-09 用户口径）：更新只校验**版本号**与**包文件名**，
+下载到的 zip 不做字节级校验。所以这里除了版本号，唯一有约束力的就是地址末段必须
+等于 `CurSeen_<版本>.zip`。
 
 用法（在 main/ 下）：
     python build/gen_update_json.py --version 2.1.0 --zip ../build/release/CurSeen_2.1.0.zip
     python build/gen_update_json.py --version 2.1.0 --zip ... --out ../update.json
 
+`--zip` 只用来确认"这个版本的包确实打好了"（存在即可），不参与任何计算。
 默认输出到 main/update.json；把生成物提交到宿主仓库 main 根目录即可。
 `notes` 只取 HISTORY.md 里 `## <version>`（允许 `（日期）` 后缀）到下一个 `## ` 或 `---` 之前，
 不把整份 HISTORY 塞进客户端弹窗。
 """
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -43,18 +47,10 @@ def history_notes(version: str) -> str:
     return notes
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="发布版本号，如 2.1.0")
-    ap.add_argument("--zip", required=True, help="对应的 CurSeen_<version>.zip")
+    ap.add_argument("--zip", required=True, help="对应的 CurSeen_<version>.zip（只确认存在）")
     ap.add_argument(
         "--published",
         default=date.today().isoformat(),
@@ -69,22 +65,20 @@ def main() -> None:
     zip_path = Path(args.zip)
     if not zip_path.is_file():
         fail(f"zip 不存在：{zip_path}")
-    tag = version
+    name = f"CurSeen_{version}.zip"
     data = {
         "version": version,
         "published": args.published,
         "notes": history_notes(version),
-        "sha256": sha256_file(zip_path),
         "urls": {
-            "gitee": f"https://gitee.com/qiuzongman/curseen/releases/download/{tag}/CurSeen_{version}.zip",
-            "github": f"https://github.com/zongmanqiu/CurSeen/releases/download/{tag}/CurSeen_{version}.zip",
+            "gitee": f"https://gitee.com/qiuzongman/curseen/releases/download/{version}/{name}",
+            "github": f"https://github.com/zongmanqiu/CurSeen/releases/download/{version}/{name}",
         },
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"已生成 {out}（{version}，{zip_path.stat().st_size} B）")
-    print(f"sha256={data['sha256']}")
+    print(f"已生成 {out}（{version}，{name}）")
 
 
 if __name__ == "__main__":

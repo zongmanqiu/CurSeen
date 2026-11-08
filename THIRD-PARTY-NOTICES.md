@@ -57,7 +57,6 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 | `resvg` / `usvg`（**optional**，仅 `icon-gen` feature） | 0.48.x | Apache-2.0 OR MIT | **构建期**把 SVG 图标 / 二维码源光栅化成位图产物（`examples/gen_icon.rs`）。默认不编译，**既不进 exe 也不随包分发**——产物位图是它的输出，不受其许可约束 |
 | `gif` | 0.13.x | MIT OR Apache-2.0 | 悬浮标「图片」类型的 GIF 动画帧解码 |
 | `ureq`（native-tls + gzip） | 3.x | MIT OR Apache-2.0 | 更新检查与下载 |
-| `sha2` | 0.10.x | MIT OR Apache-2.0 | 本体更新包 `update.json` 的 sha256 校验 |
 | `native-tls`（Windows 侧落到 `schannel`） | 0.2.x | MIT OR Apache-2.0 | `ureq` 的 TLS 后端；加解密与信任链实际由**系统** Schannel 完成（2026-10-08 起取代 `rustls` + `ring`，理由见 `Cargo.toml` 注释） |
 | `chrono` | 0.4.x | MIT OR Apache-2.0 | 时间戳（日志 / 产物命名） |
 | `rand` | 0.8.x | MIT OR Apache-2.0 | 特效随机量 |

@@ -242,10 +242,28 @@ pub fn encode_png(shot: &Shot) -> Result<Vec<u8>> {
 /// ★ 拿到的 `Shot` 转位图时**必须**用 [`crate::core::backdrop::shot_to_bitmap_alpha`]：
 ///   文件解出来的 α 是内容，而 `shot_to_bitmap` 那一档按抓屏语义把 α 一律刷成 255。
 pub fn load_png(path: &std::path::Path) -> Option<Shot> {
-    use std::io::BufReader;
-    let f = std::fs::File::open(path).ok()?;
-    let dec = png::Decoder::new(BufReader::new(f));
+    decode_png_bytes(&std::fs::read(path).ok()?)
+}
+
+/// PNG **字节** → 全尺寸位图（[`Shot`]，BGRA）。
+///
+/// 与 [`load_png`] 是同一套解码，差别只在输入形态：剪贴板的 `PNG`
+/// 格式（见 `platform::clipboard`）手里是别的进程塞进来的一段字节，不是文件。
+/// 两条路必须共用这一份实现——调色板/灰度/16 位这些分支漏一个就会静默拿错像素。
+pub fn decode_png_bytes(bytes: &[u8]) -> Option<Shot> {
+    use std::io::Cursor;
+    let dec = png::Decoder::new(Cursor::new(bytes));
     let mut r = dec.read_info().ok()?;
+    // ★ 先看 IHDR 再分配：这里也吃剪贴板来的字节（别的进程塞的），
+    //   一个头部声明 6 万×6 万的小文件就够把 `output_buffer_size()` 撑成天文数字。
+    //   上界与 DIB 那条路取同一个 16384。
+    if r.info().width == 0
+        || r.info().height == 0
+        || r.info().width > 16384
+        || r.info().height > 16384
+    {
+        return None;
+    }
     let mut buf = vec![0u8; r.output_buffer_size().unwrap_or(0)];
     let info = r.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
@@ -553,6 +571,31 @@ mod tests {
         let info = reader.next_frame(&mut buf).expect("解码 PNG");
         buf.truncate(info.buffer_size());
         assert_eq!(buf, want, "解码像素必须与 to_rgba 逐字节一致");
+    }
+
+    /// 剪贴板 `PNG` 格式那条路：字节 → `Shot` 必须与源位图逐字节一致（含 α、含 BGRA 序）。
+    ///
+    /// 为什么这条是判据而不是"看起来对"：Chromium 系（Chrome / Edge / Electron，含
+    /// RStudio Desktop）复制图片时**只写** `PNG` + `CF_DIBV5`，不写 `CF_DIB`。
+    /// 这条路一旦解错通道或把 α 刷成 255，历史里就会是一张偏色/黑底的图——比"收不进来"
+    /// 更难发现。用带非零 α 的样本，漏换序、漏保留 α 都会红。
+    #[test]
+    fn decode_png_bytes_keeps_channels_and_alpha() {
+        let s = Shot {
+            w: 2,
+            h: 2,
+            bgra: vec![
+                0x11, 0x22, 0x33, 0x80, 0x44, 0x55, 0x66, 0xFF, 0x77, 0x88, 0x99, 0x00, 0xAA, 0xBB,
+                0xCC, 0x40,
+            ],
+        };
+        let bytes = encode_png(&s).expect("PNG 应编码成功");
+        let got = decode_png_bytes(&bytes).expect("字节应可解码");
+        assert_eq!((got.w, got.h), (2, 2));
+        assert_eq!(got.bgra, s.bgra, "像素（含 α）必须逐字节一致");
+        // 非 PNG 的垃圾字节要安静地返回 None，不能 panic（剪贴板是外部数据）。
+        assert!(decode_png_bytes(b"not a png at all").is_none());
+        assert!(decode_png_bytes(&[]).is_none());
     }
 
     /// DIB 的两条写入口（RGBA 直通 / BGRA）必须产生同一份字节，且首行是源图最后一行。

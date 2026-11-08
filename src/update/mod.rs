@@ -1,5 +1,9 @@
 //! 自更新：版本比较 → 拉 `update.json`（Gitee/GitHub 双源 + 本地缓存）→ 下载 zip
-//! → 校验 sha256 → 起批处理替换并重启。
+//! → 起批处理替换并重启。
+//!
+//! ★ 判据只有**版本号 + 包文件名**（2026-11-09 用户口径）：下载的 zip 不做哈希/字节数
+//! 校验。官方双镜像 + HTTPS + 官方域名白名单已经足够，多一层哈希只在"重新打包忘了改
+//! 清单"时把用户挡在更新门外。
 //!
 //! 对齐 Python `curseen/update/`（`checker` / `downloader` / `installer`），但线程模型换成
 //! 本项目的范式：**每次联网都在独立后台线程，结果经 `UiMsg::Update` 回 UI 线程**
@@ -40,5 +44,4 @@ pub struct UpdatePrompt {
     pub latest: String,
     pub notes: String,
     pub urls: [String; 2],
-    pub sha256: String,
 }

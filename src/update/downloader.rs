@@ -16,14 +16,6 @@ pub fn update_zip_path() -> PathBuf {
     crate::core::paths::update_dir().join("curseen_update.zip")
 }
 
-/// 计算已下载 zip 的 sha256（小写十六进制）；文件读不了时报中文原因。
-///
-/// 更新包通常只有几 MB；读进内存一次即可，后续若变成几十 MB 再改流式。
-pub fn file_sha256(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读更新包失败：{e}"))?;
-    Ok(super::manifest::sha256_hex(&bytes))
-}
-
 /// 把 `url` 下载到 `dest`。`on_progress(已收字节, 总字节)` 在每块之后回调一次；
 /// 服务端未给 `Content-Length` 时 `total` 为 0（调用方据此显示"未知总量"）。
 ///

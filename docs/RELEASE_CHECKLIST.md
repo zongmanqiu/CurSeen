@@ -12,13 +12,17 @@
 - [ ] `HISTORY.md` → 顶部把 `（开发中）` 小节定为正式版本号，并把该节**压缩为面向使用者的
       功能 / 修复要点**（旧版本保持要点级，版本再多也不超篇幅上限）
 - [ ] 用**唯一打包器**生成上传 zip：`python build/pack_release.py --version <版本>`。
-      ★ 禁止手工压缩 `build/`：会带入 `assets/docs/update.json`（自指哈希），且文件名编码
+      用 7-Zip 以 `-mcu=on` 写 UTF-8 文件名；同时再产出一个**包外**清单
+      `temp/release/CurSeen_<版本>.manifest.txt`（逐文件字节数 / 路径，**不记哈希**，
+      打包者自己核对用，**不进 zip、不上传**）。
+      **包内容清单的正本见《开发指南.md》§十**（必须有的四项 / 禁止的运行期文件）。
+      ★ 禁止手工压缩 `build/`：会带入 `assets/docs/update.json`（运行期缓存），且文件名编码
       不受控（Windows 压缩工具可能写成 GBK）；打包器用源码树 `main/assets` 并以 UTF-8 写包名。
 - [ ] 生成 `update.json`：`python build/gen_update_json.py --version <版本> --zip <刚打出的 zip>`；
       再用 `--out assets/docs/update.json` 生成随包缓存。**两次的 --zip 必须是同一个文件**
 - [ ] 上传前先核对本地包：`python build/check_update_asset.py --local <zip>` → `本地核对通过`
 - [ ] 上传 release 资产后，运行 `python build/check_update_asset.py`：Gitee / GitHub 两个镜像
-      都必须 `[ok]` 且 sha256 与 `update.json` 一致；不通过不得宣布发布
+      都必须 `[ok]`（地址通 + 返回 zip + 文件名与版本一致）；不通过不得宣布发布
 - [ ] 下载源默认是 **Gitee**（`StoreSettings::default().source == 0`，有配置单测钉住）；
       `update.json` / `scripts.json` 两条地址都属于官方仓库，不允许第三方镜像
 
@@ -62,10 +66,19 @@
 
 - [ ] 产物用 `python build/pack_release.py --version <版本>` 生成（输出在仓库外
       `temp/release/CurSeen_<版本>.zip`）。它取 `build/curseen.exe` + `main/assets/` +
-      `LICENSE` + `build/licenses/`，并**排除 `assets/docs/update.json`**
+      `LICENSE` + `build/licenses/`，**排除 `assets/docs/update.json`**，
+      并在**包外**写 `CurSeen_<版本>.manifest.txt`（逐文件字节数 / 路径，不记哈希）
+- [ ] 清单**只管打包的人看**，不是发行内容：`zip` 里不许有 `MANIFEST.txt`
+      （打包器回读时按禁名拦；上传 release 只传 zip，清单留在本地）
+- [ ] **包内容清单的正本是《开发指南.md》§十**：必须有的四项、禁止入包的运行期文件
+      （`config.json` / `log/` / `temp/` / `data/` / `drafts/` / `*.pdb` / 任何 `update.json`
+      / 任何 `MANIFEST.txt`）都在那里；打包器打完会**回读核对**（文件集合完全相等 +
+      无禁用项 + 中文名 UTF-8），任一项不符即失败
+- [ ] 打包器是 **7-Zip**（`-tzip -mx=9 -mcu=on`）：找不到 7z 直接失败，可用 `CURSEEN_7Z`
+      指定路径；**不回退 `zipfile`**——两套打包器产出的字节不同，"官方包"就没有唯一定义
 - [ ] **禁止手工压缩 `build/`**：`build/assets/` 是运行期目录（含本机已装包/旧文件），
-      且 Windows 工具可能用 ANSI/GBK 写中文文件名、还会把自指的 `update.json` 带进去。
-      2026-10-31 的 2.1.1 首次更新失败就是手工包与清单哈希不一致（exe 是对的，包不是）。
+      且 Windows 工具可能用 ANSI/GBK 写中文文件名、还会把运行期的 `update.json` 带进去。
+      统一走打包器，包内文件集合才只有那一份"官方定义"。
 - [ ] **许可文件随包分发已自动化**：步骤 ⑥ 同步并复核三者齐备，缺一即失败
       —— 直接整目录取用即可，**不要**再从 `main/` 手工复制、也不要手工编辑 `build/` 里的副本。
       口径与理由见《开发指南.md》§八；机制见 `build/build_readme.md` §四

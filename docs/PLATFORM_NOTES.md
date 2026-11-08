@@ -80,3 +80,15 @@
 判据写法：**平台级四变体对照探针**（默认 / 接管 minmax 写满 / 只写 min / 换 `WS_POPUP`）
 定修法，**端到端探针**（真 exe + 剪贴板放极端宽高比纯品红 CF_DIB + 截屏量品红包围盒）
 定验收。两者都必须能自己红一次。
+
+## 八、剪贴板图像格式（2026-11-09）
+
+> 用户报"RStudio 右键 `Copy Image`，别处都能粘，只有我们不进剪贴板历史"。根因是**格式
+> 覆盖面**，不是时序或权限。详见《踩坑记录》§27。
+
+| 结论 | 依据 |
+|---|---|
+| Chromium 系（Chrome / Edge / Electron，含 RStudio Desktop）复制图片时**只写** `PNG`（注册名）+ `CF_DIBV5`(17) | Chromium `ui/base/clipboard/clipboard_win.cc::WriteBitmap`：先 `PngType()` 再 `BitmapType()`（Windows 上 `BitmapType` = DIBV5）；RStudio 桌面版 `context-menu.ts` 的「Copy Image」就是 `webContents.copyImageAt` |
+| 板上有 `CF_DIBV5` 时，`IsClipboardFormatAvailable(CF_DIB)` **返回真**（系统声称可合成），但 `GetClipboardData(CF_DIB)` **不保证给得出数据**（实测既有 NULL 也有成功，合成结果不稳定） | 探针 `tests/probes/clip_png_dibv5.rs` 诊断行两次运行分别为 `GetClipboardData(CF_DIB)=false` / `=true`。★ "按格式判存在"与"真去取"必须分开验证，且不能把合成结果当数据源 |
+| 只有 `PNG` 没有 `CF_DIB` 时，`IsClipboardFormatAvailable(8)` 为假 ⇒ 只认 CF_DIB 的实现连"要不要读"都判成否 | 同上（PNG-only 用例在旧实现下红，修复后绿） |
+| `CF_DIBV5` 的 α 可当真，但必须三项同时成立：`biSize>=108` + `bV5AlphaMask != 0` + 像素真有非零 α。`CF_DIB` 一律刷 255 | 截图工具写 32bpp 时 α 位全 0（"未定义"），当真就整张透明；判据是纯函数 `honor_alpha` |

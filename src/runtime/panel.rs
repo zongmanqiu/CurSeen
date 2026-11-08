@@ -256,7 +256,6 @@ impl Runtime {
             UpdateEvent::Available {
                 latest,
                 urls,
-                sha256,
                 notes,
             } => {
                 log::info!(
@@ -273,7 +272,6 @@ impl Runtime {
                     latest,
                     notes,
                     urls,
-                    sha256,
                 });
             }
             UpdateEvent::CheckFailed { error } => {

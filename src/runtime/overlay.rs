@@ -883,6 +883,29 @@ fn open_panel(ctx: &mut EventCtx, rt: &Rc<RefCell<Runtime>>) {
             //   借用只在建树这一下：`content` 回调返回后借用即释放。
             .content(move || crate::ui::build_panel(&mut *rt.borrow_mut())),
     );
+
+    // ★★ 开窗即抢前台（2026-11-09，用户报"呼快捷键呼出的面板被其它软件遮挡"）：
+    //   windui 建的是**普通窗口**（非置顶），平台层 `show_window` 只做
+    //   `ShowWindow(SW_SHOW)`——**不激活**。而热键是在别的应用里按下的，此刻本进程
+    //   没有前台权限，面板就悬在"已显示但未激活"：键盘焦点还在目标应用、z 序也不保证
+    //   在最前（同进程/同 owner 的窗口才会让出位置）。用户的观感正是"被别的软件压着，
+    //   那些软件明明没置顶"。
+    //   窗口是**排队**创建的（`ctx.open_window` 只往队列里写，建窗发生在回调返回之后），
+    //   所以只能稍后再找；按标题找窗口 + ALT 抬落破前台锁是 `win_util` 里既有的手法
+    //   （截图区域窗 / 贴图窗同款）。找不到就作罢——面板被点一下也会激活，不致命。
+    //   线程必须是命名的（崩溃报告按线程名标注）。
+    let _ = std::thread::Builder::new()
+        .name("panel-activate".into())
+        .spawn(|| {
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                if crate::platform::win_util::focus_window_by_title(crate::ui::panel::TITLE) {
+                    log::info!("面板快捷键：控制面板已带到前台");
+                    return;
+                }
+            }
+            log::warn!("面板快捷键：240ms 内没找到控制面板窗口，放弃置前");
+        });
 }
 
 /// 打开一个贴图窗，并做"同时存活上限"的淘汰（超出就关最早那个）。

@@ -70,7 +70,6 @@ pub fn start_check(
             Ok(manifest::Outcome::Available(plan)) => UpdateEvent::Available {
                 latest: plan.latest,
                 urls: plan.urls,
-                sha256: plan.sha256,
                 notes: plan.notes,
             },
             Ok(manifest::Outcome::UpToDate { latest }) => UpdateEvent::UpToDate { latest },
@@ -85,11 +84,11 @@ pub fn start_check(
 ///
 /// `urls` 顺序 = 先首选源、再备用源（可有一条空串）。首选源连不上/传输失败时
 /// **自动换另一路重试**——镜像选择只决定"先试哪个"，这与商店安装、清单拉取的语义一致。
-pub fn start_download(
-    tx: &Option<Sender<UiMsg>>,
-    urls: &[String; 2],
-    sha256: &str,
-) -> Result<(), String> {
+///
+/// ★ 下载完**不校验字节**（2026-11-09 用户口径）：地址必须是官方域名、文件名必须是
+/// `CurSeen_<版本>.zip`（[`manifest::check`] 已验），HTTPS 传输失败会自己报错。
+/// 曾经的 sha256 比对只会让"重新打包忘了改清单"变成用户点更新后失败。
+pub fn start_download(tx: &Option<Sender<UiMsg>>, urls: &[String; 2]) -> Result<(), String> {
     let tx = tx.clone().ok_or_else(|| "UI 通道尚未就绪".to_string())?;
     let candidates = download_candidates(urls);
     if candidates.is_empty() {
@@ -99,7 +98,6 @@ pub fn start_download(
     let Some(busy) = BusyGuard::take(&DOWNLOAD_BUSY) else {
         return Err("正在下载更新".to_string());
     };
-    let expected_sha = sha256.to_ascii_lowercase();
 
     spawn(move || {
         let _busy = busy;
@@ -143,13 +141,7 @@ pub fn start_download(
                 error: errors.join("；"),
             }
         } else {
-            match downloader::file_sha256(&dest) {
-                Ok(actual) if actual == expected_sha => UpdateEvent::Downloaded { path: dest },
-                Ok(actual) => UpdateEvent::DownloadFailed {
-                    error: format!("更新包 sha256 不匹配（期望 {expected_sha}，实际 {actual}）"),
-                },
-                Err(error) => UpdateEvent::DownloadFailed { error },
-            }
+            UpdateEvent::Downloaded { path: dest }
         };
         let _ = tx.send(UiMsg::Update(ev));
     });
@@ -195,7 +187,6 @@ mod tests {
                 "https://gitee.com/a.zip".into(),
                 "https://github.com/a.zip".into(),
             ],
-            sha256: "a".repeat(64),
             notes: "notes".into(),
         };
         let b = a.clone();
@@ -214,8 +205,7 @@ mod tests {
             &[
                 "https://gitee.com/a.zip".to_string(),
                 "https://github.com/a.zip".to_string()
-            ],
-            &"a".repeat(64)
+            ]
         )
         .is_err());
     }

@@ -1,6 +1,6 @@
 [package]
 name = "curseen-ui"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 rust-version = "1.94"
 # ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。
@@ -154,10 +154,6 @@ png = "0.18"
 #      不改变产物体积。纯 Rust，无 C 依赖。ZIP 容器的解析在我们自己手里
 #      （`platform/unzip.rs`）——只认 stored / deflate 两种方法，够覆盖现实里几乎所有的包。
 flate2 = "1"
-
-# ── 更新包完整性（update.json 的 sha256）──
-# 只用于本体的更新包校验；纯 Rust，不引入 TLS/系统库依赖。
-sha2 = "0.10"
 
 # ── SVG 光栅化：仅 `icon-gen` 特性下用（examples/gen_icon.rs，图标/二维码源 → 位图产物）。
 #    依赖是 optional 的：默认构建/测试完全不编译它，换图标时才随 feature 拉进来。

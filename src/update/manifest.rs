@@ -1,8 +1,12 @@
 //! 本体更新清单 `update.json`：远端拉取、本地缓存、版本判断。
 //!
 //! 与商店的 `scripts.json` 同形但不复用它的字段：这里只有 `version / published /
-//! notes / sha256 / urls`。清单地址来自 `config.update`，**选中源跟随
+//! notes / urls`。清单地址来自 `config.update`，**选中源跟随
 //! `config.store.source`**，避免同一台机器维护两套镜像选择。
+//!
+//! ★ 判据只有两条（2026-11-09 用户口径）：**版本号**能解析且比本地新，**包文件名**等于
+//! `CurSeen_<版本>.zip`。下载包不再做哈希/字节数校验——官方双镜像 + HTTPS 已经足够，
+//! 多一道哈希只会在"重新打包忘了更新清单"时把用户挡在门外。
 //!
 //! 缓存写在 `assets/docs/update.json`：联网成功就替换它；网络失败时仍可用上次缓存
 //! 判断"本地是不是比已知版本旧"。清单本身不决定能不能下载，下载地址还要经过
@@ -28,8 +32,6 @@ pub struct UpdateManifest {
     pub published: String,
     #[serde(default)]
     pub notes: String,
-    #[serde(default)]
-    pub sha256: String,
     pub urls: UpdateUrls,
 }
 
@@ -48,7 +50,6 @@ pub struct UpdateUrls {
 pub struct UpdatePlan {
     pub latest: String,
     pub notes: String,
-    pub sha256: String,
     pub urls: [String; 2],
 }
 
@@ -77,7 +78,7 @@ pub fn is_safe_download_url(url: &str) -> bool {
         || url.starts_with("https://github.com/zongmanqiu/CurSeen/")
 }
 
-/// 解析并做最小校验。清单本身不要求 sha256（已是最新时用不到）。
+/// 解析并做最小校验：`version` 能解析、至少有一条 zip 地址。
 pub fn parse(text: &str) -> Result<UpdateManifest, String> {
     let m: UpdateManifest =
         serde_json::from_str(text).map_err(|e| format!("update.json 不是合法 JSON：{e}"))?;
@@ -154,13 +155,17 @@ fn outcome_from(
         ));
     };
     let second_url = candidates.get(1).cloned().unwrap_or_default();
-    if manifest.sha256.len() != 64 || !manifest.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("update.json 的 sha256 缺失或不是 64 位十六进制".to_string());
+    // ★ 唯一的包级判据：地址最后一段必须是 `CurSeen_<版本>.zip`。
+    //   挡的是"改版号忘了改地址"这类发布手误（清单说 2.1.2、地址还指着 2.1.1）。
+    let want = zip_file_name(&manifest.version);
+    for u in [&first_url, &second_url] {
+        if !u.is_empty() && url_file_name(u) != want {
+            return Err(format!("update.json 的下载地址不是 {want}：{u}"));
+        }
     }
     Ok(Outcome::Available(UpdatePlan {
         latest: manifest.version.clone(),
         notes: manifest.notes.clone(),
-        sha256: manifest.sha256.to_ascii_lowercase(),
         urls: [first_url, second_url],
     }))
 }
@@ -197,12 +202,15 @@ pub fn check(urls: &[String; 2], source: usize, current: Version) -> Result<Outc
     Err(last_err)
 }
 
-/// sha256 十六进制（供下载校验和测试共用）。
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+/// 发行包文件名：`CurSeen_<版本>.zip`（下载地址最后一段必须与它一致）。
+pub fn zip_file_name(version: &str) -> String {
+    format!("CurSeen_{version}.zip")
+}
+
+/// 取 URL 的最后一段文件名（剥掉 `?query` / `#frag` 与尾斜杠）。
+fn url_file_name(url: &str) -> &str {
+    let tail = url.split(['?', '#']).next().unwrap_or(url);
+    tail.trim_end_matches('/').rsplit('/').next().unwrap_or("")
 }
 
 #[cfg(test)]
@@ -214,7 +222,6 @@ mod tests {
             "version": "2.1.0",
             "published": "2026-10-30",
             "notes": "### 新增\n- 更新器改用 update.json",
-            "sha256": "a".repeat(64),
             "urls": {
                 "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.0/CurSeen_2.1.0.zip",
                 "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.0/CurSeen_2.1.0.zip"
@@ -236,7 +243,6 @@ mod tests {
             p.urls[1].starts_with("https://gitee.com/"),
             "另一路必须作为备用地址一起带回"
         );
-        assert_eq!(p.sha256.len(), 64);
 
         // 换成 Gitee 首选，顺序也要跟着换。
         let Outcome::Available(p) = outcome_from(&m, 0, Version::parse("2.0.5").unwrap()).unwrap()
@@ -277,17 +283,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_third_party_or_unhashed_manifests() {
+    fn rejects_third_party_or_misnamed_packages() {
         let mut v: serde_json::Value = serde_json::from_str(&good()).unwrap();
         v["urls"]["gitee"] = serde_json::json!("https://evil.example/x.zip");
         v["urls"]["github"] = serde_json::json!("https://evil.example/x.zip");
         let m: UpdateManifest = serde_json::from_value(v).unwrap();
         assert!(outcome_from(&m, 0, Version::parse("2.0.5").unwrap()).is_err());
 
+        // ★ 唯一的包级判据：地址最后一段必须与版本对上——挡"改了版号忘了改地址"。
         let mut v: serde_json::Value = serde_json::from_str(&good()).unwrap();
-        v["sha256"] = serde_json::json!("not-a-hash");
+        v["urls"]["gitee"] = serde_json::json!(
+            "https://gitee.com/qiuzongman/curseen/releases/download/2.0.5/CurSeen_2.0.5.zip"
+        );
+        v["urls"]["github"] = serde_json::json!("");
         let m: UpdateManifest = serde_json::from_value(v).unwrap();
-        assert!(outcome_from(&m, 0, Version::parse("2.0.5").unwrap()).is_err());
+        let err = outcome_from(&m, 0, Version::parse("2.0.0").unwrap()).unwrap_err();
+        assert!(
+            err.contains("CurSeen_2.1.0.zip"),
+            "要指出期望的文件名：{err}"
+        );
     }
 
     #[test]
@@ -300,13 +314,5 @@ mod tests {
         ));
         assert!(!is_safe_manifest_url("https://example.com/update.json"));
         assert!(!is_safe_download_url("https://example.com/CurSeen.zip"));
-    }
-
-    #[test]
-    fn sha256_matches_a_known_vector() {
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }

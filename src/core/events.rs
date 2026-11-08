@@ -650,13 +650,12 @@ pub enum UpdateEvent {
     CheckStarted,
     /// 已是最新版本。
     UpToDate { latest: String },
-    /// 有新版本，且拿到了下载地址 / 校验值 / HISTORY 说明。
+    /// 有新版本，且拿到了下载地址 / HISTORY 说明。
     ///
     /// `urls` 顺序 = **先首选源、再备用源**（可能只有一条）；下载失败时按序换源重试。
     Available {
         latest: String,
         urls: [String; 2],
-        sha256: String,
         notes: String,
     },
     /// 检查失败（网络 / 解析 / 没有可下载的包）。

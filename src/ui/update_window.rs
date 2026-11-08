@@ -21,7 +21,6 @@ pub fn open(ctx: &mut EventCtx, prompt: UpdatePrompt, sender: Option<Sender<UiMs
     let latest = prompt.latest.clone();
     let notes = prompt.notes.clone();
     let urls = prompt.urls;
-    let sha256 = prompt.sha256.clone();
     let sender_for_btn = sender.clone();
     ctx.open_window(
         Window::new("发现新版本", W, H)
@@ -31,7 +30,7 @@ pub fn open(ctx: &mut EventCtx, prompt: UpdatePrompt, sender: Option<Sender<UiMs
             .centered(true)
             .single("update-notes")
             .bg(to_color(tokens::BG))
-            .content(move || content(&latest, &notes, &urls, &sha256, sender_for_btn.clone())),
+            .content(move || content(&latest, &notes, &urls, sender_for_btn.clone())),
     );
 }
 
@@ -39,12 +38,10 @@ fn content(
     latest: &str,
     notes: &str,
     urls: &[String; 2],
-    sha256: &str,
     sender: Option<Sender<UiMsg>>,
 ) -> Element {
     let body = signal(notes.to_string());
     let urls = urls.clone();
-    let sha256 = sha256.to_string();
     let text = Element::text_input(body, "")
         .multiline()
         .wrap(true)
@@ -58,7 +55,7 @@ fn content(
 
     let update = Element::button("更新").on_click(move |ctx| {
         ctx.request_close();
-        if let Err(e) = crate::update::task::start_download(&sender, &urls, &sha256) {
+        if let Err(e) = crate::update::task::start_download(&sender, &urls) {
             log::warn!("发起更新下载失败：{e}");
         }
     });
@@ -127,7 +124,6 @@ mod tests {
                 "https://gitee.com/x/a.zip".to_string(),
                 "https://github.com/x/a.zip".to_string(),
             ],
-            &"a".repeat(64),
             None,
         );
         let mut tree = Tree::new();
