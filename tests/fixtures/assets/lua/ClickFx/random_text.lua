@@ -30,7 +30,7 @@ function schema()
     { key = "size",        label = "字号",       type = "int", min = 10,  max = 72,  step = 1,   default = 22 },
     { key = "count",       label = "每次几个",   type = "int", min = 1,   max = 8,   step = 1,   default = 1 },
     { key = "radius",      label = "散开半径",   type = "int", min = 0,   max = 240, step = 5,   default = 60 },
-    { key = "rise",        label = "上浮距离",   type = "int", min = 0,   max = 200, step = 5,   default = 36 },
+    { key = "rise",        label = "上浮距离",   type = "int", min = 0,   max = 200, step = 5,   default = 35 },
     { key = "duration",    label = "显示时长(ms)", type = "int", min = 200, max = 3000, step = 100, default = 900 },
   }
 end
@@ -109,7 +109,7 @@ function draw(ctx, p)
   end
 
   local size = p.size or 22
-  local rise = p.rise or 36
+  local rise = p.rise or 35
   -- 彩虹色勾选（bool）。兼容旧配置：曾用 color_mode choice（"rainbow"/"fixed"）。
   local rb = p.rainbow
   if rb == nil then rb = (p.color_mode ~= "fixed") end

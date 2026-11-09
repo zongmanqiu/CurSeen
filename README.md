@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.1.2 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.2/CurSeen_2.1.2.zip)**
- ｜ **[⬇️ 下载 2.1.2 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.2/CurSeen_2.1.2.zip)**
+**[⬇️ 下载 2.1.3 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.3/CurSeen_2.1.3.zip)**
+ ｜ **[⬇️ 下载 2.1.3 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.3/CurSeen_2.1.3.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
@@ -21,7 +21,7 @@
   脚本 API 见 `assets/lua/API.md`。
 - **轻量**：CPU 软渲染、无外部运行时依赖，单可执行文件即装即用；空闲零功耗、关闭即释放资源。
 
-> 更完整的隐藏快捷键与技巧见随包分发的 **`assets/manual/隐藏快捷键手册.html`**（安装目录 `assets/manual/` 内）。
+> 更完整的隐藏快捷键与技巧见随包分发的 **`assets/docs/隐藏快捷键手册.html`**（安装目录 `assets/docs/` 内）。
 
 ## 快速开始
 

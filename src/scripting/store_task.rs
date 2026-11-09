@@ -6,7 +6,8 @@
 //! # 数据从哪来 / 存到哪（m43：不再有全局记录目录）
 //!
 //! - 清单：官方双镜像（选中镜像优先，失败再试另一个），成功一次就写进**随包的**
-//!   `<exe>/assets/docs/scripts.json`（RuPix 同款：docs 里的 JSON，联网更新替换它）；
+//!   `<exe>/assets/cache/scripts.json`（联网更新替换它；`docs/` 只放文档，见
+//!   `assets/docs/README.md`）；
 //!   两个都拉不到时回退这份文件并注明"离线"。
 //! - 包 zip：下到 `<exe>/temp/script_store/<id>.zip`，装完即删（不留第二份）。
 //! - 安装记录：写在**包自己目录**里的 `.curseen-pack.json`（由 `scripting::store` 读写）。
@@ -24,9 +25,9 @@ use crate::scripting::store::{self, CatalogPack};
 
 const CATALOG_MAX_BYTES: u64 = 4 << 20;
 
-/// 随包清单：`<exe>/assets/docs/scripts.json`（联网刷新会替换它）。
+/// 随包清单：`<exe>/assets/cache/scripts.json`（联网刷新会替换它）。
 pub fn catalog_path() -> PathBuf {
-    crate::core::paths::asset_dir("docs").join("scripts.json")
+    crate::core::paths::asset_dir("cache").join("scripts.json")
 }
 
 /// 脚本根（`assets/lua`）：安装/卸载/读已装记录都以它为根。

@@ -8,7 +8,7 @@
 //! `CurSeen_<版本>.zip`。下载包不再做哈希/字节数校验——官方双镜像 + HTTPS 已经足够，
 //! 多一道哈希只会在"重新打包忘了更新清单"时把用户挡在门外。
 //!
-//! 缓存写在 `assets/docs/update.json`：联网成功就替换它；网络失败时仍可用上次缓存
+//! 缓存写在 `assets/cache/update.json`：联网成功就替换它；网络失败时仍可用上次缓存
 //! 判断"本地是不是比已知版本旧"。清单本身不决定能不能下载，下载地址还要经过
 //! [`is_safe_manifest_url`] / [`is_safe_download_url`] 的官方域名白名单。
 
@@ -19,9 +19,9 @@ use serde::Deserialize;
 use super::checker;
 use super::version::Version;
 
-/// `assets/docs/update.json` 缓存路径。
+/// `assets/cache/update.json` 缓存路径。
 pub fn manifest_path() -> PathBuf {
-    crate::core::paths::asset_dir("docs").join("update.json")
+    crate::core::paths::asset_dir("cache").join("update.json")
 }
 
 /// 远端清单（字段少而明确，不复制 `scripts.json` 的包字段）。
@@ -172,7 +172,7 @@ fn outcome_from(
 
 /// 检查更新：先试选中源，失败再试另一源；两者都失败时用本地缓存。
 ///
-/// 成功拉到清单就把原文写入 `assets/docs/update.json`，下次离线也能判断。
+/// 成功拉到清单就把原文写入 `assets/cache/update.json`，下次离线也能判断。
 pub fn check(urls: &[String; 2], source: usize, current: Version) -> Result<Outcome, String> {
     let source = source.min(1);
     let mut last_err = "没有可用的更新清单地址".to_string();

@@ -29,7 +29,7 @@
 | 13b | `docs/踩坑记录-2.md` | 同上，本册 §六–§十。**分册规则：册数不限，每册 ≤ 500 行，写满就再开一册**（章节编号跨册唯一，源码注释的 `《踩坑记录》§N` 按编号查） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise`（发现式扫 `踩坑记录*.md`） |
 | 13c | `docs/踩坑记录-3.md` | 同上，本册 §十一–§十五（录屏 MF/DXGI、编译成本与测试分层、SinkWriter 节流、被否定的槽位池、moov 单点）。**分册规则：每册 ≤ 500 行，写满再开一册** | 同上 |
 | 13d | `docs/踩坑记录-4.md` | 同上，本册 §十六起：录制内核（单文件方案）的失败根因链、音频内容驱动时间线、看门狗与限时收尾；**§十七 录制的结构性隔离**（采集/编码解耦 + 出进程隔离 `curseen-rec.exe`） | `test_repo_holds_no_process_documents` + `test_controlled_docs_stay_concise` |
-| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.15–17.19**；**§二十 覆盖层两套 DPI 换算源分家（特效不落鼠标）**；**§二十六 贴图长图放大图片不放大：系统跟踪尺寸收口（windui 补丁 095）** | 同上 |
+| 13e | `docs/踩坑记录-5.md` | 同上，本册 §十七续起：I-beam 光标闪烁（GDI 直写复制纹理）、音频两路混音对齐与音画滞后、「硬件编码」谎报（允许≠启用）；**§17.15–17.19**；**§二十 覆盖层两套 DPI 换算源分家（特效不落鼠标）**；**§二十六 贴图长图放大图片不放大：系统跟踪尺寸收口（windui 补丁 095）**；**§二十九 悬浮标时间驱动动画僵在半空（帧按需给，脚本要自己续帧）** | 同上 |
 | 14 | `docs/UI_COMPONENTS.md` | 面板行组件库（`card.rs` 正本）变化；脚本参数类型→控件映射变化；Lua 脚本契约 / 绘图指令 / 宿主 API 变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 15 | `assets/README.md` | 资源目录版图（归谁 / 放什么）变化 | `test_repo_holds_no_process_documents`（登记核对） |
 | 16 | `assets/Sounds/README.md` | 音频格式白名单 / 配置键 / 版权归属变化 | （凡动 `SUPPORTED_EXT` 必读） |
@@ -37,8 +37,13 @@
 | 18 | `assets/lua/HoverDot/README.md` | 悬浮标出厂脚本清单变化 | — |
 | 18c | `assets/lua/API.md` | **Lua 脚本 API 权威参考**（随 assets 分发）：全局函数 / 环境变量 / 绘图指令 / `ctx.fs` / 回调契约 / 返回值契约变化 | —（与 `scripting/api_*.rs` 实际注册逐项对账） |
 | 18e | `assets/lua/Lua脚本手册.html` | **随包 Lua 手册**（指南+API 合一）：第一部分为脚本作者指南（含 v2 包格式、官方资源下载、热更新），第二部分三张表由 `build/gen_manual_tables.py` 从 `API.md` **机械镜像**；改 API 后必须重跑该脚本 | 门禁 `test_lua_manual_matches_the_api_reference_tables`（读生成物形状） |
-| 18d | `assets/manual/隐藏快捷键手册.md`（+ 同名 `.html`，随 assets 分发进安装目录） | **隐藏快捷键手册**：固定不可改的隐藏键清单变化（含脚本文本窗 / AI 对话窗按键） | —（每条须对照源码实装） |
+| 18f | `assets/docs/配置说明.md` | **`config.json` 手改参考**（键表 / id 三套口径 / 五个案例 / legacy 只读字段）：给用户与外部 AI 用。新增或改名配置字段**必须**同步它 | 门禁 `test_config_doc_keys_exist_in_the_default_config`（文档里每个 `trail.*` / `lua_ext.*` / `key_sound.*` 键都必须在出厂配置里存在） |
+| 18g | `assets/docs/README.md` | **随包文档索引**（给人也给 AI 的第一站）：哪份文档回答什么问题、AI 的阅读顺序、`docs/` 只读纪律 | 门禁 `test_lua_tool_docs_point_at_real_files`（索引必须提到 `lua_tool::DOCS` 里每一份） |
+| 18h | `assets/docs/接入指南.md` | **外部 AI / 测试者的接入第一站**：两种接法（命令行 / MCP 配置示例）、八个工具、四步闭环、判据口径、硬规则、安全边界；新增/改名工具或改接入方式必须同步它，并确认它仍在 `lua_tool::DOCS` 里 | 门禁 `test_lua_tool_docs_point_at_real_files`（路径真实存在 + 索引提到它） |
+| 18i | `assets/docs/MCP说明.md` | **MCP 专章**：stdio / JSON-RPC 握手、八个工具的输入与返回字段、四步闭环、★ `schema` 默认值不进 params 的口径、`isError` / `judged`、安全边界、排查表。改工具签名 / 协议行为 / 参数口径必须同步它 | 门禁 `test_lua_tool_docs_point_at_real_files`（路径真实存在 + 索引提到它） |
+| 18d | `assets/docs/隐藏快捷键手册.md`（+ 同名 `.html`，随 assets 分发进安装目录） | **隐藏快捷键手册**：固定不可改的隐藏键清单变化（含脚本文本窗 / AI 对话窗按键） | —（每条须对照源码实装） |
 | 19 | `examples/README.md` | 离屏探针增删（整目录职责变化） | （`Cargo.toml` 的 `[[example]]` 必须同步） |
+| 21 | `docs/LUA_TOOL.md` | **Lua 工具台**（发行版内建 `--lua-check` / `--lua-trace` / `--lua-shot` / `--mcp`）：命令与旗标、判据表、退出码、脚本挂载点、MCP 接入与工具说明、已知限制。**改这三条命令的口径 / 判据 / 工具签名必须同步本文件** | `test_docs_checks_the_manifest_files_exist` |
 | 20 | `开发指南.md` | 开发/发版流程、文档同步对照、提交前清单、HISTORY 登记规范、工程纪律、**发行包内容清单（§十）** | `test_docs_checks_the_manifest_files_exist`（修改流程唯一正本） |
 
 > **成品 `docs/` 只收这七份**：`DESIGN.md` / `DESIGN_ADOPTION.md` / `PLATFORM_NOTES.md` /
@@ -61,7 +66,7 @@
 | `build/deploy.py` / `gen_licenses.py` / `sync_assets.py` / `gate.py` / `boot_check.py` / `check_deps.ps1` / `layering_scan.py` / `hygiene_scan.py` | 构建 / 部署 / 许可同步 / 按需门禁 / 启动冒烟 / 依赖体检 / 分层体检 / 静态异味体检 |
 | `build/gen_manual_tables.py` | 把 `assets/lua/API.md` 的三张接口表机械镜像进《Lua 脚本手册》第二部分；改 API 后必跑 |
 | `build/gen_update_json.py` | 发版时从 HISTORY 当前版本段取 notes、写 Gitee/GitHub 两个地址到 `update.json`（**不记哈希**：客户端只校验版本号与包文件名） |
-| `build/pack_release.py` | **唯一发行 zip 打包器**（7-Zip `-tzip -mcu=on`）：`build/curseen.exe` + `main/assets/` + 许可 → `CurSeen_<version>.zip`；逐文件字节数 / 路径清单写到**包外** `CurSeen_<version>.manifest.txt`（不记哈希；打包者自用，不进包不上传）；回读核对（含禁 `MANIFEST.txt`）；排除运行期 `assets/docs/update.json`；禁止手工压缩 `build/`。包内容清单见《开发指南.md》§十 |
+| `build/pack_release.py` | **唯一发行 zip 打包器**（7-Zip `-tzip -mcu=on`）：`build/curseen.exe` + `main/assets/` + 许可 → `CurSeen_<version>.zip`；逐文件字节数 / 路径清单写到**包外** `CurSeen_<version>.manifest.txt`（不记哈希；打包者自用，不进包不上传）；回读核对（含禁 `MANIFEST.txt`）；排除运行期 `assets/cache/update.json`；禁止手工压缩 `build/`。包内容清单见《开发指南.md》§十 |
 | `build/check_update_asset.py` | 上传后确认两个镜像就位：地址通 + 返回 zip + 文件名 = `CurSeen_<version>.zip`（`--local` 用于上传前核对本地包）；不比对哈希 |
 | `examples/gen_icon.rs` | 由矢量源 `assets/icons/icon*.svg`（+ `images/*.svg` 二维码）逐档光栅化出 `tray_<N>[_red].rgba`（托盘五档）+ `app.ico`（exe/窗口）+ 二维码 PNG；换图标/二维码只改 SVG 再 `cargo run --example gen_icon --features icon-gen` |
 | `build/app.rc` | 图标资源脚本（`MAINICON` ← `assets/icons/app.ico`），由 `build.rs` 经 `rc.exe` 编译；无 SDK 时跳过 |
@@ -80,7 +85,8 @@
 | 文件 | 说明 |
 |---|---|
 | `assets/lua/**` | 统一 Lua 脚本（唯一脚本根，递归；目录即来源；在线包为 `<id>/pack.json` + 平铺脚本 + `info/`） |
-| `assets/docs/` | 联网清单缓存（`scripts.json` / `update.json`）：程序联网刷新时替换，离线兜底 |
+| `assets/cache/` | 联网清单缓存（`scripts.json` / `update.json`）：程序联网刷新时替换，离线兜底；`update.json` 不进发行包 |
+| `assets/docs/` | 随包文档（`README.md` 索引 / `配置说明.md` / 隐藏快捷键手册）：程序不读不写。**路径是契约**——`lua_tool::DOCS` 会在 `--help` 与 `--lua-check` 里报给 AI，挪文件必同步它，否则 `test_lua_tool_docs_point_at_real_files` 红 |
 | `assets/Sounds/*.wav` | 声音素材（点击声音/键盘声音/拖尾音效共用） |
 | `build/sync_assets.py` | `build.rs` 不拷 assets，部署时靠它同步 |
 | `LICENSE` | AGPL-3.0 许可全文（随发布包分发，步骤 ⑥ 自动同步 `LICENSE` / `THIRD-PARTY-NOTICES.md` / `licenses/`）。★ 官方**逐字**、不加任何署名/说明（版权声明在 `README.md` 与 `Cargo.toml`）；受门禁校验，见 `tests/docs_consistency.rs` |

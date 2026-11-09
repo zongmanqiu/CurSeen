@@ -20,10 +20,10 @@ function schema()
     { key = "lag_scale",  label = "跟随速度", type = "float", min = 0.1,  max = 2,   step = 0.05, default = 1.0 },
     { key = "sway",       label = "摆动幅度", type = "float", min = 0,    max = 20,  step = 0.5,  default = 5 },
     { key = "sway_rate",  label = "摆动频率", type = "float", min = 0,    max = 6,   step = 0.1,  default = 2.2 },
-    { key = "idle_s",     label = "收拢后停笔", type = "float", min = 0,   max = 3,   step = 0.1,  default = 0.35 },
-    { key = "color1",     label = "链1颜色", type = "color",   default = "#F967FB" },
-    { key = "color2",     label = "链2颜色", type = "color",   default = "#53BC28" },
-    { key = "color3",     label = "链3颜色", type = "color",   default = "#6958D5" },
+    { key = "idle_s",     label = "收拢后停笔", type = "float", min = 0,   max = 3,   step = 0.05, default = 0.35 },
+    { key = "color1",     label = "链1颜色", type = "color",   alpha = true, default = "#F967FB" },
+    { key = "color2",     label = "链2颜色", type = "color",   alpha = true, default = "#53BC28" },
+    { key = "color3",     label = "链3颜色", type = "color",   alpha = true, default = "#6958D5" },
   }
 end
 
@@ -137,13 +137,15 @@ function draw(ctx, params)
   end
   if fade_k <= 0.01 then return end
 
-  -- ★ 必须逐个解出 r,g,b —— `hex_to_rgb` 返回 **4** 个值，若写成
+  -- ★ 必须逐个解出 r,g,b,a —— `hex_to_rgb` 返回 **4** 个值，若写成
   --   `{ hex_to_rgb(a), hex_to_rgb(b), hex_to_rgb(c) }`，Lua 只会把最后一个调用展开成
   --   4 项（前两个被截成 1 项），于是 colors[3] 拿到的其实是"红色通道"，g/b 全是 nil。
-  local r1, g1, b1 = hex_to_rgb(params.color1 or "#F967FB")
-  local r2, g2, b2 = hex_to_rgb(params.color2 or "#53BC28")
-  local r3, g3, b3 = hex_to_rgb(params.color3 or "#6958D5")
-  local colors = { { r1, g1, b1 }, { r2, g2, b2 }, { r3, g3, b3 } }
+  -- ★ alpha 也必须一并存进表里（2026-11-09 修）：此前表里只有 3 项，底下
+  --   `cc[4] or 255` 恒等于 255 —— 取色器的透明度条拖到底也毫无变化。
+  local r1, g1, b1, a1 = hex_to_rgb(params.color1 or "#F967FB")
+  local r2, g2, b2, a2 = hex_to_rgb(params.color2 or "#53BC28")
+  local r3, g3, b3, a3 = hex_to_rgb(params.color3 or "#6958D5")
+  local colors = { { r1, g1, b1, a1 }, { r2, g2, b2, a2 }, { r3, g3, b3, a3 } }
   local head_r = params.head_radius or 5
   local taper = params.taper or 0.75
   local sway = params.sway or 5

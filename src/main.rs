@@ -7,6 +7,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // ★★ 工具台分流必须**最靠前**（2026-11-09）：晚于单实例仲裁会被 Handoff 掉
+    //   （表象是"命令行敲完什么都没发生"），晚于提权分支会为一台无头工具拉起 UAC。
+    if let Some(code) = curseen_ui::runtime::lua_tool::run_cli(std::env::args().skip(1).collect()) {
+        std::process::exit(code);
+    }
     curseen_ui::core::logger::init_logging();
     curseen_ui::core::logger::install_panic_hook();
     // ★ 紧跟着挂一环"恢复系统指针"：`panic = "abort"` 下 `Drop` 不会跑，而激光笔这类

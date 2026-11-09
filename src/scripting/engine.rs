@@ -68,7 +68,13 @@ impl ScriptingEngine {
             super::api_ext::set_script_dir(dir);
             super::api_ext::set_script_id(script_name);
         }
-        self.lua.load(&code).exec()
+        // ★ chunk 名必须给：不给的话 Lua 的 traceback 只有 `[C]` 和我们的 Rust 调用点
+        //   （`engine.rs:71: in function 'draw'`），**不含脚本自己的行号**——写脚本的人
+        //   （包括外部 AI）拿到"第 0 帧 draw 出错"却不知道该改哪一行。`@` 前缀 = 文件名。
+        self.lua
+            .load(&code)
+            .set_name(format!("@{}", path.display()))
+            .exec()
     }
 
     /// 更新 Lua 端环境变量（每帧调用）。
@@ -881,6 +887,268 @@ mod tests {
     #[test]
     fn mfcmouse_schema_keys_are_read_by_script() {
         assert_pack_schema_keys_read("MFCMouseEffect", 120);
+    }
+
+    /// 出厂自带的四个目录（`ClickFx` / `HoverDot` / `MouseTrail` / `KeySound`）此前
+    /// **一条 schema 门禁都没有**——四个扩展包有"声明必被读"，自带的反而没人管，
+    /// 于是"参数摆出来但脚本从不读"这类问题只能在用户手里以"拖了没反应"的形式出现。
+    ///
+    /// 两处必须放行的**宿主代读**键：
+    /// - `MouseTrail` 的间隔类脚本（`pixie_dust` / `circle_particles`）：`density` 与
+    ///   `spawn_interval_ms` 由 `controller.rs` 直接按 id 读设置、算好 `spawn_batch`
+    ///   再喂脚本，脚本本身不读；
+    /// - `KeySound/class_sound` 的五个音效键：脚本用 `params[field]` 动态取键，静态扫
+    ///   `params.<key>` 扫不到。
+    fn builtin_unread_allowlist() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
+        vec![
+            (
+                "MouseTrail",
+                "pixie_dust",
+                &["density", "spawn_interval_ms"],
+            ),
+            (
+                "MouseTrail",
+                "circle_particles",
+                &["density", "spawn_interval_ms"],
+            ),
+            (
+                "KeySound",
+                "class_sound",
+                &[
+                    "fn_sound",
+                    "mod_sound",
+                    "symbol_sound",
+                    "digit_sound",
+                    "letter_sound",
+                ],
+            ),
+        ]
+    }
+
+    /// 出厂脚本：`schema()` 声明的每个 key 都必须在源码里被读到。
+    ///
+    /// 与四个扩展包同一条判据，只是目录不同（包是 `scripts/<包名>/`，出厂是顶层目录）。
+    #[test]
+    fn builtin_schema_keys_are_read_by_script() {
+        let root = crate::core::paths::lua_ext_dir();
+        let allow = builtin_unread_allowlist();
+        let mut checked = 0usize;
+        for pack in ["ClickFx", "HoverDot", "MouseTrail", "KeySound"] {
+            let dir = root.join(pack);
+            for entry in std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("{pack} 目录不可读：{e}"))
+                .flatten()
+            {
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("lua") {
+                    continue;
+                }
+                let stem = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .expect("lua 文件名应是 UTF-8");
+                let eng = ScriptingEngine::new(&root).expect("引擎初始化失败");
+                eng.load_script(&format!("{pack}/{stem}"))
+                    .unwrap_or_else(|e| panic!("{pack}/{stem} 加载失败：{e}"));
+                let keys: Vec<String> = eng
+                    .lua()
+                    .load(
+                        r#"
+                        local out = {}
+                        for _, item in ipairs(schema()) do
+                            if item.key and item.key ~= "" then out[#out + 1] = item.key end
+                        end
+                        return out
+                        "#,
+                    )
+                    .eval()
+                    .unwrap_or_else(|e| panic!("{pack}/{stem} schema() 解析失败：{e}"));
+                let src = std::fs::read_to_string(&p).expect("读脚本失败");
+                let exempt: &[&str] = allow
+                    .iter()
+                    .find(|(d, s, _)| *d == pack && *s == stem)
+                    .map(|(_, _, ks)| *ks)
+                    .unwrap_or(&[]);
+                for key in keys {
+                    if exempt.contains(&key.as_str()) {
+                        continue;
+                    }
+                    assert!(
+                        src.contains(&format!("params.{key}")) || src.contains(&format!("p.{key}")),
+                        "{pack}/{stem}: 参数 {key} 声明了但脚本从未读取"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 190,
+            "出厂脚本参数审计应覆盖至少 190 个键（防止扫描空跑），实际 {checked}"
+        );
+    }
+
+    /// 出厂脚本的 schema 机械体检：数值区间 / 默认值 / 步进网格、choice 默认值、
+    /// 颜色格式、同文件重复 key。
+    ///
+    /// 与 `all_pack_schemas_have_sane_ranges` 同一条判据。之所以必须在**出厂**这份上也跑：
+    /// 默认值不在 `min + n×step` 网格上时，面板把所有浮点滑条吸附到网格（`ui::model` 的
+    /// `quantize`），于是"面板显示 0.56、脚本实际用 0.55"——2026-11-09 一次扫描就抓到 4 个。
+    #[test]
+    fn builtin_schemas_have_sane_ranges() {
+        use crate::scripting::registry::{parse_schema_table, ParamType};
+        let root = crate::core::paths::lua_ext_dir();
+        let mut total = 0usize;
+        for pack in ["ClickFx", "HoverDot", "MouseTrail", "KeySound"] {
+            let dir = root.join(pack);
+            for entry in std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("{pack} 目录不可读：{e}"))
+                .flatten()
+            {
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("lua") {
+                    continue;
+                }
+                let stem = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .expect("lua 文件名应是 UTF-8");
+                let eng = ScriptingEngine::new(&root).expect("引擎初始化失败");
+                eng.load_script(&format!("{pack}/{stem}"))
+                    .unwrap_or_else(|e| panic!("{pack}/{stem} 加载失败：{e}"));
+                let schema = parse_schema_table(&eng.call_schema().expect("schema() 失败"));
+                let mut seen = std::collections::HashSet::new();
+                for def in &schema {
+                    assert!(
+                        seen.insert(def.key.clone()),
+                        "{pack}/{stem}: 参数 key `{}` 重复",
+                        def.key
+                    );
+                    match def.ptype {
+                        ParamType::Int | ParamType::Float => {
+                            assert!(
+                                def.min < def.max,
+                                "{pack}/{stem}/{}: min {} 应小于 max {}",
+                                def.key,
+                                def.min,
+                                def.max
+                            );
+                            assert!(
+                                def.step > 0.0,
+                                "{pack}/{stem}/{}: step 必须 > 0，实际 {}",
+                                def.key,
+                                def.step
+                            );
+                            let d = def.default.as_f64().unwrap_or_else(|| {
+                                panic!("{pack}/{stem}/{}: 数值参数缺少数值 default", def.key)
+                            });
+                            assert!(
+                                d >= def.min as f64 - 1e-6 && d <= def.max as f64 + 1e-6,
+                                "{pack}/{stem}/{}: default {} 不在 [{}, {}]",
+                                def.key,
+                                d,
+                                def.min,
+                                def.max
+                            );
+                            let n = ((d - def.min as f64) / def.step as f64).round();
+                            let snapped = def.min as f64 + n * def.step as f64;
+                            assert!(
+                                (d - snapped).abs() <= (def.step as f64) * 1e-3 + 1e-9,
+                                "{pack}/{stem}/{}: default {d} 不在 min+step 网格上（最近值 {snapped}）",
+                                def.key
+                            );
+                        }
+                        ParamType::Bool => assert!(
+                            def.default.is_boolean(),
+                            "{pack}/{stem}/{}: bool 参数 default 不是布尔",
+                            def.key
+                        ),
+                        ParamType::Choice => {
+                            let d = def.default.as_str().unwrap_or_else(|| {
+                                panic!("{pack}/{stem}/{}: choice default 不是字符串", def.key)
+                            });
+                            assert!(
+                                def.choices.iter().any(|c| c.as_str() == d),
+                                "{pack}/{stem}/{}: default `{d}` 不在 choices {:?}",
+                                def.key,
+                                def.choices
+                            );
+                        }
+                        ParamType::Color => {
+                            let d = def.default.as_str().unwrap_or_else(|| {
+                                panic!("{pack}/{stem}/{}: color default 不是字符串", def.key)
+                            });
+                            let ok = (d.len() == 7 || d.len() == 9)
+                                && d.starts_with('#')
+                                && d[1..].chars().all(|c| c.is_ascii_hexdigit());
+                            assert!(
+                                ok,
+                                "{pack}/{stem}/{}: color default `{d}` 应为 #RRGGBB[AA]",
+                                def.key
+                            );
+                        }
+                        _ => {}
+                    }
+                    total += 1;
+                }
+            }
+        }
+        assert!(
+            total >= 200,
+            "出厂脚本的参数体检应覆盖至少 200 个键，实际 {total}"
+        );
+    }
+
+    /// ★ 单元测试跑的是 `tests/fixtures/assets/lua`（见 `paths::lua_ext_dir`），真正发布的
+    /// 却是 `assets/lua`。两份**必须逐字节一致**——否则"测试全绿"证明的是另一份脚本
+    /// （改了出厂脚本忘了同步夹具，测试仍对着旧行为）。`scripts/` 子目录是扩展包夹具，
+    /// 出厂侧该目录为空，不参与对账。
+    #[test]
+    fn builtin_lua_fixtures_match_shipped_assets() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let assets = manifest.join("assets/lua");
+        let fixtures = manifest.join("tests/fixtures/assets/lua");
+        let mut checked = 0usize;
+        for dir in ["ClickFx", "HoverDot", "MouseTrail", "KeySound"] {
+            let shipped = assets.join(dir);
+            let mirrored = fixtures.join(dir);
+            for entry in std::fs::read_dir(&shipped)
+                .unwrap_or_else(|e| panic!("{dir} 不可读：{e}"))
+                .flatten()
+            {
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("lua") {
+                    continue;
+                }
+                let name = p.file_name().expect("有文件名").to_owned();
+                let a = std::fs::read(&p).expect("读出厂脚本失败");
+                let b = std::fs::read(mirrored.join(&name))
+                    .unwrap_or_else(|e| panic!("夹具缺 {dir}/{}：{e}", name.to_string_lossy()));
+                assert_eq!(
+                    a,
+                    b,
+                    "{dir}/{} 出厂与夹具不一致 —— 改了资产就同步 tests/fixtures",
+                    name.to_string_lossy()
+                );
+                checked += 1;
+            }
+            // 反向：夹具里不许留出厂已删的脚本（否则它还在被测试，却早已不在包里）。
+            for entry in std::fs::read_dir(&mirrored)
+                .unwrap_or_else(|e| panic!("夹具 {dir} 不可读：{e}"))
+                .flatten()
+            {
+                let p = entry.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("lua") {
+                    continue;
+                }
+                let name = p.file_name().expect("有文件名");
+                assert!(
+                    shipped.join(name).exists(),
+                    "夹具 {dir}/{} 在出厂目录里不存在",
+                    name.to_string_lossy()
+                );
+            }
+        }
+        assert!(checked >= 30, "内置脚本应至少 30 个，实际 {checked}");
     }
 
     /// CursorFX 包同样做"声明必被读"对账（197 个键）。

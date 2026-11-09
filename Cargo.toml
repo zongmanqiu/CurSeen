@@ -1,6 +1,6 @@
 [package]
 name = "curseen-ui"
-version = "2.1.2"
+version = "2.1.3"
 edition = "2021"
 rust-version = "1.94"
 # ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。
@@ -187,6 +187,9 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio_Endpoints",
     # MCI（mciSendStringW）：非 WAV 声音的播放后端（MP3/WMA/… 靠系统解码器）
     "Win32_Media_Multimedia",
+    # 工具台（runtime/lua_tool）：GUI 子系统的 exe 从 cmd 直接启动时没有控制台，
+    # 要 AttachConsole(ATTACH_PARENT_PROCESS) 才能把结果交给调用方（AI / CI）。
+    "Win32_System_Console",
     "Win32_System_Registry",
     # 工作集瘦身（platform/working_set.rs）：EmptyWorkingSet（windows 0.62 里 Psapi
     # 已改名 ProcessStatus）。

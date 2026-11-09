@@ -229,6 +229,10 @@ impl TrailModule {
         if let Some(e) = self.effect.as_mut() {
             e.on_press(x, y, self.elapsed);
         }
+        // ★ 悬浮标同样收按下事件（四类宿主同契约，与上面那条同源）：脚本写
+        //   `on_press` 就能做按下反馈（「双层光标」的收缩回弹）。此前只有拖尾 / 点击 /
+        //   复合三类宿主收到，悬浮标下的 `on_press` 永不触发。
+        self.hover.press(btn, x, y);
         sound::play_for_button(&self.settings, button);
         // ★ 每键波纹：各键独立的开关/尺寸/时长/颜色（ripple_bindings）。
         if let Some(rp) = self

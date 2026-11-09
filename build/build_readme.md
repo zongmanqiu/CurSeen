@@ -143,7 +143,7 @@ build/
 | `deploy.py` | 拷 `temp/target/release/curseen.exe` → `<项目根>/build/`，MD5 + 大小对账；顺带调用 `gen_licenses.py`；报告写 `temp/deploy_report.txt` |
 | `gen_licenses.py` | 把 `LICENSE` / `THIRD-PARTY-NOTICES.md` / `licenses/`（自 `.3rdParty/` 逐字拷贝）同步进 `build/`；源缺失即返回 1；报告写 `temp/licenses_report.txt` |
 | `sync_assets.py` | `main/assets/` → `<项目根>/build/assets/` **单向**同步（只增和覆盖，**从不删**——`build/assets/` 是运行期数据目录，用户会在里面放自己的脚本/音效） |
-| `pack_release.py` | **唯一发行 zip 打包器**（在 `main/` 下）：7-Zip `-tzip -mcu=on` 把 `build/curseen.exe` + `main/assets/` + `LICENSE` + `build/licenses/` 打进 `temp/release/CurSeen_<版本>.zip`；逐文件字节数 / 路径清单写到**包外** `CurSeen_<版本>.manifest.txt`（不记哈希；打包者自用，不进包、不上传）。排除 `assets/docs/update.json`；打完**回读核对**（集合相等 / 无运行期文件 / 无 MANIFEST.txt / 中文名 UTF-8）。包内容清单正本见《开发指南.md》§十；禁止手工压缩 `build/` |
+| `pack_release.py` | **唯一发行 zip 打包器**（在 `main/` 下）：7-Zip `-tzip -mcu=on` 把 `build/curseen.exe` + `main/assets/` + `LICENSE` + `build/licenses/` 打进 `temp/release/CurSeen_<版本>.zip`；逐文件字节数 / 路径清单写到**包外** `CurSeen_<版本>.manifest.txt`（不记哈希；打包者自用，不进包、不上传）。排除 `assets/cache/update.json`；打完**回读核对**（集合相等 / 无运行期文件 / 无 MANIFEST.txt / 中文名 UTF-8）。包内容清单正本见《开发指南.md》§十；禁止手工压缩 `build/` |
 | `gen_update_json.py` | 由 HISTORY + 发行 zip 生成 `update.json`（notes / 双源地址；**不记哈希**，客户端只校验版本号与包文件名） |
 | `check_update_asset.py` | 上传后确认两个镜像都就位：地址通 + 返回 zip + 文件名 = `CurSeen_<版本>.zip`（只取前 4 字节，不比对哈希）；`--local <zip>` 用于上传前核对 |
 | `gate.py` | 按需跑测试组（`python build/gate.py config runtime`），省的是**信号**不是时间 |

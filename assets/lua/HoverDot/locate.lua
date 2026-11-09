@@ -41,7 +41,7 @@ function schema()
   return {
     { key = "idle_s",      label = "静止时长（秒）", type = "float", min = 0.2, max = 5.0, step = 0.2, default = 1.0 },
     { key = "threshold",   label = "晃动幅度",       type = "int",   min = 5,   max = 400,  step = 5,   default = 40 },
-    { key = "show_s",      label = "显示时长（秒）", type = "float", min = 0.5, max = 5.0, step = 0.2, default = 3.0 },
+    { key = "show_s",      label = "显示时长（秒）", type = "float", min = 0.5, max = 5.0, step = 0.1, default = 3.0 },
     { key = "ring_radius", label = "定位环半径",     type = "int",   min = 20,  max = 400,  step = 1,   default = 50 },
     { key = "ring_width",  label = "定位环粗细",     type = "int",   min = 1,   max = 20,   step = 1,   default = 5 },
     { key = "color",       label = "定位环颜色",     type = "color", alpha = true, default = "#FF0000FF" },

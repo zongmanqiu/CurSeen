@@ -6,7 +6,7 @@
     curseen.exe
     LICENSE
     licenses/**            ← build/licenses（6_deploy 第 ⑥ 步同步并复核）
-    assets/**              ← **main/assets**（源码树），排除 assets/docs/update.json
+    assets/**              ← **main/assets**（源码树），排除 assets/cache/update.json
 
 就这些，**一个不多**。`MANIFEST.txt` 这类打包清单**不进包**——它是给打包的人自己核对的，
 不是随包发给用户的文件；本脚本把它写在 zip **旁边**（`<zip>.manifest.txt`），
@@ -48,8 +48,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT.parent / "temp" / "release"
 VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
 
-# 自指清单：内容含 zip 自身哈希，不能进包。
-SKIP_IN_ASSETS = "docs/update.json"
+# 运行期缓存：本机上次拉到的更新清单（版本号可能比本包新/旧），不属于随包内容。
+# 客户端联网自己会拉；打进包只会让"这个包到底自称什么版本"出现第二份说法。
+SKIP_IN_ASSETS = "cache/update.json"
 
 # 运行期数据 / 调试符号 / 打包清单：**任何**情况下都不许出现在包里（打包后逐条核对）。
 FORBIDDEN_SUFFIX = (".pdb",)
@@ -94,7 +95,7 @@ def stage_tree(stage: Path, exe: Path, license_root: Path, licenses: Path, asset
 
     def ignore(dirpath, names):
         rel = Path(dirpath).relative_to(assets).as_posix()
-        return {n for n in names if rel == "docs" and f"{rel}/{n}" == SKIP_IN_ASSETS}
+        return {n for n in names if f"{rel}/{n}" == SKIP_IN_ASSETS}
 
     shutil.copytree(assets, stage / "assets", ignore=ignore)
 
@@ -216,7 +217,10 @@ def main() -> None:
     seven = find_7z()
     seven_ver = seven_zip_version(seven)
 
-    out_dir = Path(args.out_dir)
+    # ★ 必须先 resolve 成绝对路径：`make_zip` 是 `cwd=stage` 调 7z 的，
+    #   传进去的相对路径会被按 staging 解释，产出落到 `<out>/<out>/` 里，
+    #   然后 verify_zip 找不到包 → 报一个和真因无关的 FileNotFoundError。
+    out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"CurSeen_{version}.zip"
     manifest_path = out_dir / f"CurSeen_{version}.manifest.txt"

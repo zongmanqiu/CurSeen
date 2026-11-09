@@ -20,7 +20,7 @@ function schema()
     { key = "color",    label = "颜色",     type = "color", alpha = true, default = "#4ADE80" },
     { key = "grid",     label = "网格边长", type = "int",   min = 3,   max = 11,   step = 2,   default = 7 },
     { key = "spacing",  label = "点间距",   type = "int",   min = 8,   max = 80,   step = 1,   default = 26 },
-    { key = "amp",      label = "起伏幅度", type = "float", min = 0.1, max = 1.0,  step = 0.02, default = 0.55 },
+    { key = "amp",      label = "起伏幅度", type = "float", min = 0.1, max = 1.0,  step = 0.05, default = 0.55 },
     { key = "speed",    label = "波速",     type = "float", min = 0.5, max = 8,    step = 0.1, default = 2.2 },
     { key = "duration", label = "持续时长", type = "int",   min = 300, max = 3000, step = 10,  default = 1100 },
   }

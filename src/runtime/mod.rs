@@ -4,6 +4,7 @@ mod frame;
 mod gif;
 mod input;
 pub mod layer;
+pub mod lua_tool;
 pub mod overlay;
 mod panel;
 mod record;

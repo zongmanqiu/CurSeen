@@ -508,7 +508,7 @@ pub fn build_global_page(
     // 三份文档全部随 assets 发布，按钮直接 `ShellExecuteW` 打开：html 走默认浏览器。
     let (title, body, exp) = FeatureCard::new("帮助", help_expanded)
         .body({
-            let manual = crate::core::paths::from_app_relative("assets/manual/隐藏快捷键手册.html");
+            let manual = crate::core::paths::from_app_relative("assets/docs/隐藏快捷键手册.html");
             let lua_manual = crate::core::paths::from_app_relative("assets/lua/Lua脚本手册.html");
             Element::col()
                 .child(card::option_row(

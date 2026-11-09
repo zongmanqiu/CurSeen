@@ -1210,3 +1210,111 @@ fn test_lua_manual_matches_the_api_reference_tables() {
         offences.join("\n")
     );
 }
+
+/// 工具台（`--lua-check` / `--mcp`）报给 AI 的文档路径**必须真的存在**。
+///
+/// 为什么要门禁：这份清单是"别让 AI 靠猜路径"的唯一机制。一旦文件被移走/改名而清单没跟上，
+/// AI 会照着提示读到 404，然后开始自己编路径——比没有提示更糟（它连"提示是错的"都不会说）。
+#[test]
+fn test_lua_tool_docs_point_at_real_files() {
+    let root = repo_root();
+    let docs = curseen_ui::runtime::lua_tool::DOCS;
+    assert!(
+        docs.len() >= 4,
+        "文档清单只有 {} 项，等于没指路",
+        docs.len()
+    );
+    for (rel, about) in docs {
+        assert!(!about.trim().is_empty(), "{rel} 没有一句话说明");
+        let p = root.join("main").join(rel);
+        assert!(p.is_file(), "工具台指向的文档不存在：{rel}");
+        let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        assert!(len > 200, "{rel} 只有 {len} 字节，等于空文件");
+    }
+
+    // 索引（`assets/docs/README.md`）是 AI 的第一站：清单里每一份都得在它里面出现，
+    // 否则"藏在目录里但没人告诉你"就等于不存在。
+    let index = read(&root.join("main/assets/docs/README.md"));
+    for (rel, _) in docs {
+        let tail = rel.strip_prefix("assets/").unwrap_or(rel);
+        if tail == "docs/README.md" {
+            continue; // 索引不必推销自己
+        }
+        // 索引里的链接可以是 `docs/` 内部的相对写法（`配置说明.md`），也可以是跨目录的
+        // （`../lua/API.md`）——两种都认，否则判据会逼着文档写自己不自然的样子。
+        let short = tail.strip_prefix("docs/").unwrap_or(tail);
+        assert!(
+            index.contains(tail) || index.contains(short),
+            "文档索引没有提到 `{tail}`——AI 读索引也找不到它"
+        );
+    }
+}
+
+/// 《配置说明》里写的每一个 `config.json` 键，都必须在出厂配置里真实存在。
+///
+/// 抓的是最贵的一类腐化：键改名（`hover_params` → 别的）后文档继续教人写老键名。
+/// 而 `config.json` 里写错的键**不报错**（静默忽略），所以这种错不会在现场露头，
+/// 只会表现为"照着文档改了，没反应"。
+#[test]
+fn test_config_doc_keys_exist_in_the_default_config() {
+    let root = repo_root();
+    let doc = read(&root.join("main/assets/docs/配置说明.md"));
+    let cfg = serde_json::to_value(curseen_ui::core::config::Config::default())
+        .expect("出厂配置应可序列化");
+
+    // `skip_serializing_if` 的字段在出厂配置里根本不出现在 JSON 里（空表 / false 不落盘），
+    // 但文档必须写它们——不然"多开列表""image 脚本开关"这些能力就没地方说明。
+    // 每条都给理由：白名单只准收这类"确实存在、只是不落盘"的键。
+    const NOT_SERIALIZED: &[&str] = &[
+        "trail.hover_active",        // Option，None 不落盘（按 hover_type 播种）
+        "trail.ripple_params_reset", // 一次性迁移标记，false 不落盘
+        "lua_ext.composite_active",  // 空列表不落盘
+        "lua_ext.image_active",      // 空列表不落盘
+        "lua_ext.pack_selected",     // 空表不落盘
+    ];
+
+    let mut checked = 0usize;
+    for tok in backticked_tokens(&doc) {
+        let is_cfg_path = ["trail.", "lua_ext.", "key_sound."]
+            .iter()
+            .any(|p| tok.starts_with(p));
+        if !is_cfg_path
+            || !tok
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        {
+            continue; // `trail.ripple_bindings.<键>.script` 这类带占位符的不参与
+        }
+        if NOT_SERIALIZED.contains(&tok.as_str()) {
+            checked += 1;
+            continue;
+        }
+        assert!(
+            json_lookup(&cfg, &tok).is_some(),
+            "《配置说明.md》写了 `{tok}`，但出厂配置里没有这个键——是改名了，还是文档猜的？"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 15,
+        "只抽到 {checked} 个配置键，判据等于没跑（文档结构变了？）"
+    );
+}
+
+/// 取出 Markdown 里所有反引号包起来的片段（不引第三方正则：按反引号切即可）。
+fn backticked_tokens(text: &str) -> Vec<String> {
+    text.split('`')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, s)| s.trim().to_string())
+        .collect()
+}
+
+/// 按 `a.b.c` 在 JSON 里逐层找键（只走对象，不进数组）。
+fn json_lookup(v: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut cur = v;
+    for key in path.split('.') {
+        cur = cur.get(key)?;
+    }
+    Some(cur.clone())
+}

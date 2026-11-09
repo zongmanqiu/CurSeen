@@ -164,6 +164,13 @@ impl HoverDotInstance {
         self.next_frame_ms = ms;
     }
 
+    /// 转发一次按下给脚本（`on_press` / 老名 `on_click`；png 类的脚本没写回调 → 静默跳过）。
+    fn press(&mut self, button: &'static str, x: f32, y: f32) {
+        if let Some(core) = self.core.as_mut() {
+            core.press_button(button, x, y);
+        }
+    }
+
     /// 生成该实例的绘制指令。返回本帧是否真的画了东西。
     ///
     /// ★ 驱动序列与拖尾 / 点击效果**逐字同源**（`FxCore`）：指针动了发 `on_move` →
@@ -329,6 +336,21 @@ impl HoverDot {
     pub fn set_params_of(&mut self, id: &str, params: HashMap<String, Json>) {
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
             inst.set_params(params);
+        }
+    }
+
+    /// 指针按下：刷新宿主位置并把 `on_press(button, x, y)` 转发给每个实例。
+    ///
+    /// ★ 四类宿主同契约（`FxCore` 文档表里早就写着悬浮标要转发按下），实现里此前漏了：
+    ///   「双层光标」的按下收缩回弹因此在悬浮标下**永远不触发**（参数拖着毫无反应）。
+    ///   未启用时直接返回——关着卡片的悬浮标不该收到任何事件。
+    pub fn press(&mut self, button: &'static str, x: f32, y: f32) {
+        if !self.enabled {
+            return;
+        }
+        self.pos = Point::new(x, y);
+        for inst in &mut self.instances {
+            inst.press(button, x, y);
         }
     }
 
@@ -889,6 +911,118 @@ end
             on.len(),
             off.len()
         );
+    }
+
+    /// ★★ 回归锁（2026-11-09 用户报「悬浮标 · 弹簧挂件：鼠标不动，球就停止，很诡异」）。
+    ///
+    /// 病根不是物理：悬浮标的帧是**按需**的，指针一停就不出帧，而"弹簧把珠子拉回平衡位"
+    /// 是时间驱动的 —— 没有帧等于把摆到一半的链子钉在半空。修法是脚本自己 `return` 续帧
+    /// 毫秒数（API.md 里 `draw` 的返回值契约）。这条判据同时钉两头：
+    /// ① 还在动 → **必须**请求续帧（否则画面僵住）；
+    /// ② 动完了 → **必须**停（否则静止时永久烧 CPU，与"park 态不出帧"冲突）。
+    ///
+    /// 判据取**真实脚本**：脚本把 `return 16` 删掉、或阈值写坏（永不收敛），这里都会红。
+    #[test]
+    fn hover_scripts_keep_requesting_frames_until_they_settle() {
+        for id in ["HoverDot/springy_img", "HoverDot/eyes", "HoverDot/twin"] {
+            let mut h = HoverDot::new();
+            h.enabled = true;
+            h.set_screen(1920.0, 1080.0);
+            h.sync_instances(&[id.to_string()]);
+            assert!(h.instances[0].core.is_some(), "{id} 加载失败");
+
+            // ① 先跑几帧移动，把脚本带进"追赶 / 摆动"状态。
+            let mut t = 0.0f32;
+            for i in 0..3 {
+                h.pos = Point::new(600.0 + i as f32 * 60.0, 420.0);
+                t += 1.0 / 60.0;
+                h.set_time(t);
+                let mut list = DrawList::new();
+                h.draw(&mut list);
+            }
+
+            // ② 指针停住（位置不再变，只推进时钟）：动画还没跑完就必须继续要帧。
+            let mut requested = 0u32;
+            let mut frames = 0u32;
+            loop {
+                t += 1.0 / 60.0;
+                h.set_time(t);
+                let mut list = DrawList::new();
+                h.draw(&mut list);
+                frames += 1;
+                if h.next_frame_ms().is_none() {
+                    break;
+                }
+                requested += 1;
+                assert!(
+                    frames < 900,
+                    "{id} 静止 15 秒还没收敛 —— 续帧请求永不释放，静止态会永久烧 CPU"
+                );
+            }
+            assert!(
+                requested > 0,
+                "{id} 指针停住后脚本仍在追/摆，却一次帧都没要 —— 画面会僵在半空"
+            );
+        }
+    }
+
+    /// 悬浮标要把**按下**转发给脚本（四类宿主同契约）。
+    ///
+    /// 此前只有拖尾 / 点击 / 复合三类宿主收到 `on_press`，悬浮标这条漏了：
+    /// 「双层光标」的按下收缩回弹因此在悬浮标下永不触发（参数拖着毫无反应）。
+    /// 两种回调名都要通（`FxCore::press_button` 的既定契约）：
+    /// `on_mouse_down(button,x,y)` 优先，缺了回退老口径 `on_press(x,y,t)`。
+    #[test]
+    fn hover_host_forwards_press_to_script() {
+        let dir = std::env::temp_dir().join(format!("curseen_hover_press_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 老口径：on_press(x, y, t) —— 「双层光标」「按压类」脚本都写这个。
+        std::fs::write(
+            dir.join("btn.lua"),
+            concat!(
+                "last = \"\"\n",
+                "function on_press(x, y, t, p) last = \"press@\" .. x .. \",\" .. y end\n",
+                "function draw(ctx, p) ctx:circle(cursor_x, cursor_y, 4, 255, 255, 255, 255) end\n",
+            ),
+        )
+        .unwrap();
+        // 新口径：on_mouse_down(button, x, y) —— 优先于 on_press。
+        std::fs::write(
+            dir.join("btn2.lua"),
+            concat!(
+                "last = \"\"\n",
+                "function on_mouse_down(button, x, y, p) last = button .. \"@\" .. x .. \",\" .. y end\n",
+                "function draw(ctx, p) ctx:circle(cursor_x, cursor_y, 4, 255, 255, 255, 255) end\n",
+            ),
+        )
+        .unwrap();
+        let mut h = HoverDot::new();
+        h.enabled = true;
+        h.sync_instances_at(&dir, &["btn".into(), "btn2".into()]);
+        h.press("left", 120.0, 90.0);
+
+        let read = |h: &HoverDot, i: usize| -> String {
+            h.instances[i]
+                .core
+                .as_ref()
+                .expect("核心在")
+                .engine
+                .lua()
+                .globals()
+                .get("last")
+                .expect("读回 last")
+        };
+        assert_eq!(read(&h, 0), "press@120.0,90.0", "按下必须原样转给 on_press");
+        assert_eq!(read(&h, 1), "left@120.0,90.0", "按键名要进 on_mouse_down");
+
+        // 卡片关着时不该派发任何事件（关掉的功能不该有副作用）。
+        h.enabled = false;
+        h.press("right", 5.0, 6.0);
+        assert_eq!(read(&h, 0), "press@120.0,90.0", "未启用时不许派发按下");
+        assert_eq!(read(&h, 1), "left@120.0,90.0", "未启用时不许派发按下");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 脚本 `draw` 的返回值 = 续帧请求：正数才认，其余一律不请求。

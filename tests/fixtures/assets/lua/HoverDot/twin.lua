@@ -1,5 +1,10 @@
 -- 双层光标：内点硬跟随，外环弹性追赶（差速迟滞），按下时环收缩回弹。
 -- 平滑采用帧率无关的指数平滑，几何与运动曲线随每帧实时计算。
+--
+-- ★ 两处都要自己续帧（2026-11-09 修），否则悬浮标一停帧就僵住：
+--   ① 外环还在追内点（滞点没到位 → 环停在半路）；
+--   ② 按下的收缩回弹要跑 0.6s，指针多半没动 → 没有帧就等于"按了没反应"。
+--   两者都收敛后不再返回，静止仍归零功耗。
 
 effect_name = "双层光标"
 name = "双层光标"
@@ -47,8 +52,11 @@ function draw(ctx, params)
   local shrink = params.shrink or 0.35
 
   -- 按下反馈：0.6s 内先收缩再回弹（正弦半波，中点最深）
+  -- ★ `u` 允许略小于 0：按下事件带的时间戳是宿主上一拍的时钟，可能比这一步的 `now`
+  --   还新一点点；把它当"刚按下"（而不是"没在动"），回弹动画才拉得起来。
   local age = now - press_t
   local u = age / 0.6
+  local pressing = u < 1
   if u >= 0 and u < 1 then
     ring_r = ring_r * (1 - shrink * math.sin(math.pi * u))
   end
@@ -60,4 +68,10 @@ function draw(ctx, params)
 
   ctx:ring(rx, ry, ring_r, ring_w, r, g, b, a)      -- 外环：弹性滞点
   ctx:circle(cursor_x, cursor_y, dot_r, r, g, b, a) -- 内点：硬跟随指针
+
+  -- 追赶没收尾（> 0.75px）或按下回弹还没跑完 → 要下一帧；都完了就停。
+  local dx, dy = cursor_x - rx, cursor_y - ry
+  if pressing or dx * dx + dy * dy > 0.5625 then
+    return 16
+  end
 end

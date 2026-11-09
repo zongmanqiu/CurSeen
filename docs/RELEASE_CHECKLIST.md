@@ -16,10 +16,10 @@
       `temp/release/CurSeen_<版本>.manifest.txt`（逐文件字节数 / 路径，**不记哈希**，
       打包者自己核对用，**不进 zip、不上传**）。
       **包内容清单的正本见《开发指南.md》§十**（必须有的四项 / 禁止的运行期文件）。
-      ★ 禁止手工压缩 `build/`：会带入 `assets/docs/update.json`（运行期缓存），且文件名编码
+      ★ 禁止手工压缩 `build/`：会带入 `assets/cache/update.json`（运行期缓存），且文件名编码
       不受控（Windows 压缩工具可能写成 GBK）；打包器用源码树 `main/assets` 并以 UTF-8 写包名。
 - [ ] 生成 `update.json`：`python build/gen_update_json.py --version <版本> --zip <刚打出的 zip>`；
-      再用 `--out assets/docs/update.json` 生成随包缓存。**两次的 --zip 必须是同一个文件**
+      再用 `--out assets/cache/update.json` 生成随包缓存。**两次的 --zip 必须是同一个文件**
 - [ ] 上传前先核对本地包：`python build/check_update_asset.py --local <zip>` → `本地核对通过`
 - [ ] 上传 release 资产后，运行 `python build/check_update_asset.py`：Gitee / GitHub 两个镜像
       都必须 `[ok]`（地址通 + 返回 zip + 文件名与版本一致）；不通过不得宣布发布
@@ -59,14 +59,14 @@
 - [ ] Lua 文档 —— 改了脚本 API / 包格式：同步 `assets/lua/API.md` 后跑
       `python build/gen_manual_tables.py`（把三张接口表镜像进 `assets/lua/Lua脚本手册.html`）；
       作者指南里的目录 / 热重载 / v2 包规则同步更新
-- [ ] 隐藏快捷键手册 —— 改了固定键 / 脚本窗按键：`assets/manual/隐藏快捷键手册.md` 与 `.html` 两份同改
+- [ ] 隐藏快捷键手册 —— 改了固定键 / 脚本窗按键：`assets/docs/隐藏快捷键手册.md` 与 `.html` 两份同改
 - [ ] `patches/wind-ui-rust-0.30.0/PATCHES.md` —— 本版本动过 windui 就补章节（同步归档改后完整文件）
 
 ## 四、打包
 
 - [ ] 产物用 `python build/pack_release.py --version <版本>` 生成（输出在仓库外
       `temp/release/CurSeen_<版本>.zip`）。它取 `build/curseen.exe` + `main/assets/` +
-      `LICENSE` + `build/licenses/`，**排除 `assets/docs/update.json`**，
+      `LICENSE` + `build/licenses/`，**排除 `assets/cache/update.json`**，
       并在**包外**写 `CurSeen_<版本>.manifest.txt`（逐文件字节数 / 路径，不记哈希）
 - [ ] 清单**只管打包的人看**，不是发行内容：`zip` 里不许有 `MANIFEST.txt`
       （打包器回读时按禁名拦；上传 release 只传 zip，清单留在本地）
