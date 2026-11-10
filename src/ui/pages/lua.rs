@@ -86,7 +86,7 @@ fn script_card(
 /// 创建 Lua 扩展页：`scripts/` 下**除 `keysound`（键盘页专属）外的全部脚本**各一张卡，
 /// 平铺（无分组标题）。★ 2026-09-27 起 `role="effect"`（含用户直接复制进来的特效脚本）
 /// 与未声明 role 的脚本都住这里——开关 = 常驻运行（落 `composite_active`，见
-/// [`LuaExtSettings::role_list`] 的落点映射），不再按 role 白名单过滤。
+/// `LuaExtSettings::role_list` 的落点映射），不再按 role 白名单过滤。
 ///
 /// ★ m35：**没有刷新按钮**——宿主监听 `assets/lua`，放入 / 删除 / 解压出来的脚本会在
 ///   250 ms 内自动出现在这张表里（`platform::dir_watch` 只置标记，

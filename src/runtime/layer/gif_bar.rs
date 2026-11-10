@@ -31,7 +31,7 @@
 //!
 //! `Window::new` 建的普通窗**不带 `WS_EX_TOPMOST`**（windui 的 `ex_style` 只在
 //! `cfg.layered` 时加），所以控件条原先会被任何被抬到前面的普通窗口盖住 —— 用户实测
-//! "选框有时会被其它软件窗口遮挡"。开窗后补一次 [`win_util::set_topmost_by_title`]
+//! "选框有时会被其它软件窗口遮挡"。开窗后补一次 `win_util::set_topmost_by_title`
 //! （**不抢焦点**），之后由 `TopmostKeeper::guard_aux` 每 250ms 对账重插。
 
 use crate::core::geometry::ScreenRect;

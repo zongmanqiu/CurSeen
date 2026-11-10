@@ -497,8 +497,8 @@ pub enum TrimKind {
 ///
 /// | 来意 | 触发者 | 窗口初始状态 |
 /// |---|---|---|
-/// | [`TrimRequest::Last(kind)`] | 控件条「裁剪」/ 刚录完 | 直接载入对应格式的 `last_*` |
-/// | [`TrimRequest::Blank(kind)`] | 裁剪快捷键 | 空窗，等用户按「打开…」 |
+/// | `TrimRequest::Last(kind)` | 控件条「裁剪」/ 刚录完 | 直接载入对应格式的 `last_*` |
+/// | `TrimRequest::Blank(kind)` | 裁剪快捷键 | 空窗，等用户按「打开…」 |
 ///
 /// ★ 为什么不做成"快捷键也去开 `last_*`"：那会让"想裁磁盘上一个老文件"的用户先看到
 ///   一段无关的录像。裁剪快捷键的语义是**打开裁剪器**，不是"打开上次录的东西"。
@@ -801,7 +801,7 @@ impl Runtime {
     /// 声明了 `menu` 且 id 落在 `config.lua_ext.image_active` 里才出现。
     ///
     /// ★ 2026-10-28 第二道同点过滤：脚本声明了 `requires`（外置文件）而文件不在 ⇒ **不出现**。
-    /// 判据只有 [`ExtSchema::available`] 一个（路径解析复用 `fs_api::resolve`，与 `ctx.fs`、
+    /// 判据只有 `ExtSchema::available` 一个（路径解析复用 `fs_api::resolve`，与 `ctx.fs`、
     /// `ext:proc` 同一把闸）。这里不新增机制：可见性判据必须继续留在**这一处**，
     /// 因为 `docs/UI_COMPONENTS.md` 与发布检查单都把这条写成"唯一过滤点"。
     ///
@@ -856,7 +856,7 @@ impl Runtime {
     ///   与 ai-url / ai-model 等其它设置同一条持久化链路。只认 `scripts/` 前缀——
     ///   特效 / 贴图脚本万一也写了 `hotkey` 参数，不该被误当全局热键。
     ///
-    /// 第三元 = [`LuaExtSettings::script_active`] 的结果：让调用方在**同一份**清单里
+    /// 第三元 = `LuaExtSettings::script_active` 的结果：让调用方在**同一份**清单里
     /// 同时看到"有没有配热键"与"开关开没开"（两条数据分两次询会滑动）。
     pub fn script_hotkeys_with_state(&self) -> Vec<(String, String, bool)> {
         self.config

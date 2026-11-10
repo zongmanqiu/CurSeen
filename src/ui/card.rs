@@ -1,6 +1,6 @@
 //! 功能卡片组件。
 //!
-//! 标题行是「[开关] 名称 ── [下拉] [附加控件] ……… ▼」，正文在展开后显示。
+//! 标题行是「`[开关]` 名称 ── `[下拉]` `[附加控件]` ……… ▼」，正文在展开后显示。
 //!
 //! 开关是可选的：有对应功能开关的卡片（拖尾、击键回显…）传 `switch(信号)`；纯设置类
 //! 卡片（快捷键、语言）不传——**不留假开关**。无开关的卡片仍占住开关那一格，保证各卡片
@@ -776,7 +776,7 @@ pub fn hotkey_row(
 /// 脚本热键捕获框（2026-09-29，`type = "hotkey"` 参数）：与 [`hotkey_row`] 共用同一
 /// 视觉正本 [`hotkey_box_el`]，交互一致（点击清空 + 进入捕获态）。差别只在捕获目标：
 /// 固定字段是编译期枚举（`HotkeyField`），脚本参数是运行期随单元重建的信号——
-/// 捕获态存 [`ScriptHotkeyCap`]（带目标 sig），回写走 `Runtime::try_capture_hotkey`
+/// 捕获态存 `ScriptHotkeyCap`（带目标 sig），回写走 `Runtime::try_capture_hotkey`
 /// 的 script 分支。
 pub fn hotkey_row_script(
     label: &str,

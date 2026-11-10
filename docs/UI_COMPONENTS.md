@@ -81,7 +81,7 @@ x 完全相同**。`calc_col1_width` 保留仅供该护栏测试与将来调值�
 |---|---|---|
 | `option_row(label, control, col1_w)` | 任意控件 | 一行的骨架：标签 + 控件 + 弹性空隙，行高 `ROW_H`、交叉轴居中 |
 | `option_row_signal(label, control, col1_w)` | `label: Signal<String>` | 同 `option_row` 版式，但**行名随信号联动**（如「系统」卡的四态「管理员权限 (未启用)/(重启后有效)/(重启后取消)/(已启用)」）——状态直接写进行名、不另配说明行的场景用这个 |
-| `slider_row(label, sig, text, min, max, decimals, col1_w)` | 两个信号：`sig: Signal<f32>`（比例）+ `text: Signal<String>`（镜像文本） | **标签+滑块+72px 数值输入框三件套**（§35 定案：全软件**所有**数值条一律这个样式，原无输入框版本与 `slider_input_row` 已合并进本函数）。滑块不带值标签（数值只在输入框一处）。详见第二节 |
+| `slider_row(label, sig, text, min, max, decimals, col1_w)` | 两个信号：`sig: Signal<f32>`（比例）+ `text: Signal<String>`（镜像文本） | **标签+滑块+72px 数值输入框三件套**（§35 定案：全软件**所有**数值条一律这个样式）。滑块不带值标签（数值只在输入框一处）。详见第二节 |
 | `browse_row(label, sig, col1_width, display, act)` | `sig: Signal<String>` | 标签+「浏览…」按钮+路径（`path_display` 补全、超宽 `ellipsize` 收 `…` 保尾部） |
 | `hotkey_row(label, sig, kind, capture, col1_w)` | 快捷键框（宽 = `CONTROL_GROUP_W`，§36 起与输入类控件同一条右缘竖线） | 点击进入捕获态，按键写入快捷键串；**失焦即放弃捕获**（2026-10-02 口径：点框外任何地方 → 退出捕获态、显示回「（空）」，经 windui 补丁 094 的 `on_blur`，回调里判「捕获目标仍是本框」才清）；空串 = 停用，框内显示「（空）」（2026-09-27 口径，原「留空停用」四个字像动作文案） |
 | `hotkey_row_script(label, sig, target, cap, col1_w)` | 同上，捕获目标 = `ScriptHotkeyCap`（2026-09-29，Lua `type="hotkey"` 参数） | 与 `hotkey_row` **共用视觉正本 `hotkey_box_el`**（框宽/高/配色/圆角/字号只此一份）；捕获态走 `PanelModel::script_hotkey_cap`，回写与互斥（固定字段 + 其它脚本热键，normalize 同口径）在 `set_script_hotkey_exclusive` 一处 |
@@ -172,6 +172,7 @@ x 完全相同**。`calc_col1_width` 保留仅供该护栏测试与将来调值�
 | `file` | 浏览（音频文件） | 文件名（复制进 `assets/Sounds/`） | 便携：素材跟着程序走（★ `assets/KeySounds/` 已于 2026-09-25 退役，见 `assets/Sounds/README.md`） |
 | `str` | 文本输入框 | 原样字符串 | api_key / 模型名 / 任意文本 |
 | `image` | 路径输入框 | 图片标识 | 悬浮标 PNG 类型在用 |
+| `hotkey` | 快捷键捕获框 | 规范化按键串（空串 = 停用） | 见 §一 `hotkey_row_script`；只有 `scripts/` 独立脚本会当成全局热键触发 |
 
 > 未识别的 `type` 按 `float` 处理。参数落盘键：拖尾特效 = `{特效id}.{key}`（共用一张表），
 > 其余（悬浮标 / 点击效果 / 击键音效 / Lua 扩展）= 各自一张表、直接用 `key`。
@@ -344,7 +345,7 @@ OCR 与条码包自带官方工具（源码在仓库 `tools/ocr`、`tools/barcod
 帧规则与特效一致：只有 `draw` 每帧真的产出指令才续帧（空闲 0% CPU）；要持续动画就
 在 `draw` 里画。脚本文件改动按 (mtime, 字节数) **热重载**（状态清零、参数重放）；
 脚本缺失/损坏时该实例回调静默跳过，不拖垮其它实例。复合脚本模板：
-`tests/fixtures/lua/scripts/composite_demo_fixture.lua`（拖尾 + 点击音 + 点击效果三合一，
+`tests/fixtures/assets/lua/scripts/composite_demo_fixture.lua`（拖尾 + 点击音 + 点击效果三合一，
 守门测试 `composite_script_runs_even_when_trail_disabled` 用真文件跑通端到端；颜色参数带
 透明度条 = schema 里 `alpha = true`，默认 `#FF000040`）。
 

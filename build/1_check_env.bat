@@ -87,12 +87,6 @@ if exist "%PROJECT_ROOT%\.3rdParty\wind-ui-rust-0.30.0\Cargo.toml" (
     echo   [WARNING] missing .3rdParty\wind-ui-rust-0.30.0
     echo             step 2 ^(2_download.bat^) will fetch it
 )
-if exist "%PROJECT_ROOT%\.3rdParty\nnnoiseless-0.5.2\Cargo.toml" (
-    echo   [OK] .3rdParty\nnnoiseless-0.5.2
-) else (
-    echo   [WARNING] missing .3rdParty\nnnoiseless-0.5.2
-    echo             step 2 ^(2_download.bat^) will fetch it
-)
 
 echo.
 echo   crate  : %MAIN_DIR%

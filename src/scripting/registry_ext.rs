@@ -25,7 +25,7 @@
 //! # `requires`：外置文件缺了就不出现在菜单里（2026-10-28）
 //!
 //! 上面那条禁令针对的是"没人读的所有权声明"。`requires` 不一样，它有**两个**读者
-//! （[`LuaExtRegistry::menu_items`] 的可见性过滤与 [`Runtime::lua_ext_menu_items`] 那条唯一的
+//! （[`LuaExtRegistry::menu_items`] 的可见性过滤与 `Runtime::lua_ext_menu_items` 那条唯一的
 //! 过滤判据）：脚本声明"我要用哪些外置文件"（相对脚本目录），缺任何一个就不进贴图右键的
 //! 「脚本」。判据走 [`super::fs_api::resolve`] —— 与 `ctx.fs`、`ext:proc` 用的是**同一条
 //! 路径判据**，

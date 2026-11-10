@@ -6,7 +6,9 @@
 
 ## 为什么放在 `examples/`
 
-这是 Cargo 的惯例目录，且 `Cargo.toml` 里用 `[[example]]` 显式登记了每一个，因此：
+这是 Cargo 的惯例目录：`Cargo.toml` 用 `[[example]]` 显式登记了全部探针
+（`gen_icon` 另带 `required-features = ["icon-gen"]`，默认构建不编它）。
+`cargo run --example <名字>` 即可运行。因此：
 
 ```text
 cargo run --example shape_probe       # 形状渲染像素级判据（退出码 0 = 全部通过）

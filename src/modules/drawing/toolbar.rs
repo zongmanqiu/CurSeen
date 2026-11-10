@@ -84,7 +84,7 @@ impl ToolbarHints {
     }
 }
 
-/// [`DrawingAction`] → 工具栏按钮（没有对应按钮的返回 `None`）。
+/// `DrawingAction` → 工具栏按钮（没有对应按钮的返回 `None`）。
 ///
 /// ★ 与 [`GROUPS`] 是"快捷键序 / 按钮序"同源的另一半：正本顺序在
 ///   `core::hotkeys::DRAW_TOOL_ORDER`，本函数补上"动作 → 按钮"这一跳，两边一合就能测出

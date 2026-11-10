@@ -86,7 +86,7 @@ impl Rgba {
         }
     }
 
-    /// HSV → RGBA。h: [0,360), s/v: [0,1]。
+    /// HSV → RGBA。h: [0,360), s/v: `[0,1]`。
     #[allow(clippy::if_same_then_else)]
     pub fn from_hsv(h: f32, s: f32, v: f32, a: u8) -> Rgba {
         let c = v * s;
@@ -115,7 +115,7 @@ impl Rgba {
         }
     }
 
-    /// RGBA → HSV，返回 `(h, s, v)`。h: [0,360), s/v: [0,1]。
+    /// RGBA → HSV，返回 `(h, s, v)`。h: [0,360), s/v: `[0,1]`。
     #[allow(clippy::if_same_then_else)]
     pub fn to_hsv(self) -> (f32, f32, f32) {
         let r = self.r as f32 / 255.0;

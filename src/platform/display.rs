@@ -6,7 +6,7 @@
 //! [`ScreenRect`] 这个**纯数据**已下沉到 `core::geometry`（它没有任何 Win32 调用，
 //! 而 `core::backdrop` 需要用它来保持 core 层的纯净）。这里重导出，让既有
 //! `platform::display::ScreenRect` 的引用继续成立；真正依赖 Win32 的是本模块的
-//! [`virtual_screen`] / [`monitor_rect_at`] 等函数。
+//! [`virtual_screen`] / `monitor_rect_at` 等函数。
 
 pub use crate::core::geometry::ScreenRect;
 

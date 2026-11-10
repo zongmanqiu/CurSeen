@@ -1,10 +1,10 @@
 # 第三方组件许可与说明（THIRD-PARTY-NOTICES.md）
 
 > 随发布包分发。CurSeen 自身以 **GNU AGPL-3.0** 授权（见 `Cargo.toml` 的 `license` 字段）。
-> 本文件列出直接依赖的第三方组件、它们的许可证、**从哪里取到**，以及 CurSeen 对其中
+> 本文件列出随包分发涉及的第三方组件、它们的许可证、**从哪里取到**，以及 CurSeen 对其中
 > 一部分所做的 **本地修改**——AGPL-3.0 要求分发时保留这些声明。
 
-完整、权威的依赖树与版本见 `Cargo.lock`；本文件只登记**直接依赖**中需要署名 / 有分发
+完整、权威的依赖树与版本见 `Cargo.lock`；本文件登记需要署名 / 有分发
 义务 / 被本地修改过的部分。新增或移除依赖时必须同步本文件（见 `DOCS_MANIFEST.md`）。
 
 ## 关于许可证栏里的「OR」
@@ -42,7 +42,7 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 > `nnnoiseless` 曾经也是 path 依赖，2026-09-28 起直接用 crates.io 版（与本仓 vendored
 > 版逐字一致，实测确认），故从本表与 `.3rdParty/` 中移除。
 
-## 二、直接依赖（未修改）
+## 二、依赖清单（未本地修改）
 
 | 组件 | 版本 | 许可证 | 用途 |
 |---|---|---|---|
@@ -60,10 +60,13 @@ CurSeen 自身是单一许可证（AGPL-3.0），不存在这个问题。
 | `native-tls`（Windows 侧落到 `schannel`） | 0.2.x | MIT OR Apache-2.0 | `ureq` 的 TLS 后端；加解密与信任链实际由**系统** Schannel 完成（2026-10-08 起取代 `rustls` + `ring`，理由见 `Cargo.toml` 注释） |
 | `chrono` | 0.4.x | MIT OR Apache-2.0 | 时间戳（日志 / 产物命名） |
 | `rand` | 0.8.x | MIT OR Apache-2.0 | 特效随机量 |
+| `flate2` | 1.x | MIT OR Apache-2.0 | PNG / GIF / 压缩包的 deflate；显式直接依赖（见 `Cargo.toml` 注释） |
+| `windows-core` | 0.62.x | MIT OR Apache-2.0 | `windows` 0.62 的 `#[implement]` 宏生成 `::windows_core::*` 绝对路径，须作直接依赖 |
 
 > 版本号以 `Cargo.lock` 为准；上表记录的是本文件最后更新时的取值。
 >
-> 上表只列 `curseen-ui` 在 `Cargo.lock` 里的**直接**依赖。`Lua`（mlua vendored）、
+> 上表以 `curseen-ui` 在 `Cargo.lock` 里的**直接**依赖为主，另列 `native-tls`
+> 这一条需单独说明的传递依赖（TLS 后端）。`Lua`（mlua vendored）、
 > `tiny-skia` / `toml`（经 windui）、`easyfft` / `once_cell`（经 nnnoiseless）等是传递
 > 依赖，也随二进制分发许可义务，这里一并列出备查。
 >

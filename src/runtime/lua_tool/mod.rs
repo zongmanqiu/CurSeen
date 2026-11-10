@@ -710,6 +710,10 @@ pub const DOCS: &[(&str, &str)] = &[
     ),
     ("assets/lua/API.md", "Lua 接口权威表（与代码同源校验）"),
     (
+        "assets/docs/隐藏快捷键手册.md",
+        "面板上不显示的固定快捷键清单（纯文本版）",
+    ),
+    (
         "assets/lua/HoverDot/README.md",
         "悬浮标脚本的额外约定（续帧 / hide_cursor / 坐标系）",
     ),

@@ -34,7 +34,7 @@
 //!    因为那是用户**看不见也猜不到**的失败。
 //! 6. **MCI 用一个固定别名**（[`MCI_ALIAS`]）。① 与 `PlaySoundW` 语义一致：新声音打断
 //!    旧声音；② 不必为每个文件名生成合法别名（MCI 别名不能含空格/引号）。代价是每次
-//!    播放都要 `close` 再 `open`，所以整段操作用 [`MCI_LOCK`] 串起来。
+//!    播放都要 `close` 再 `open`，所以整段操作用 `MCI_LOCK` 串起来。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

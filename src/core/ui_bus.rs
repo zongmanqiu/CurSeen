@@ -2,7 +2,7 @@
 //!
 //! # 为什么需要一个全局量
 //!
-//! [`UiMsg`] 的正规通路是 `Runtime::ui_tx`，但那条通道在 `runtime` 层，而**脚本层拿不到它**
+//! `UiMsg` 的正规通路是 `Runtime::ui_tx`，但那条通道在 `runtime` 层，而**脚本层拿不到它**
 //! （分层是 `core ← platform ← scripting ← … ← runtime`，`scripting` 不许向上借 `Runtime`）。
 //! 脚本里的 `ext:result` / `ext:input` 又确实要说"请 UI 线程替我开一个窗"。
 //!
@@ -11,14 +11,14 @@
 //! `app.channel(...)` 给的是 **windui 的 `Sender`**，而 `core` 禁依赖 `windui`
 //! （`build/layering_scan.py` 第 2 条：可测性的根基）。所以这里只存一个
 //! `dyn Fn(UiMsg) -> bool`：由 `runtime::overlay` 在起应用时把"往 windui 通道里塞一条消息"
-//! 包成闭包交进来，闭体留在高层、`core` 只认识 [`UiMsg`]。形状与
+//! 包成闭包交进来，闭体留在高层、`core` 只认识 `UiMsg`。形状与
 //! `platform::input::hook` 的 `static HOOK_TX: OnceLock<Sender<..>>` 同一条思路——
 //! 进程级一份、装一次、到处能问。
 //!
 //! # 装不上怎么办
 //!
 //! 单元测试里的裸 `Runtime` 没有通道（`runtime/mod.rs` 的 `ui_tx: None`），覆盖层起来之前
-//! 也还没有通道。所以 [`dialog`] 返回 [`DialogOutcome::Unavailable`]，**调用方退回原生框**——
+//! 也还没有通道。所以 `dialog` 返回 `DialogOutcome::Unavailable`，**调用方退回原生框**——
 //! 这不是"以防万一"，而是本层唯一诚实的做法：`ext:result` 在无 UI 线程的环境里必须仍然跑得完
 //! （`scripting` 的测试就是这种环境）。
 

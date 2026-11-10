@@ -33,7 +33,6 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, Global
 const CF_UNICODETEXT: u32 = 13;
 
 const HTML_FMT_NAME: &str = "HTML Format";
-const SELF_SHIELD_NAME: &str = "CurSeen.ClipboardSelf";
 
 /// 单条 CF_HTML 落盘上限（字节）。Office 带内联图片的富文本可达数十 MB，
 /// 超限说明它本质是"一张贴着文字的图"，保真收益趋零 —— 不存，粘贴回落纯文本。
@@ -104,31 +103,6 @@ pub fn plausible(blob: &[u8]) -> bool {
     blob.len() > 32 && blob.starts_with(b"Version:") && blob.windows(10).any(|w| w == b"StartHTML:")
 }
 
-/// 写一条命名格式（空 DWORD）标记"这是 CurSeen 自己写回的"，捕获端见之即跳过。
-/// ★ 调用前提：剪贴板**已打开**（与 `clipboard_history::set_self_shield` 同纪律）。
-unsafe fn set_self_shield_opened() {
-    let wide: Vec<u16> = SELF_SHIELD_NAME
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let fmt = RegisterClipboardFormatW(PCWSTR(wide.as_ptr()));
-    if fmt == 0 {
-        return;
-    }
-    let hg = match GlobalAlloc(GHND, 4) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let p = GlobalLock(hg);
-    if p.is_null() {
-        let _ = GlobalFree(Some(hg));
-        return;
-    }
-    *(p.cast::<u32>()) = 0;
-    let _ = GlobalUnlock(hg);
-    let _ = SetClipboardData(fmt, Some(HANDLE(hg.0)));
-}
-
 /// 写回：纯文本（CF_UNICODETEXT 兜底）+ 可选富文本（"HTML Format"）。
 ///
 /// ★ 文本必须写：只写 HTML 的剪贴板在目标程序不支持 HTML 时（老编辑器 / 终端）
@@ -182,7 +156,8 @@ pub unsafe fn write_text_and_html(text: &str, html: Option<&[u8]>) {
                 let _ = GlobalFree(Some(h));
             }
         }
-        set_self_shield_opened();
+        // 自写屏蔽（正本在 `screenshot::set_self_shield_opened`，名字只此一份）。
+        crate::platform::screenshot::set_self_shield_opened();
         Some(())
     })
     .is_some();

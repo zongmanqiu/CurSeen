@@ -123,9 +123,10 @@ set_active  : enabled=true  changed=['trail.hover_enabled','trail.hover_type',
 
 - **`lua_trace` / `lua_shot`（以及命令行的 `--lua-trace` / `--lua-shot`）只把显式传入的
   `--param` / `params` 交给脚本**。`schema()` 里声明的 `default` **不会**被补进 `params`。
-- **真机运行时**（面板里选中脚本、拖参数）会把默认值合并进交给脚本的那份参数。
+- **真机侧只有 `image` 角色的 `run` 模型**会合并默认值；击键音效与四个回调宿主
+  （拖尾 / 悬浮标 / 点击效果 / 复合）拿到的仍是裸配置，见 `assets/lua/API.md` §8。
 - 所以脚本里写 `params.ribbon_width or 6`、而 schema 里 `default = 20` 时：
-  离屏跑的一直是 **6**，真机跑的是 **20**。这会出现"把 schema 默认值从 6 改到 16，
+  离屏与吃裸配置的宿主跑的一直是 **6**，会合并的那路跑的是 **20**。这会出现"把 schema 默认值从 6 改到 16，
   离屏出图却毫无变化"的怪事——因为改的根本没生效。
 
 **写法要求**：每个 `params.<key> or <V>` 的兜底值 `V`，必须与 `schema()` 里该键的
@@ -167,8 +168,8 @@ set_active  : enabled=true  changed=['trail.hover_enabled','trail.hover_type',
 
 ## 7. 安全边界
 
-`write_script` 让"落盘 Lua 脚本"不再需要文件系统权限，而 Lua 脚本本身能起进程、读写文件
-（`ext:proc` / `ctx.fs`）。**把这套工具交给谁，等于让谁在本机执行任意代码。**
+`write_script` 让"落盘 Lua 脚本"不再需要文件系统权限，而 Lua 脚本本身能起进程、
+读写文件（`ext:proc` / `ext:write_file`；`ctx.fs` 只读）。**把这套工具交给谁，等于让谁在本机执行任意代码。**
 
 - 只走 stdio / 本机管道，不开端口、不做远程；
 - 写入锁在程序目录内 `assets/lua/` 的五个挂载目录，`..` 与目录外绝对路径一律拒绝；

@@ -233,7 +233,15 @@
 ## 8. 脚本必须 / 可以定义的回调（函数）
 
 这些**不是** Rust 预定义函数，而是宿主在合适时机反向调用脚本里定义的全局函数。
-所有 `params` 参数都是 `schema()` 声明的参数表。**m17 起宿主在交棒给脚本前把 `default` 合并进去了**：凡 `schema` 声明过的键，`params` 里**一定存在**（配置里没写过 = 交默认值），不必再写 `params.x or 默认`；用户显式填过的值（包括 `false` / `0` / 空串）原样交，声明之外的键也原样透传。也可读全局 `_params`。
+所有 `params` 参数都是 `schema()` 声明的参数表。★ **默认值合并不看脚本、看宿主**：
+只有脚本页 / 工具台触发的 `image` 角色 `run` 模型（`ext_runner::run_ext_sync` →
+`merged_params`，m17）会在交棒前把 `schema()` 的 `default` 补进 `params`，声明过的键
+一定存在；**击键音效的 `run(ctx, params)`（`modules/key_sound.rs` → `scripting/runtime.rs`）
+与四个回调宿主（拖尾 / 悬浮标 / 点击效果 / 复合）吃的都是裸配置**，缺键时脚本侧必须写
+`params.x or 默认` 兜底。工具台 `--lua-check` / `--lua-trace` / MCP `params` 也只收显式值、
+不合并（见随包《MCP说明.md》§5）。所以兜底值 V 必须与 `schema()` 的 `default` 逐项一致，
+否则离屏与真机行为会分叉。用户显式填过的值（包括 `false` / `0` / 空串）原样交，
+声明之外的键也原样透传。也可读全局 `_params`。
 
 | 回调 | 签名 | 被谁调用 | 说明 / 返回值契约 |
 |---|---|---|---|
@@ -245,7 +253,7 @@
 | `draw` | `draw(ctx, params) -> number?` | 同上 | 每帧绘制。返回值语义 = 续帧请求：返回 `n>0` = "n 毫秒后再来一帧"；返回 0 / 负数 / 其它类型 / `nil` = 不请求额外帧。**只对悬浮标（`HoverDot/`）真正成立**；拖尾 / 点击不看返回值（靠"是否还在画"判活）。 |
 | `on_press` | `on_press(x, y, t, params)` | 全部宿主 | 指针按下触发一次。**兼容老名 `on_click`**（先找 `on_press`，没有再回退 `on_click`，都没有则静默跳过）。 |
 | `on_mouse_down` | `on_mouse_down(button, x, y, params)` | 全部宿主（优先于 `on_press`） | 鼠标按下，`button` ∈ `"left"/"right"/"middle"/"x1"/"x2"`（参数顺序刻意与 `on_press(x,y,t)` 不同名，防抄错）。取时间用全局 `elapsed`。缺失时回退 `on_press`。 |
-| `on_mouse_up` | `on_mouse_up(button, x, y, params)` | 全部宿主 | 鼠标抬起。按住态视觉（加速/后坐/连发）用；缺失静默跳过。 |
+| `on_mouse_up` | `on_mouse_up(button, x, y, params)` | 拖尾 / 点击效果 / 复合（**悬浮标宿主不转发抬起**） | 鼠标抬起。按住态视觉（加速/后坐/连发）用；缺失静默跳过。 |
 | `on_wheel` | `on_wheel(delta, horizontal, x, y, params)` | 复合 / 拖尾宿主 | 滚轮。`delta` 一格 ±120（正 = 上/右），`horizontal` = 倾斜滚轮。**只有脚本声明它，钩子才转发普通滚轮**（否则每滚一格不唤醒 UI）；缺失静默跳过。 |
 | `on_key` | `on_key(key, mods, repeated, params)` | 复合脚本专属 | 键盘按下。`key` = 键名；`mods` = `{ctrl,alt,shift,win}`；`repeated` = 是否长按重复。返回值当前未被宿主解释，发声请显式调 `play_sound()`。 |
 | `run` | `run(ctx, params) -> value` | `image` / `keysound` 角色入口 | 无全局 `run` → 返回 `nil`。 |
@@ -266,7 +274,7 @@
 | `type` | string | 参数类型（见下表）。未知 / 缺省 → `"float"`。 |
 | `min` / `max` | number | 滑块 / 数值范围（bool / choice / sound / folder / str / file / hotkey 忽略）。缺省 0 / 1。 |
 | `step` | number | 滑块步进（仅 UI）。缺省 0.01。 |
-| `default` | number / string / bool | 默认值；缺失时按类型给兜底。★ 合并发生在**交棒给脚本那一刻**（`ext_runner::merged_params`），所以脚本收到的表里声明过的键一定在；界面的初值与脚本拿到的默认值是**同一个来源**（`ParamDef::value_or_default`，由 `ui/model.rs` 那格对拍钉住）。存的值类型与声明不符 ⇒ 回退默认值并记一行日志。`int` 档交的是**整数**（Lua 里 `math.type` 为 `integer`），不是浮点。 |
+| `default` | number / string / bool | 默认值；缺失时按类型给兜底。★ **只有 `image` 角色 `run` 模型会在交棒那一刻合并**（`ext_runner::merged_params`），其余宿主吃裸配置，见 §8。界面的初值与脚本拿到的默认值是**同一个来源**（`ParamDef::value_or_default`，由 `ui/model.rs` 那格对拍钉住）。存的值类型与声明不符 ⇒ 回退默认值并记一行日志。`int` 档交的是**整数**（Lua 里 `math.type` 为 `integer`），不是浮点。 |
 | `choices` | table(array) | `choice` 类型的候选项字符串（也是存进配置、喂给脚本的稳定值，勿改）。 |
 | `labels` | table(array) | `choice` 各选项界面显示名（可选，与 `choices` 一一对应；长度不符则整份丢弃）。 |
 | `group` | string | 分组名（UI 分组标题，可选）。 |
@@ -290,10 +298,10 @@
 
 | 目录 / 角色 | `role`（缺省推演） | 宿主 `host` | 模型 | 可用回调 |
 |---|---|---|---|---|
-| `assets/lua/MouseTrail/` | `effect` | `"trail"` | 绘图回调 | `init`, `on_move`, `step`, `draw` |
-| `assets/lua/HoverDot/` | `effect` | `"hover"` | 绘图回调 | `init`, `draw`（可用 `ctx:image` 贴预载位图） |
-| `assets/lua/ClickFx/` | `effect` | `"clickfx"` | 绘图回调 | `on_press`/`on_click`, `step`, `draw` |
-| `assets/lua/scripts/`（含在线包 `<id>/` 目录） | 缺 `role` 且无 `menu` → **`composite`** | `"panel"` | 绘图回调 + `play_sound` | `init`, `on_move`, `on_mouse_down`, `on_key`, `step`, `draw` |
+| `assets/lua/MouseTrail/` | `effect` | `"trail"` | 绘图回调 | 见 §8；另有 `on_press` / `on_mouse_down` / `on_mouse_up` / `on_wheel` |
+| `assets/lua/HoverDot/` | `effect` | `"hover"` | 绘图回调 | 见 §8；`init` / `on_move` / `step` / `draw` / `on_press`，**不转发 `on_mouse_up`**（可用 `ctx:image` 贴预载位图） |
+| `assets/lua/ClickFx/` | `effect` | `"clickfx"` | 绘图回调 | 见 §8；`on_press`/`on_click` / `on_mouse_up` / `step` / `draw`，出生时补发一次 `on_move` |
+| `assets/lua/scripts/`（含在线包 `<id>/` 目录） | 缺 `role` 且无 `menu` → **`composite`** | `"panel"` | 绘图回调 + `play_sound` | 见 §8；另转发 `on_mouse_up` / `on_wheel` |
 | 贴图动作脚本 | 有 `menu` 无 `role` → `image` | —（走 `run`） | `run(ctx, params)` | `run` |
 | `assets/lua/KeySound/` | `keysound` | —（走 `run`） | `run(ctx, params)` | `run` |
 | 其它目录散件 | 无 `role` 且无 `menu` 又不在上述目录 → **告警并跳过** | — | — | — |

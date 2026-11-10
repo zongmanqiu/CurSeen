@@ -1,7 +1,8 @@
 //! 托盘图标资源（原始 RGBA8，**非预乘**）。
 //!
 //! ★ 换 LOGO 的唯一入口是矢量源 `assets/icons/icon.svg`（red 版 `icon_red.svg`，
-//!   结构一致、只差圆点颜色：青 `#3df8f8` / `red`），然后跑一次：
+//!   两版同为**不透明黑底**，结构一致、只差图形颜色：青 `#3df8f8` / 红 `#FF0000`），
+//!   然后跑一次：
 //!       cargo run --example gen_icon --features icon-gen
 //!   它从 SVG **逐档**光栅化出（本模块只吃其中的托盘那份）：
 //!     · `assets/icons/tray_<N>.rgba` / `tray_<N>_red.rgba`
@@ -62,7 +63,7 @@ fn tray_rgba_for_size(n: u32, red: bool) -> &'static [u8] {
 
 /// 当前系统 DPI 下的托盘图标：`(边长, 非预乘 RGBA8 像素)`。
 ///
-/// `red` 选红色变体（源 `icon_red.svg`：录制圆点是红的）。视频 / GIF
+/// `red` 选红色变体（源 `icon_red.svg`：黑底 + 红色图形）。视频 / GIF
 /// **真正开录之后**才切到它（倒计时不算——那 3 秒还能取消），停止后切回，
 /// 切换动作见 `app::tray::set_tray_recording`。
 ///
@@ -155,5 +156,37 @@ mod tests {
             same,
             px.len() / 4
         );
+    }
+
+    /// ★ 录制态五档都必须是**黑底 + 红色图形**（2026-11-10 用户口径）：两版只差图形
+    ///   颜色，背景都得是源 SVG 那块不透明黑底。产物是 `gen_icon` 从 `icon_red.svg`
+    ///   光栅化出来的，源改过就要重跑生成器——否则托盘上会顶着一张与源不符的旧图。
+    #[test]
+    fn red_logo_keeps_the_black_background() {
+        for n in TRAY_SIZES {
+            let px = tray_rgba_for_size(n, true);
+            let white = px
+                .chunks_exact(4)
+                .filter(|p| p[3] > 200 && p[0] > 250 && p[1] > 250 && p[2] > 250)
+                .count();
+            assert_eq!(
+                white, 0,
+                "tray_{n}_red.rgba 有 {white} 个白底像素：产物与 icon_red.svg 不符，请重跑 gen_icon"
+            );
+            // 四角就是背景：不透明纯黑。比「全图有黑像素」更准，挡得住「只留一点黑边」的假过。
+            let corners: [usize; 4] = [
+                0,
+                ((n - 1) * 4) as usize,
+                ((n * n - n) * 4) as usize,
+                (n * n - 1) as usize * 4,
+            ];
+            for at in corners {
+                let p = &px[at..at + 4];
+                assert!(
+                    p[3] == 255 && p[0] < 32 && p[1] < 32 && p[2] < 32,
+                    "tray_{n}_red.rgba 四角不是不透明黑底（{p:?}）：请重跑 gen_icon"
+                );
+            }
+        }
     }
 }

@@ -33,7 +33,7 @@
 # every library from scratch (useful when .3rdParty/ is suspected corrupt).
 
 # ---- Rust PATH dependencies (downloaded by 2_download.bat) -----------------
-# Both are path dependencies modified IN PLACE (windui carries the CurSeen
+# The only path dependency is modified IN PLACE (windui carries the CurSeen
 # patch series, including the layered overlay window). After downloading,
 # 3_patch.bat must copy main/patches/ over .3rdParty/ - otherwise the fork
 # changes are silently missing and the build either fails or loses features.

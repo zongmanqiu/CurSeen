@@ -100,6 +100,7 @@ python build/hygiene_scan.py      # 期望输出：「违规 0 处」
 | target-dir 由 `main/.cargo/config.toml` 指定为 `../temp/target` | 编译产物不在 `main/` 内，别去找 `main/target` |
 | ★★ **`build.rs` 的 `rerun-if-changed` 指向不存在的路径**（例如把 `main` 当成非 git 工作副本时 `.git/HEAD` 不存在）→ cargo 判"永远脏"，**每次** cargo 调用都重跑构建脚本、连带整个 crate 全量重编 | **新增 `rerun-if-changed` 前先确认目标真实存在**；现有那行已按存在性下发（别改回无条件下发） |
 | exe **不可复现**：PE 头 `TimeDateStamp` 写的是**构建时刻** | 别用 MD5 判"代码有没有变"——要抹掉 PE 头那 4 字节再比哈希。`deploy.py` 的 `MD5_MATCH=True` 证明的只是"部署的就是刚编出来的那个文件" |
+| ★★ **沙箱 / CI 环境缺 `ProgramFiles(x86)`** → build.rs 找不到 rc.exe 会**静默**跳过图标+版本资源（设计如此：没 SDK 的机器不卡构建），exe 变"无版本信息"，`deploy.py` 以 `VERINFO=MISSING` 拦下——这是守门不是误报 | 已在 `build.rs::program_files_x86` 从 `ProgramFiles`/`ProgramW6432` 同盘推导兑底；遇到 VERINFO=MISSING 先查这个，别急着重装 SDK |
 | 门禁的**成本结构**：测试本身只跑几秒，**慢的全是编译**（改任意一个 `.rs` ≈ 1m25s，过滤挡不住） | 攒一批改动再编一次，别"改一行编一次" |
 | 按需检验用 `python main/build/gate.py <组名…>`（省的是**信号**不是时间） | 内层循环 `cargo check --release --tests`（**必须带 `--tests`** 才会检查 `#[cfg(test)]` 代码） |
 | 面板截图：`PrintWindow` 抓这块分层窗返回 **0**（全黑）；`SetForegroundWindow` 在非前台进程调用时**静默被拒** | 口径：`SetForegroundWindow` 前**先敲一下 ALT**解锁前台锁 → 置顶 → **截完验像素**（面板正文三点够亮）再决定是否重截。找窗口要**枚举**后挑"可见+在屏+面积最大"，`FindWindowW` 会撞上同名的 160×28 隐藏窗 |

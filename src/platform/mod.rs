@@ -31,6 +31,5 @@ pub mod text_raster;
 pub mod topmost;
 pub mod unzip;
 pub mod win_util;
-// WGC 采集层（DXGI 桌面复制的替代，见模块头"为什么换"）。DXGI 路径仍保留为回退。
 pub mod window_probe;
 pub mod working_set;

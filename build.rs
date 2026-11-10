@@ -35,9 +35,9 @@ fn main() {
     println!("cargo:rustc-env=CURSEEN_GIT_HASH={hash}");
     // ★ `rerun-if-changed` 指向**不存在的路径**时，cargo 判定"这个依赖永远脏"→
     //   **每次** cargo 调用都重跑本脚本，连带整个 crate 全量重编。
-    //   `main` 是工作副本而不是 git 仓库（`git rev-parse` 报 not a git repository），
-    //   `.git/HEAD` 根本不存在 —— 实测代价：**连续两次 `cargo test --release --lib`、
-    //   零改动，各花 1m12s**（本机 149 个 .rs）。所以这一行必须按存在性下发。
+    //   早期 `main` 不是 git 工作副本时 `.git/HEAD` 确实不存在；2026-10-31 接入 git 后
+    //   它在盘，但克隆到不带 `.git/` 的环境仍可能缺失 —— 实测代价：**连续两次
+    //   `cargo test --release --lib`、零改动，各花 1m12s**。所以这一行必须按存在性下发。
     if std::path::Path::new(".git/HEAD").exists() {
         println!("cargo:rerun-if-changed=.git/HEAD");
     }
@@ -177,9 +177,7 @@ fn find_rc_exe() -> Option<PathBuf> {
     if let Some(p) = which("rc.exe") {
         return Some(p);
     }
-    let kits = std::env::var("ProgramFiles(x86)")
-        .map(PathBuf::from)
-        .ok()?
+    let kits = program_files_x86()?
         .join("Windows Kits")
         .join("10")
         .join("bin");
@@ -196,6 +194,21 @@ fn find_rc_exe() -> Option<PathBuf> {
         }
     }
     best.map(|(_, p)| p)
+}
+
+/// "Program Files (x86)" 目录。
+///
+/// ★ 不能只信 `ProgramFiles(x86)` 环境变量：精简环境（CI / 沙箱宿主的子进程）里它
+///   可能整个缺失 —— 2026-11-10 发版门禁实测：deploy.py 以 `VERINFO=MISSING` 拦下，
+///   exe 无图标无版本资源，根因就是这个。SDK 与 `ProgramFiles` 同盘，从它的**父目录**
+///   推导同级 "(x86)" 目录即可，不硬编码盘符（hygiene 红线：源码里禁硬编码绝对路径）。
+fn program_files_x86() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("ProgramFiles(x86)") {
+        return Some(PathBuf::from(p));
+    }
+    let pf = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let parent = PathBuf::from(pf).parent()?.to_path_buf();
+    Some(parent.join("Program Files (x86)"))
 }
 
 /// PATH 里找可执行文件（自带的极简版：只需要 `rc.exe` 一个，不值得为它引依赖）。

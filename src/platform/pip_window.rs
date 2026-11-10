@@ -7,7 +7,7 @@
 //! **错的**，而且错得很隐蔽：
 //!
 //! ```text
-//! tests/pip_probe.rs 实测（2026-09-20，本机 1920×1080）
+//! tests/probes/pip_probe.rs 实测（2026-09-20，本机 1920×1080）
 //!   ① 基准（无分层窗）                SRCCOPY              红占比 =   0.00%
 //!   ② 分层窗已显示                    SRCCOPY (grab_clean) 红占比 = 100.00%  ← 完全抓到了
 //!                                     SRCCOPY|CAPTUREBLT   红占比 = 100.00%

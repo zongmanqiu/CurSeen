@@ -81,22 +81,6 @@ pub const DIALOG_FOOTER_BG: [u8; 3] = [246, 248, 250]; // 对话框底部背景
 pub const BUTTON_PRIMARY: [u8; 3] = [76, 139, 245]; // 主要按钮
 pub const BUTTON_OUTLINE: [u8; 3] = [207, 212, 220]; // 轮廓按钮
 
-/// 便签原生窗（Win32/GDI）配色。
-///
-/// 便签画在**独立原生窗**上（`platform::sticky` + `ui::note_ui`），不走 windui 控件，
-/// 所以取色只能自己给；这套值与便签出厂底色 `Config::sticky_note.bg_color` 同源
-/// （RGB 40,44,52 那一档深色），窗口与它的设置页看着才是同一个东西。
-pub const NOTE_BG: [u8; 3] = [40, 44, 52];
-pub const NOTE_PANEL_BG: [u8; 3] = [52, 57, 66];
-pub const NOTE_ROW_BG: [u8; 3] = [60, 65, 75];
-pub const NOTE_TEXT: [u8; 3] = [232, 236, 240];
-pub const NOTE_TEXT_DIM: [u8; 3] = [168, 173, 182];
-pub const NOTE_ACCENT: [u8; 3] = [76, 139, 245];
-pub const NOTE_BUTTON_BG: [u8; 3] = [70, 76, 88];
-pub const NOTE_BUTTON_HOVER: [u8; 3] = [86, 93, 106];
-pub const NOTE_SEPARATOR: [u8; 3] = [96, 102, 114];
-pub const NOTE_SELECTED_ROW: [u8; 3] = [58, 74, 104];
-
 /// 将RGB颜色转换为Color
 pub fn to_color(rgb: [u8; 3]) -> windui::geometry::Color {
     windui::geometry::Color::rgba(rgb[0], rgb[1], rgb[2], 255)

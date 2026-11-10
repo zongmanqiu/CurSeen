@@ -4,7 +4,7 @@
 //!
 //! 源（人只写这些，全在 `assets/`）：
 //!   · `icons/icon.svg`      —— 常规态 LOGO（黑底 + 青色图形）；
-//!   · `icons/icon_red.svg`  —— 录制态（圆点红色），结构须与常规版一致；
+//!   · `icons/icon_red.svg`  —— 录制态（同为黑底 + 红色图形），结构须与常规版一致；
 //!   · `images/ALiPay.svg` / `images/WeChatPay.svg` —— 赞助二维码（真码矢量）。
 //!
 //! 产物（机器生成，不要手改）：

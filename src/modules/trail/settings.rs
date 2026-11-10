@@ -111,7 +111,7 @@ impl RippleStyle {
             _ => RippleStyle::Ring,
         }
     }
-    /// 样式 → 配置字符串（与 [`crate::ui::model::RIPPLE_STYLE_IDS`] 对应）。
+    /// 样式 → 配置字符串（与 `crate::ui::model::RIPPLE_STYLE_IDS` 对应）。
     pub fn as_str(self) -> &'static str {
         match self {
             RippleStyle::Ring => "ring",
@@ -424,7 +424,7 @@ impl TrailSettings {
     }
 
     /// 取某特效某参数的当前值：只认 `{id}.{key}`（§38 起无未加前缀兜底，理由见
-    /// [`effect_param_map`]）；调用方自带与脚本 schema 一致的 default。
+    /// `effect_param_map`）；调用方自带与脚本 schema 一致的 default。
     pub fn param_value(&self, id: &str, key: &str) -> Option<&Value> {
         self.trail_settings.get(&format!("{id}.{key}"))
     }

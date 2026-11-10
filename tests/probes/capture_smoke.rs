@@ -457,8 +457,9 @@ fn finish_detached_finalizes_like_sync_finish() {
 /// 此时 `SinkFinisher` 守卫还压在卡死线程自己的栈上，栈永不展开、`Finalize` 永不执行
 /// ⇒ 产物必然是"几百 MB、`mdat` 之后什么都没有"的废文件（当天 177MB / 8.8MB 两次皆然）。
 ///
-/// 修复：`IMFSinkWriter` 另外登记到 `Recorder` 的 `SinkSlot` 上；收尾线程确认"卡在采集
-/// 侧"（此刻线程不可能在 `WriteSample` 里）就自己接管 `Finalize`，把卡住前的部分补上索引。
+/// 现行收尾（2026-10-06 回滚单文件方案后）：`finish_detached` 在后台限时等一次
+/// `Finalize`，`SinkFinisher` 栈守卫兜正常路径。旧方案的 `SinkSlot` 跨线程接管已删除，
+/// 见《踩坑记录》册四 §十六 / 册二 §9.6。
 ///
 /// 真卡死没法按需复现，故用 `CURSEEN_REC_WEDGE_AFTER=N` 注入。钉三件事：
 /// 1. 产物有 `moov` + H264 轨（= 抢救生效，前段能播）；

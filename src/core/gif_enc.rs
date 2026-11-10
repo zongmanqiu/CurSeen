@@ -1075,7 +1075,7 @@ impl GifWriter {
     ///
     /// 为什么透明下标要**由调用方给一个新槽**（而不是复用源文件声明的那个）：GIF 的透明是
     /// **逐帧**语义 —— 同一个下标可以在这一帧是透明的、在另一帧是实色。复用就会在产物里挖出
-    /// 洞。<transparent> 由 [`crate::core::gif_trim::rewrite_to`] 用
+    /// 洞。`<transparent>` 由 [`crate::core::gif_trim::rewrite_to`] 用
     /// [`Palette::with_extra_slot`] 申请，专槽专用，因此**不会撞上任何画面内容**。
     pub fn write_raw_alpha(
         &mut self,

@@ -19,7 +19,7 @@
       ★ 禁止手工压缩 `build/`：会带入 `assets/cache/update.json`（运行期缓存），且文件名编码
       不受控（Windows 压缩工具可能写成 GBK）；打包器用源码树 `main/assets` 并以 UTF-8 写包名。
 - [ ] 生成 `update.json`：`python build/gen_update_json.py --version <版本> --zip <刚打出的 zip>`；
-      再用 `--out assets/cache/update.json` 生成随包缓存。**两次的 --zip 必须是同一个文件**
+      再用 `--out assets/cache/update.json` 生成脱机兜底清单（不进发行包）。**两次的 --zip 必须是同一个文件**
 - [ ] 上传前先核对本地包：`python build/check_update_asset.py --local <zip>` → `本地核对通过`
 - [ ] 上传 release 资产后，运行 `python build/check_update_asset.py`：Gitee / GitHub 两个镜像
       都必须 `[ok]`（地址通 + 返回 zip + 文件名与版本一致）；不通过不得宣布发布
@@ -120,7 +120,7 @@
       「录屏」「录制」「裁剪」三把快捷键出厂留空，验收前在面板里各配一把
       —— 声音自动：`audio_probe` / `audio_e2e` / `monitor_probe` / `denoise_probe`；
       出厂键位留空有 config 单测钉住，验收本身仅人手
-- [ ] 剪贴板历史（`F4`）：文本 / 图片 / 文件条目齐备；点行粘贴进记事本与 QQ/TIM
+- [ ] 剪贴板历史（热键**出厂留空**，「工具」页自配后再验）：文本 / 图片 / 文件条目齐备；点行粘贴进记事本与 QQ/TIM
       **到货**（QQ/TIM 是焦点恢复特异环境，必测）；面板可见时悬停**不出现启动转圈**
       （2026-10-07 修的「应用启动中」锁存，回归点）；关闭 CurSeen 后系统剪贴板
       恢复正常（屏蔽格式不残留）—— 自动：`clip_focus_restore` / `qq_paste`（真机）
@@ -153,4 +153,4 @@
 - [ ] 打 tag / 上传发行包
 - [ ] 自动更新地址与实际下载地址一致
 
-> 红线：本清单只负责检查。若日后接入 git，`commit` / `push` 必须先取得用户明确许可。
+> 红线：本清单只负责检查。本仓已接入 git（主仓 Gitee）；`commit` / `push` 必须先取得用户明确许可。

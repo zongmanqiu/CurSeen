@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.1.3 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.3/CurSeen_2.1.3.zip)**
- ｜ **[⬇️ 下载 2.1.3 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.3/CurSeen_2.1.3.zip)**
+**[⬇️ 下载 2.1.4 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.4/CurSeen_2.1.4.zip)**
+ ｜ **[⬇️ 下载 2.1.4 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.4/CurSeen_2.1.4.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
@@ -94,7 +94,7 @@ main\build\6_deploy.bat               REM 或 cargo build --release + python bui
 ```
 main/                              ← 上传单位（源码 + 现行文档 + 构建脚本）
                                       .3rdParty/ temp/ build/ 都在它之外
-├── Cargo.toml                     包定义（bin = curseen；[[example]]/[[test]] 登记探针）
+├── Cargo.toml                     包定义（bin = curseen；[[example]] 登记离屏探针；真机探针刻意不登记，跑用 build/probe.py）
 ├── Cargo.lock                     依赖锁定
 ├── build.rs                       注入构建信息（git 短哈希 → "关于"页/日志；图标资源经 rc.exe 编入）
 ├── README.md                      本文档
@@ -106,10 +106,10 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 ├── THIRD-PARTY-NOTICES.md         第三方许可与本地修改说明
 ├── LICENSE                        AGPL-3.0 官方全文
 ├── .gitignore / .gitattributes    仓库卫生（*.bat 强制 CRLF）
-├── src/                           源码（分层：core←platform←scripting←modules←app←ui←runtime）
+├── src/                           源码（分层：core←platform←scripting←modules←update←app←ui←runtime）
 │   ├── main.rs                    程序入口
 │   ├── lib.rs                     库入口（装配、单实例闸门）
-│   ├── app/                       应用层：全局热键、托盘、UiMsg 消息
+│   ├── app/                       应用层：全局热键、托盘（UiMsg 契约正本在 core::events）
 │   ├── core/                      纯逻辑：配置 / 几何 / 颜色 / 图像 / 绘制指令 / 文本度量
 │   ├── modules/                   功能模块：拖尾 / 按键显示 / 击键音效 / 屏幕书写 / 虚拟键盘 / 放大镜 / 便签 / 剪贴板历史
 │   ├── platform/                  Win32 封装：截图 / 录屏 / 显示器 / 窗口 / 键鼠钩子
@@ -117,17 +117,17 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 │   ├── scripting/                 Lua 绑定（特效脚本引擎）
 │   ├── ui/                        控制面板 UI：页面 / 模型 / 卡片组件
 │   └── update/                    自动更新：版本检查 / 下载 / 安装
-├── assets/                        资源（目录即来源）：lua/（唯一脚本根）/ Sounds（共用声音素材）/ docs（商店与更新清单缓存）/ …
-├── tests/                         集成测试门禁（docs_consistency / config_pipeline_e2e）
-│   ├── probes/                    真机探针（11 条，需硬件或真实窗口，[[test]] 登记）
+├── assets/                        资源（目录即来源）：lua/（唯一脚本根）/ Sounds（共用声音素材）/ docs（随包文档）/ cache（清单缓存）/ …
+├── tests/                         集成测试门禁（6 个顶层测试，清单见目录结构说明 §二）
+│   ├── probes/                    真机探针（47 个，需硬件或真实窗口，刻意不登记）
 │   └── fixtures/                  共享素材（config_v1.json）
 ├── examples/                      Rust 离屏验收探针（cargo run --example，不进发布产物）
 ├── build/                         构建脚本（编号 bat）+ 构建辅助 python —— 是源码，要上传
 ├── patches/                       第三方补丁登记 + 补丁后完整文件（wind-ui-rust-0.30.0/）
-└── docs/                          现行文档：DESIGN / PLATFORM_NOTES / RELEASE_CHECKLIST / UI_COMPONENTS / 踩坑记录（分册）
+└── docs/                          现行文档：DESIGN / DESIGN_ADOPTION / PLATFORM_NOTES / RELEASE_CHECKLIST / UI_COMPONENTS / LUA_TOOL / 踩坑记录（分册）
 ```
 
-> **仓库之外**（项目根）：`.3rdParty/`（两个 path 依赖，由 ②③ 从 `build\deps.txt` 取回并打补丁，
+> **仓库之外**（项目根）：`.3rdParty/`（唯一的 path 依赖 windui，由 ②③ 从 `build\deps.txt` 取回并打补丁，
 > **不在仓库里**）、`temp/target/`（编译中间）、`build/`（产物：exe + 许可文件 + 运行期数据）、
 > `temp/`（一次性探针 / 草稿，不入库）。
 
@@ -139,10 +139,10 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 | windui 0.30.0（含 CurSeen 补丁） | UI 框架 + 分层覆盖窗；CPU 软渲染（tiny-skia 后端） |
 | mlua 0.12（Lua 5.4, vendored） | 鼠标拖尾 / 点击效果等特效脚本引擎 |
 | windows 0.62 | Win32 API 绑定（截图 / DXGI 录屏 / MediaFoundation 编码 / 剪贴板 / 音频） |
-| `nnnoiseless` 0.5.2（path 依赖） | 麦克风降噪（BSD-3，纯 Rust 移植，无 C 绑定） |
+| `nnnoiseless` 0.5.2（crates.io 依赖） | 麦克风降噪（BSD-3，纯 Rust 移植，无 C 绑定） |
 | serde / serde_json | 配置持久化 |
 | png / gif | 图标、关于页二维码、悬浮标 GIF 解码 |
-| ureq | 更新检查与下载（rustls + gzip） |
+| ureq | 更新检查与下载（native-tls / Schannel + gzip） |
 | 构建 | `opt-level = "z"` 体积优先；仅渲染内核（tiny-skia / windui）提至 3 |
 
 ## 架构总览

@@ -20,8 +20,8 @@ pub(crate) fn rec_countdown_seconds(remain_ms: f32) -> u32 {
 ///   界面却一直显示"在录"，用户干等 13 分钟才察觉，最后产物还缺 `moov`。这里把
 ///   "永远在录、永远没结果"变成"一分钟内给出结论"。
 ///
-/// 60 秒足够宽松：正常一帧 33ms，连掉 1800 帧只可能是真死（看门狗 15 秒就开始报
-/// 阶段，见 `platform::recorder::STALL_WARN_MS`）。
+/// 60 秒足够宽松：正常一帧 33ms，连掉 1800 帧只可能是真死。判定在
+/// `Runtime::frame()`：采集心跳与编码线程写入帧数两条里程表取 max。
 pub(crate) const REC_STALL_GIVEUP_MS: u64 = 60_000;
 
 /// 距下一次倒计时数字跳变的毫秒数（1 表示已经该跳了，交给 `frame_demand` 归到 Now）。
@@ -128,7 +128,7 @@ impl Runtime {
 
     /// 录制中按下**另一把键**时的动作：停掉当前这段，收尾完成后自动开新格式。
     ///
-    /// 桌面复制同时只容一份（见 [`crate::platform::recorder::DuplHolder`]），所以
+    /// 桌面复制同时只容一份（DXGI `DuplicateOutput` 的限制，见 `platform::recorder`），所以
     /// "两路同时录"做不到，只能串行切换。用户按一次键就完成"换格式"，不用按第二遍。
     pub(crate) fn switch_recording_to(
         &mut self,
@@ -478,14 +478,21 @@ impl Runtime {
         self.action_notify.show("已停止录制，正在保存…");
     }
 
-    /// 消费后台收尾结论（帧循环每帧调用）：补日志、提示浮字 / 提示窗与工作集裁剪。
+    /// 消费后台收尾结论：补日志、提示浮字 / 提示窗与工作集裁剪。
+    /// 返回本次是否真的消费到结论（250ms 兜底路径据此踢一帧，见 `overlay`）。
+    ///
+    /// 两条调用路径：`frame()` 的快路径 + 250ms 对账的兜底路径。`take_finished_recordings()`
+    /// 取过即无，两条并存不会重复播报。★ 兜底那条不能删：`frame()` 只在 paint 里跑，
+    /// 「正在保存…」浮字淡出后 `frame_demand()` 报 Idle、覆盖层不再出帧，而
+    /// `rec_finishing` 只保证「不 park」、不保证「继续出帧」——收尾比浮字慢时结论会卡在
+    /// 槽位里，直到用户下一次输入才弹提示窗。
     ///
     /// 三种结局的口径与旧同步版逐字一致：干净收尾 →「录制完成」+ 桌面提示窗；
     /// 有产物但中途断过 →「录制中断，已保存前段」+ 仍登记提示窗；没有产物 →「录制失败」。
-    pub fn consume_finished_recordings(&mut self) {
+    pub fn consume_finished_recordings(&mut self) -> bool {
         let notices = take_finished_recordings();
         if notices.is_empty() {
-            return;
+            return false;
         }
         // ★ 收尾结论回来了 —— 无论干净/中断/失败，"上一次录制"这件事到此结束，
         //   快捷键重新可用（`finish_detached` 保证回调一定被触发，含超时弃子那条路）。
@@ -566,6 +573,7 @@ impl Runtime {
             log::info!("收尾完成，接着开 {kind:?}");
             self.begin_recording_after_switch(kind, queued_crop);
         }
+        true
     }
 
     /// 换格式收尾完成后：把待办兑现成"新一段的开录流程"。
@@ -665,6 +673,37 @@ mod tests {
                  `consume_finished_recordings` 不再跑，待办永远等不到兑现"
             );
         }
+    }
+
+    /// ★★ 收尾结论不能只靠 `frame()` 消费（2026-11-10 用户报「录完很久才弹提示」）。
+    ///
+    /// 停止录制后的「正在保存…」只撑 2 秒，淡出后 `frame_demand()` 报 Idle、覆盖层不再
+    /// 出帧；`rec_finishing` 只让 `input_needs_frame()` 为真（不 park），**不等于继续出帧**。
+    /// 收尾比浮字慢时结论卡在全局槽位，直到用户下一次动鼠标 / 按键踢出一帧才被消费 ——
+    /// 延迟多长完全取决于用户何时有输入。250ms 对账是这段空窗里唯一还在跑的通路。
+    #[test]
+    fn finish_notice_is_also_drained_by_the_250ms_poll_path() {
+        let src = include_str!("overlay.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let consume = body
+            .find("poll_rt.borrow_mut().consume_finished_recordings()")
+            .expect("250ms 对账里必须消费收尾结论：frame() 停跑时它是唯一回程口");
+        // rfind：通道回调里也有一处 take_rec_toast()，对账那处才是兜底路径。
+        let toast = body
+            .rfind("poll_rt.borrow_mut().take_rec_toast()")
+            .expect("250ms 对账里必须取提示窗请求");
+        assert!(
+            consume < toast,
+            "必须先消费结论（由它登记 rec_toast）再取提示窗请求，否则本拍取不到、还要再等一轮"
+        );
+        assert!(
+            body[consume..toast].contains("request_repaint()"),
+            "消费到结论后要踢一帧：失败 / 中断那一支的反馈浮字靠它上屏"
+        );
+        assert!(
+            include_str!("frame.rs").contains("consume_finished_recordings();"),
+            "frame() 的快路径不能被删：有输入时它比对账更早"
+        );
     }
 
     /// ★ 录制倒计时走**共享横幅函数**（`DrawList::draw_centered_banner`）：断言它产出

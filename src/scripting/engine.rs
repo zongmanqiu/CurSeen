@@ -350,7 +350,8 @@ impl ScriptingEngine {
     /// - ctrl/alt/shift/win：修饰键状态，打包成 `{ctrl=,alt=,shift=,win=}` 传入；
     /// - `params`：脚本 `schema()` 声明的参数现值（缺键时脚本侧 `params.x or 默认` 兜底）。
     ///
-    /// 返回**原始** `mlua::Value` 由调用方解释（见 `modules/key_sound.rs` 的 `Pick`）：
+    /// 返回**原始** `mlua::Value` 由调用方解释（唯一生产调用方是复合脚本宿主
+    /// `modules/trail/companion.rs`；击键音效宿主走 `run(ctx, params)`，不调本函数）：
     /// 字符串 = 音效路径；`false` = 强制静音（连宿主默认音也不响）；`nil` / `true` /
     /// 其它 = 落回宿主默认音。老脚本只声明三个形参也能兼容（Lua 自动忽略第 4 个实参）。
     /// 没有全局 `on_key` 时返回 Nil（调用方按"落回默认音"处理，不报错）。

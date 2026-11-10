@@ -705,12 +705,26 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
         if let Some(req) = pin_req {
             open_pin(ctx, &poll_rt, req);
         }
-        // ★ 录制成功提示窗的 250ms 兜底：停止快捷键之后可能再没有输入消息
-        //   （用户手已离开键盘），通道回调那条路不会跑，这里保证提示窗最迟 250ms 内出现。
         // ★ 脚本目录变化（m35）：监听线程只置标记，重扫在这里做（250ms 自然合流）。
         if poll_rt.borrow_mut().refresh_assets_if_changed() {
             request_repaint();
         }
+        // ★★ 录制收尾结论的 250ms 兜底（2026-11-10 用户报「录完很久才弹提示」）：
+        //   `consume_finished_recordings()` 挂在 `frame()` 里，而 `frame()` 只在 paint 中跑。
+        //   按停止后「已停止录制，正在保存…」浮字只撑 2 秒，淡出即 `frame_demand() == Idle`
+        //   ⇒ 覆盖层不再出帧；`rec_finishing` 只是让 `input_needs_frame()` 为真（**不 park**），
+        //   并不等于「继续出帧」。收尾只要比浮字慢，结论就卡在 `REC_FINISH_NOTICES` 槽位里，
+        //   直到用户下一次动鼠标 / 按键踢出一帧才被消费 —— 延迟多长全看用户何时有输入。
+        //   250ms 对账是这段空窗里唯一还在跑的通路：这里补一次消费，产物落盘后最迟
+        //   250ms 出提示窗。`take_finished_recordings()` 取过即无，与 `frame()` 快路径并存
+        //   不重复；`take_rec_toast()` 必须在它之后，同拍就能取到刚登记的提示窗请求。
+        if poll_rt.borrow_mut().consume_finished_recordings() {
+            // 失败 / 中断那一支会 show 反馈浮字，需要一帧把它画出来；成功支只登记 toast，
+            // 紧接着下面同拍就开窗。只在真消费到结论时踢这一帧，空闲零额外开销。
+            request_repaint();
+        }
+        // ★ 录制成功提示窗的 250ms 兜底：停止快捷键之后可能再没有输入消息
+        //   （用户手已离开键盘），通道回调那条路不会跑，这里保证提示窗最迟 250ms 内出现。
         let toast = poll_rt.borrow_mut().take_rec_toast();
         if let Some(path) = toast {
             open_rec_toast(ctx, &poll_rt, path, vs, dpi);

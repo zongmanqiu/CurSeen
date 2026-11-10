@@ -281,9 +281,10 @@ end<br />
 <code>clamp(v,lo,hi)</code>、<code>lerp(a,b,t)</code>。</p>
 <h3 id="3-2-击键音效-role-keysound">3.2 击键音效 <code>role="keysound"</code></h3>
 <p><strong>键音脚本住在 <code>assets/lua/KeySound/</code></strong>（键盘页「击键音效」卡），不是脚本页；<br />
-入口 <code>on_key(key, mods, repeated, params)</code>（键名与击键回显同源；<code>mods = {ctrl,alt,shift,win}</code>，<br />
-老式三形参脚本也兼容）。新式统一入口是 <code>run(ctx, params)</code>，<br />
-<code>ctx = { role, sounds={文件名,…}, key, mods, repeated, dt }</code>。</p>
+<strong>唯一入口是 <code>run(ctx, params)</code></strong>（键音宿主只执行 <code>run</code>，<br />
+不派发 <code>on_key</code>；<code>on_key</code> 是复合脚本专属回调，见第二部分 §8），<br />
+<code>ctx = { role, sounds={文件名,…}, key, mods, repeated, dt }</code>，<br />
+键名与击键回显同源、<code>mods = {ctrl,alt,shift,win}</code>。</p>
 <p><strong>返回值语义</strong>（两个入口一致）：返回 <code>ctx.sounds</code> 里的文件名或索引 → 播放它；<br />
 返回 <code>false</code> → <strong>强制静音</strong>（连宿主默认音也不响）；返回 <code>nil</code> / <code>true</code> / 其它 → 落回默认音效。</p>
 <h3 id="3-3-脚本扩展-role-image">3.3 脚本扩展 <code>role="image"</code></h3>
@@ -455,8 +456,10 @@ end
 而不是"不透明红后面跟蓝"。<br />
 未识别的 <code>type</code> 按 <code>float</code> 处理。参数落盘：拖尾特效共用一张表（键 <code>{特效id}.{key}</code>），<br />
 其余 role 各自一张表（直接用 <code>key</code>）。<br />
-★ <code>default</code> 在<strong>交棒给脚本那一刻</strong>合并：声明过的键一定存在，用户显式填的 <code>false</code> /<br />
-<code>0</code> / 空串原样交；<code>int</code> 交的是整数。只有 <code>scripts/</code> 的独立脚本会把 <code>hotkey</code> 当成<br />
+★ <code>default</code> 只在 <strong>image 角色的 run 模型</strong>交棒那一刻合并<br />
+（<code>ext_runner::merged_params</code>）；击键音效与四个回调宿主吃裸配置，缺键要自己写<br />
+<code>params.x or 默认</code>。用户显式填的 <code>false</code> / <code>0</code> / 空串原样交；<code>int</code> 交的是整数。<br />
+只有 <code>scripts/</code> 的独立脚本会把 <code>hotkey</code> 当成<br />
 <strong>全局热键</strong>触发运行，特效 / 贴图脚本声明它只存一个键位串。</p>
 </blockquote>
 <h2 id="五-通用-ctx-成员-所有-run-类脚本">五、通用 <code>ctx</code> 成员（所有 <code>run</code> 类脚本）</h2>

@@ -503,8 +503,9 @@ pub fn build_global_page(
     // ── 帮助（随包文档的入口）──
     //
     // 用户口径（2026-09-29）：说明书要"设置里点一下就能看"，而不是让用户去安装目录翻；
-    // Lua 指南与 API 参考**合并为一份 HTML 手册**（`Lua脚本手册.html`，由仓库两份 .md
-    // 生成，见 `temp/build_lua_manual.py`），避免"两个入口一个内容"的困惑。
+    // Lua 指南与 API 参考**合并为一份 HTML 手册**（`Lua脚本手册.html`）；其第二部分三张
+    // 接口表由 `build/gen_manual_tables.py` 从 `assets/lua/API.md` 机械镜像，避免
+    // "两个入口一个内容"的困惑。
     // 三份文档全部随 assets 发布，按钮直接 `ShellExecuteW` 打开：html 走默认浏览器。
     let (title, body, exp) = FeatureCard::new("帮助", help_expanded)
         .body({

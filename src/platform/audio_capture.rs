@@ -628,7 +628,7 @@ unsafe fn init_and_capture(
         let _ = capture_client.ReleaseBuffer(num_frames);
 
         // 系统声音原样；麦克风过降噪处理器（RNNoise）。
-        // `channels` 从采集格式读，别写死 2（麦克风常是单声道）。
+        // 两路都固定为 48kHz × 2ch × 16bit（见上面的 `target`），降噪前后同 Format。
         let processed = match &mut processor {
             Some(p) => p.process(&samples, channels),
             None => samples,

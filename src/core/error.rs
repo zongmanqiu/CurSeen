@@ -1,4 +1,4 @@
-//! 错误类型：统一全 crate 的 Result<T>。
+//! 错误类型：统一全 crate 的 `Result<T>`。
 
 use std::fmt;
 

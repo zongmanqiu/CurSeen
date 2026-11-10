@@ -47,8 +47,9 @@ pub const BUTTON_KEYS: [&str; 5] = ["left", "right", "middle", "x1", "x2"];
 #[serde(default)]
 pub struct ButtonRippleCfg {
     // ── 以下四个是 1.0 时代的内置样式字段，**现在只读不写** ──
-    /// 旧内置样式 id。已改写成 `assets/ClickFx/` 里的同名脚本（ring / thin / disc /
-    /// double），故 `from_config` 会把空 `script` 的旧配置按它迁移过去；此后不再更新。
+    /// 旧内置样式 id。迁移时统一映射到 `assets/lua/ClickFx/disc.lua`（见
+    /// `seeded_ripple_bindings`），故 `from_config` 会把空 `script` 的旧配置按它播种；
+    /// 此后不再更新。
     /// 仅当脚本文件缺失、退回 Rust `Ripple` 兜底时才会被读。
     pub style: String,
     /// 旧波纹尺寸（**直径**，10..500）。迁移时按 `max_size = size / 2` 播种给脚本。
@@ -534,7 +535,7 @@ pub struct RecordSettings {
     /// 见 `audio_capture::DenoiseStrength`）—— 同一份模型，只改降噪后信号混入多少。
     /// ★ 2026-09-26 晚：出厂改**中**（历史值 `off`），见 [`default_mic_denoise`]。
     ///
-    /// ★ 遗留取值 `gate` / `spectral` / `rnnoise` 由 [`Self::migrate_denoise`] 规整为
+    /// ★ 遗留取值 `gate` / `spectral` / `rnnoise` 由 `Self::migrate_denoise` 规整为
     /// `medium` —— 不再有独立的「噪声门」档，RNNoise 已覆盖其场景。
     #[serde(default = "default_mic_denoise")]
     pub mic_denoise: String,
@@ -889,7 +890,7 @@ pub struct UiSettings {
     pub panel_page: usize,
     /// ★ 面板最后所在的导航页**id**（`ui::nav::NAV_IDS`，如 `"screen"`）。稳定键：
     /// 页加减、页序调整都不影响它的含义。`None` = 8 页时代的老配置（或手改缺失），
-    /// 此时按 [`ui::nav::legacy_page_index`] 把 [`UiSettings::panel_page`] 翻成新下标。
+    /// 此时按 `ui::nav::legacy_page_index` 把 [`UiSettings::panel_page`] 翻成新下标。
     #[serde(default)]
     pub panel_page_id: Option<String>,
     /// ★ 面板窗口最后的位置（左上角，物理屏幕像素，含副屏负坐标）。`None` = 从未记录
@@ -2786,7 +2787,7 @@ impl Config {
     ///    改了配色的纯样式方案，改名后继续由 `BUILTIN` 内嵌兜底。
     /// 2. 只保留**当前所选方案**的一整套控件值：老配置若累积了多套（每个用过的方案都记了
     ///    一组），这里把非当前方案的键全部清掉 —— 配置只留"哪种方案 + 一整套该方案的配置"，
-    ///    不出现字段爆炸（见请求 2）。落盘端 [`PanelModel::apply_to`] 也只会写当前方案那一个键。
+    ///    不出现字段爆炸（见请求 2）。落盘端 `PanelModel::apply_to` 也只会写当前方案那一个键。
     pub fn migrate_vk_layout(&mut self) {
         // 2026-10-08：四套外来样式方案按「几何前缀_样式」规则改名（文件名即方案 id），
         // 旧配置里的旧方案名在这里迁到新名（新名文件都在 assets 里，迁移后直接可用）。
@@ -2954,7 +2955,7 @@ impl Config {
         self.screenshot.hotkey = fallback;
     }
 
-    /// ★ 全局热键的**裸键清洗**（2026-10-01）：加载后把不合 [`global_safe`] 的全局键位
+    /// ★ 全局热键的**裸键清洗**（2026-10-01）：加载后把不合 `global_safe` 的全局键位
     ///   清空停用并留 warn。捕获路径（面板）已经拦住新值，这里兜住**手改 config.json**
     ///   的存量——用户拿记事本把截图键写成 `A`，重启后那把键必须失效而不是"打字就截图"。
     ///

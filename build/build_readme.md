@@ -8,11 +8,11 @@
 
 | 步骤 | 脚本 | 干什么 | 失败会怎样 |
 |---|---|---|---|
-| ① | `1_check_env.bat` | **只读**体检：cargo / rustc host 是否 MSVC、python、git、`.3rdParty/` 两个 path 依赖在不在（缺了只报 WARNING，因为 ② 会补） | 工具链缺项 → 退出 1；`.3rdParty/` 缺失不算失败 |
+| ① | `1_check_env.bat` | **只读**体检：cargo / rustc host 是否 MSVC、python、git、`.3rdParty/` 唯一的 path 依赖 windui 在不在（缺了只报 WARNING，因为 ② 会补） | 工具链缺项 → 退出 1；`.3rdParty/` 缺失不算失败 |
 | ② | `2_download.bat` | 按 `deps.txt` 下载第三方源码到 `.3rdParty/`（tar.gz，解压后校验 marker 才算成功）；已有同版本目录则跳过 | 退出 1 |
 | ③ | `3_patch.bat` | 把 `main/patches/<库>-<版本>/` **单向**覆盖到 `.3rdParty/<库>-<版本>/` | 退出 1 |
 | ④ | `4_build.bat` | `cargo build --release`（在 `main/` 下跑，命中 `main/.cargo/config.toml`） | 退出 1 |
-| ⑤ | `5_test.bat` | **真门禁**：集成测试（`tests/` + `tests/probes/`）→ 单元测试（`--lib`），均单线程 | 退出 1，`full.bat` 就此停住，不会部署 |
+| ⑤ | `5_test.bat` | **真门禁**：集成测试（`tests/*.rs` 顶层）→ 单元测试（`--lib`），均单线程；`tests/probes/` 需 `probe.py` 临时登记 | 退出 1，`full.bat` 就此停住，不会部署 |
 | ⑥ | `6_deploy.bat` | `deploy.py` 拷 exe + MD5 对账，顺带调 `gen_licenses.py` 把许可同步进 `build/`，再验 `assets/` | 退出 1 |
 
 一键：`full.bat`（双击即可，按顺序 ①→⑥，任一步失败即停）。
@@ -93,7 +93,8 @@ build/
 │   ├── THIRD-PARTY-NOTICES.md  ← main/THIRD-PARTY-NOTICES.md（清单 / 补丁变更声明）
 │   ├── THIRD-PARTY-LICENSES.txt← 全部 crates.io 依赖的许可原文合并（脚本自动生成）
 │   ├── windui-LICENSE-MIT.txt
-│   └── windui-LICENSE-APACHE.txt
+│   ├── windui-LICENSE-APACHE.txt
+│   └── CC0-1.0.txt             ← 声音素材 Kenney UI Audio (CC0 1.0) 原文
 ├── assets/
 └── config.json
 ```
@@ -102,8 +103,8 @@ build/
   返回 1 → 本步失败。**不允许**静默产出一个没有许可声明的发布目录。
 - crates.io 依赖的许可原文由 `gen_third_party_licenses.py` 从 cargo registry 汇总成
   `licenses/THIRD-PARTY-LICENSES.txt` 单文件随包分发（MIT/Apache/BSD 都要求**全文**
-  跟着拷贝走，"在 cargo 缓存里"对拿到包的用户不成立）。只有两个本地 path 依赖
-  （windui）的原文是从 `.3rdParty/` 逐字拷贝的单独文件。
+  跟着拷贝走，"在 cargo 缓存里"对拿到包的用户不成立）。只有一个本地 path 依赖
+  （windui）的原文是从 `.3rdParty/` 逐字拷贝的单独文件（MIT / Apache 两份）。
 
 ## 五、环境变量开关
 

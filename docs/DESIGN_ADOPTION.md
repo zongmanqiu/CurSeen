@@ -1,6 +1,6 @@
 # 工程总纲采纳清单
 
-> 来源：项目根 `Rust 软件工程设计总纲.md`（桌面 GUI / Win10+Win11 / Rust）。
+> 来源：外部参考资料 `Rust 软件工程设计总纲.md`（**不入库**，仅裁决时对照；桌面 GUI / Win10+Win11 / Rust）。
 > 性质：那份文档是**通用建议集**，本文件是它对 CurSeen 的**裁决结果**——哪些采纳、哪些不采纳、
 > 采纳的落到哪个文件。半年后有人问"这条规矩哪来的"，答案在这里。
 >
@@ -20,7 +20,7 @@
 |---|---|---|---|---|---|
 | A1 | VERSIONINFO **七字段必填**（缺厂商信息 = 杀软重点关照对象） | §11.1 | 已有 CompanyName / FileDescription / FileVersion / InternalName / OriginalFilename / ProductName / ProductVersion，**缺 `LegalCopyright`** | `build.rs::version_rc_text()` | 属性页「版权」非空 |
 | A2 | 构建后**校验版本资源非空**（防止有人改坏 `build.rs` 或机器上没有 `rc.exe`，exe 悄悄变成"三无文件"） | §16 | 无任何校验；`rc.exe` 缺失时 `build.rs` 只打一条 warning 就继续 | `build/deploy.py` 报告新增 `VERINFO=ok/missing` | 有 `rc.exe` 的机器上 `VERINFO=ok`；把 `build/app.rc` 挪走重编 → `missing`（失败即停） |
-| A3 | 配置原子写 = **临时文件 → fsync → 原子替换 → 父目录 fsync**；目录 fsync 失败**降级告警，不得反噬整条保存路径** | §7.2 | 只有 `fs::write(tmp)` + `fs::rename(tmp, path)`，**两次 fsync 都没有** | `core/config.rs::save()` 加文件 fsync；`platform/win_util.rs::sync_parent_dir()` 做目录 fsync，经 core 的注入钩子调用（core 不得碰 Win32） | 单测：写盘后文件与父目录都 sync 过；目录 sync 失败时保存**仍成功** |
+| A3 | 配置原子写 = **临时文件 → fsync → 原子替换 → 父目录 fsync**；目录 fsync 失败**降级告警，不得反噬整条保存路径** | §7.2 | 只有 `fs::write(tmp)` + `fs::rename(tmp, path)`，**两次 fsync 都没有** | `core/config.rs::save()` 加文件 fsync；`platform/win_util.rs::sync_dir()` 做目录 fsync，经 core 的注入钩子调用（core 不得碰 Win32） | 单测：写盘后文件与父目录都 sync 过；目录 sync 失败时保存**仍成功** |
 | A4 | **错误要带路径 / 操作**：`From<io::Error>` 一路自动转换会把"从哪来"抹掉 | §9.2 | `CurSeenError::Io(std::io::Error)` + `From` 自动转换，配置读写出错时日志里只有 `io error: ...` | 新增 `CurSeenError::IoAt { path, op, source }`，配置读写两条路径改用它 | 单测：`Display` 串含路径与操作名 |
 | A5 | **日志头必须包含**版本 + git commit + OS + 显示器 + 完整性级别 + 启动参数 | §10 | 只有一行 `CurSeen vX 启动` | `platform/win_util.rs::log_env_banner()`（OS / 显示器 / 完整性 / DPI 都在这里取），`main.rs` 在 `init_logging()` 之后调用 | 启动日志前两行能看到版本 + git、系统版本与 build、显示器台数 / 虚拟屏 / 主屏缩放、是否提权、启动参数 |
 | A6 | unsafe 块必须写 `// SAFETY:`（**义务与证据**，不是复述操作） | §15 | 408 个 `unsafe {` 只有 20 处注释 | ① 全部**指针类** unsafe（`transmute` / `from_raw_*` / `slice::from_raw_*` / `get_unchecked` / `copy_nonoverlapping`）补齐；② `build/hygiene_scan.py` 新增第 6 查 | `python build/hygiene_scan.py` 第 6 查「违规 0 处」；故意删掉一处 SAFETY 注释 → 变红 |
@@ -34,8 +34,8 @@
 | # | 总纲条目 | 章节 | CurSeen 现状 / 约定 |
 |---|---|---|---|
 | B1 | **UI 线程只做收消息 / update / 渲染**；文件 I/O、网络、重计算全下放 | §6.1 | 已成立：HTTP 走具名 worker（`ai_chat` / `update/task`），日志走独立写线程。**新增任何阻塞调用必须先确认不在 UI 线程** |
-| B2 | 长任务可取消：具名 worker + `CancellationToken` + 关停四步 | §6.9 | 已成立（裸 `thread::spawn` 一律 `Builder` + `.name()`）。**新增长活照此办理** |
-| B3 | 进度回投**节流 50~100ms**，有界 channel，满了丢帧 | §6.4 | 已成立（帧预算纪律：park 态不出帧、新增常驻功能过帧门三查） |
+| B2 | 长任务可取消：具名 worker + `CancellationToken` + 关停四步 | §6.9 | **部分成立**：录制等长活用 `AtomicBool` + `BusyGuard` 防重入（`CancellationToken` 未引入，无真取消）；裸 `thread::spawn` 尚有未具名反例（logger / process / input-hook）。**新增长活照此办理** |
+| B3 | 进度回投**节流 50~100ms**，有界 channel，满了丢帧 | §6.4 | **部分成立**：更新下载按百分比变化才发消息（`update/task.rs`）；有界通道满丢帧在录制采样（`platform/recorder.rs`）而非进度回投；帧预算纪律另有落地 |
 | B4 | **日志只打一次**（每层都 `error!` 是反模式） | §9.8 | 约定：错误只传递，在事件入口与后台任务完成点记一次 |
 | B5 | 所有权签名：`&T` 进来就别在函数里 `.clone()` | §4.1 | 约定：要长期存储就收 `T` |
 | B6 | newtype **不实现 `Deref`**（那是把约束又打开） | §3.1 | 当前 0 处，**守住** |
@@ -43,7 +43,7 @@
 | B8 | 单文件 ~800 行上限 | §16 | **已知超标**（`core/config.rs`、`platform/win_util.rs` 等），记为债务；**新文件不得超** |
 | B9 | 每次看到 `Arc<Mutex<T>>` 过五问 | §6.8 | 当前 14 处，**只准降不准升**；新增必须写明为什么不能消息传递 |
 | B10 | 剪贴板 `OpenClipboard` 占用时间极短、监听用 `AddClipboardFormatListener` | §8.8 | 已成立（门禁：`hygiene_scan.py` 第 4 查 + `with_clipboard` / `lock_clip`） |
-| B11 | 跨 FFI 的 unwind 是 UB，回调边界拦 `catch_unwind` | §9.7 | 已成立（钩子 / 脚本宿主 11 处） |
+| B11 | 跨 FFI 的 unwind 是 UB，回调边界拦 `catch_unwind` | §9.7 | 已成立（脚本宿主 13 处：api_ext 10 / ext_runner 2 / overlay 1） |
 
 ---
 
@@ -69,7 +69,7 @@
 | # | 缺口 | 风险 | 为什么这次不做 |
 |---|---|---|---|
 | D1 | **未接管系统事件**：`WM_QUERYENDSESSION` / `WM_POWERBROADCAST` / `WM_DISPLAYCHANGE` / `WM_WTSSESSION_CHANGE` | 录屏中关机 → `moov` 来不及写 → 产物不可用；录屏中睡眠唤醒 → 采集设备失效 | 需要自建消息窗 + 泵 + 与 windui 主循环协作，属结构性改动，单独立项 |
-| D2 | 单文件行数超标 | `core/config.rs` 4600+ 行、`platform/win_util.rs` 1300+ 行，改动时定位困难 | 拆分要动几百个引用点，单独立项 |
+| D2 | 单文件行数超标 | `core/config.rs` 5100+ 行、`platform/win_util.rs` 1600+ 行，改动时定位困难 | 拆分要动几百个引用点，单独立项 |
 | D3 | 非指针类 unsafe 缺 `// SAFETY:` | 读代码的人无从判断前提 | 存量 300+ 处，逐步清零；**新增一律要写**（A6 门禁只卡指针类，是因为那才是 UB 高发区） |
 | D4 | 无"上次是否干净退出"的启动自检 | 崩在启动早期时无从分辨 | 需要落 `running.marker`，与便携化落盘规则一起评估 |
 

@@ -10,7 +10,16 @@
 //!
 //! 设计铁律（剪贴板工具实战 + 便签踩坑）：
 //! - 格式优先级 files(CF_HDROP) > image(PNG / CF_DIBV5 / CF_DIB) > text(CF_UNICODETEXT)；
-//! - 自写屏蔽用命名格式 `CurSeen.ClipboardSelf`（避免粘贴回环，比时间窗稳）；
+//! - ★ 图片写回 = CF_DIB（像素）+ CF_HDROP（原件文件引用）**双格式**（2026-11-10）：
+//!   从别的软件复制的图板上往往只有像素，只认文件的目标（桌面/上传框等）粘不动；
+//!   原件既已落盘 `images/<hash>.png`，写回时把文件一并放上——认位图/认文件的宿主
+//!   各取所需（`to_clipboard_with_files`）；
+//! - ★ 捕获即重写上板（2026-11-10 二轮口径）：不进面板的**直接粘贴**也要成立——
+//!   捕获到裸图后当场把板替换为"文件引用+像素(+PNG+原样文本/HTML)"，桌面/资源
+//!   管理器 Ctrl+V 得文件、聊天框照旧得图片。安全阀见 `maybe_rewrite_board`：
+//!   OLE 嵌入/文件列表来源绝不动、序列号漂移绝不动、写不进就保留原样；
+//! - 自写屏蔽用命名格式 `CurSeen.ClipboardSelf`（避免粘贴回环，比时间窗稳；名字
+//!   正本在 `screenshot::SELF_SHIELD_FORMAT`）；
 //! - 去重命中只更新时间戳并上浮，不新增；
 //! - 粘贴时序：写剪贴板 → 隐藏面板 → 150ms → `SendInput` Ctrl+V（残留 Shift 先补 KEYUP）；
 //! - 搜索 280ms 防抖、预览 400ms 触发（便签的 `TrackMouseEvent(TME_LEAVE)` 坑已规避）；
@@ -66,12 +75,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::core::paths::{from_app_relative, module_temp_dir, to_app_relative};
-use crate::platform::clipboard::{get_image, get_text};
-use crate::platform::screenshot::{save_png, to_clipboard, Shot};
+use crate::platform::clipboard::{get_image, get_text, get_text_raw};
+use crate::platform::screenshot::{
+    alloc_dib, alloc_hdrop, encode_png, save_png, to_clipboard_with_files, Shot,
+};
 
 // ── 常量 ───────────────────────────────────────────────────────────────
 const CF_HDROP_U: u32 = 15;
 const CF_TEXT_U: u32 = 13;
+/// `CF_DIB`（8）——捕获重写上板时放像素用（同款本地钉住，见 `screenshot.rs`）。
+const CF_DIB_U: u32 = 8;
 const WM_APP_CLIP_CMD: u32 = WM_APP + 1;
 
 const CMD_TOGGLE: usize = 1;
@@ -993,6 +1006,10 @@ fn capture_image_bg(
         if !super::clipboard::image_available() {
             return (None, 0); // 投递与执行之间剪贴板可能已变（判据与 `get_image` 同源）。
         }
+        // ★ 重写判据的起点：读图前的序列号。读图可能耗时（逐行拷贝 + 解码），期间
+        //   用户复制了新内容的话，绝不能拿旧图去盖新板（`maybe_rewrite_board` 写前
+        //   还会在开板状态下再验一次）。
+        let seq0 = GetClipboardSequenceNumber();
         let shot = match get_image() {
             Some(s) => s,
             None => {
@@ -1012,24 +1029,37 @@ fn capture_image_bg(
             compute_sig(Kind::Image, "", &[], shot.w, shot.h, Some(&thumb)) ^ full_hash(&None);
         if let Some((h0, cap)) = last {
             if *h0 == hash {
+                // 缓存命中：不重编码不重写盘。但**重写仍要做**——这次是来源程序又复制
+                // 了一次同一张图，板上重新变回"裸图"（没有文件引用），不补的话这一份
+                // 直接 Ctrl+V 到桌面又会"没有任何反应"。像素用刚从板上读回的 `shot`，
+                // PNG 字节从盘上原件读，都不再付一次编码。
+                if let Some(rel) = &cap.full {
+                    let file = from_app_relative(rel);
+                    if let Ok(bytes) = std::fs::read(&file) {
+                        maybe_rewrite_board(self_fmt, seq0, &shot, &bytes, &file);
+                    }
+                }
                 return (Some(cap.clone()), 0);
             }
         }
         let path = dir.join(format!("{hash:016x}.png"));
         let _ = save_png(&thumb, &path);
-        // ★ 全尺寸原件：只在**真的被降采样过**时才落。`thumbnail_of` 对窄于阈值的图原样
-        //   返回（见其首行 `shot.w <= max_w` 分支），此时 `thumb` 与 `shot` 是同一份像素，
-        //   再写一遍纯属浪费；反过来，一旦降采样发生，这是全项目唯一一次经手整张像素的
-        //   机会——错过就再也拿不回来。文件名沿用同一个哈希，同图反复捕获覆盖同一文件。
+        // ★ 全尺寸原件：**恒存**（2026-11-10 用户口径——图片条目本质上都是"文件"，
+        //   剪贴板文件夹里必须有一份可上传的备份）。原实现只在**真的被降采样过**时才落：
+        //   `thumbnail_of` 对窄于阈值的图原样返回（见其首行 `shot.w <= max_w` 分支），
+        //   当时这份文件只喂粘贴的像素，再写一遍"纯属浪费"；现在它还是"粘贴为文件"
+        //   （CF_HDROP）的引用目标，而 `thumbs/` 在语义上是显示用的降采样区，不适合当
+        //   引用对象——`images/` 从此是"每个图片条目都有一份原件"的统一契约。窄图的
+        //   这一份与缩略图同像素，代价只是一次小 PNG 编码；同图反复复制有 `last` 缓存
+        //   与 push 哈希去重兜着，不会反复付。文件名沿用同一个哈希，覆盖同一文件。
+        //   PNG 字节只编一次：落盘（备份）与上板（重写时的 PNG 格式）共用同一份。
+        let png_bytes = encode_png(&shot).ok();
         let full = full_dir
-            .filter(|_| thumb.w != shot.w)
             .and_then(|d| {
+                let bytes = png_bytes.as_ref()?;
                 let p = d.join(format!("{hash:016x}.png"));
-                save_png(&shot, &p).ok()?;
-                Some((
-                    to_app_relative(&p),
-                    std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
-                ))
+                std::fs::write(&p, bytes).ok()?;
+                Some((to_app_relative(&p), bytes.len() as u64))
             })
             .unwrap_or((String::new(), 0));
         let nbytes = full.1;
@@ -1041,6 +1071,13 @@ fn capture_image_bg(
             full: Some(full.0).filter(|s| !s.is_empty()),
         };
         *last = Some((hash, cap.clone()));
+        // ★ 捕获重写（2026-11-10 二轮口径）：不进面板的**直接粘贴**也要成立——捕获到
+        //   裸图后当场把板替换为"文件引用+像素(+PNG+原样文本/HTML)"，桌面/资源管理器
+        //   Ctrl+V 得文件、聊天框照旧得图片。备份没落成（编码/写盘失败）就没有文件
+        //   可引用，整单放弃——宁缺毋滥。
+        if let (Some(bytes), Some(rel)) = (png_bytes.as_deref(), cap.full.as_deref()) {
+            maybe_rewrite_board(self_fmt, seq0, &shot, bytes, &from_app_relative(rel));
+        }
         (Some(cap), nbytes)
     }
 }
@@ -1096,6 +1133,20 @@ fn full_hash(full: &Option<String>) -> u64 {
     let mut hasher = DefaultHasher::new();
     full.hash(&mut hasher);
     hasher.finish()
+}
+
+/// 图片条目写回时该引用的**文件**（app 相对路径）：优先全尺寸原件（`images/`）；
+/// 原件尚未普及前的老条目退到 `thumbs/`——≤720px 的图当年不做原件，那份缩略图
+/// 本就是全尺寸像素；两者皆无 → `None`（调用方退纯像素写回，行为同旧版）。
+///
+/// 纯函数（只挑字段，不碰盘、不看存在性）：存在性校验在粘贴那一刻做（与文件条目
+/// 同一道权威校验），这里保持可单测。
+fn image_entry_file_rel(entry: &ClipEntry) -> Option<String> {
+    entry
+        .full
+        .clone()
+        .or_else(|| entry.thumb.clone())
+        .filter(|s| !s.is_empty())
 }
 
 /// 纯函数：返回命中的条目索引（指向 `entries`，顺序为最新在前）。
@@ -1576,8 +1627,11 @@ impl ClipboardMgr {
         //   各自清点，也让"这两个目录里的东西都是我们自己写的"在磁盘上一眼可辨。
         let images_dir = dir.join("images");
         let _ = std::fs::create_dir_all(&images_dir);
-        let self_fmt =
-            unsafe { RegisterClipboardFormatW(PCWSTR(wide("CurSeen.ClipboardSelf").as_ptr())) };
+        let self_fmt = unsafe {
+            RegisterClipboardFormatW(PCWSTR(
+                wide(crate::platform::screenshot::SELF_SHIELD_FORMAT).as_ptr(),
+            ))
+        };
         // ★ opt-out 标记（2026-10-02 用户拍板）：密码管理器（KeePass/1Password 等）复制时
         //   会额外放一个"请勿记录我"的标记格式，Windows 自带剪贴板历史也尊重它。我们只认
         //   信号、不读内容——这与"扫内容猜密码"（已永久否决）是两回事。注册名大小写不敏感。
@@ -2467,13 +2521,23 @@ impl ClipboardMgr {
     /// 截的分辨率永久抹掉——粘贴是整个模块里唯一"把像素交出去"的动作，必须给原件。
     /// 缺失原件有两种情况，都不是错误：这条是旧历史（落盘原件之前就已入库），或当初写盘
     /// 失过手；此时退回缩略图，至少还能粘出一张图，不至于整个粘贴动作失败。
+    /// 内存缩略图也没加载（重启后还没滚到该行）时，直接从盘上解 `thumbs/<hash>.png`。
     fn paste_shot(&self, entry: &ClipEntry) -> Option<Shot> {
         if let Some(rel) = &entry.full {
             if let Some(s) = shot_from_png(&from_app_relative(rel)) {
                 return Some(s);
             }
         }
-        self.thumbs.get(&entry.id).cloned()
+        if let Some(s) = self.thumbs.get(&entry.id) {
+            return Some(s.clone());
+        }
+        // ★ 盘上兜底：重启后该行还没滚进过视野时，内存缩略图尚未懒加载——直接解
+        //   `thumbs/<hash>.png`。旧实现在这里返回 None，"粘贴"这个唯一交像素的动作
+        //   会因为没人看过列表而整个落空（点一下没反应，用户无从知道为什么）。
+        entry
+            .thumb
+            .as_ref()
+            .and_then(|rel| shot_from_png(&from_app_relative(rel)))
     }
 
     fn paste_selected(&mut self) {
@@ -2509,7 +2573,23 @@ impl ClipboardMgr {
             }
             Kind::Image => {
                 if let Some(shot) = self.paste_shot(&entry) {
-                    let _ = to_clipboard(&shot);
+                    // ★ 图片也当文件交出去（2026-11-10 用户口径）：从别的软件（RStudio/
+                    //   浏览器…）复制的图，板上原本只有像素，粘进只认文件的目标（桌面/
+                    //   资源管理器/网页上传框）就是"无法上传"。原件已按内容哈希落盘
+                    //   （`images/`，老条目退 `thumbs/`——窄图那份本就是全尺寸像素），
+                    //   写回时同时放 CF_HDROP 文件引用：认位图的宿主照旧拿 CF_DIB，
+                    //   认文件的宿主直接拿文件。引用前做存在性校验（与文件条目同一道
+                    //   权威校验），不在就退纯像素，绝不往板上放坏引用。写回自带
+                    //   自写屏蔽与 DropEffect=复制（见 `to_clipboard_with_files`）。
+                    let files: Vec<String> = image_entry_file_rel(&entry)
+                        .map(|rel| from_app_relative(&rel))
+                        .filter(|p| p.is_file())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .into_iter()
+                        .collect();
+                    if let Err(e) = to_clipboard_with_files(&shot, &files) {
+                        log::warn!("剪贴板: 粘贴写回图片失败：{e}");
+                    }
                 }
             }
             // ★ 超限大文本：条目里只有预览，粘贴时从 `texts/<hash>.txt` 读全文。
@@ -2745,13 +2825,17 @@ impl ClipboardMgr {
                         shot.bgra.len(),
                         (shot.w as usize) * (shot.h as usize) * 4
                     );
-                    if let Err(e) = crate::platform::screenshot::to_clipboard(&shot) {
+                    // ★ 与 paste_selected 同款双格式（写回自带自写屏蔽与拖放语义，见
+                    //   `to_clipboard_with_files`）："复制"按钮交出去的东西同样要能被
+                    //   桌面/上传框当文件用。
+                    let files: Vec<String> = image_entry_file_rel(&entry)
+                        .map(|rel| from_app_relative(&rel))
+                        .filter(|p| p.is_file())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .into_iter()
+                        .collect();
+                    if let Err(e) = to_clipboard_with_files(&shot, &files) {
                         log::warn!("剪贴板: recopy 写回图片失败：{e}");
-                    } else {
-                        // ★ 补一道"这是我们自己写回的"标记：不然监听端会把自己刚写的
-                        //   那张 DIB 又读回来、重算签名、再存一份 PNG —— 白跑一趟，
-                        //   而回读那段是全项目最吃 `unsafe` 指针的一处。
-                        unsafe { shield_after_write() };
                     }
                 }
             }
@@ -3672,24 +3756,15 @@ pub fn copy_text(s: &str) {
 }
 
 unsafe fn write_text(s: &str) {
-    let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
-    let hg = match GlobalAlloc(GHND, (utf16.len() * 2) as usize) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let p = GlobalLock(hg);
-    if p.is_null() {
-        let _ = GlobalFree(Some(hg));
+    let Some(hg) = alloc_utf16_block(s) else {
         return;
-    }
-    std::ptr::copy_nonoverlapping(utf16.as_ptr(), p as *mut u16, utf16.len());
-    GlobalUnlock(hg);
+    };
     // ★ 走进程级门禁（2026-10-13）：`EmptyClipboard()` 会把 `clip-thumb` 正在读的
     //   那块内存抽走 —— 它是 use-after-free，不是"读失败"。
     let opened = crate::platform::clipboard::with_clipboard(|| unsafe {
         let _ = EmptyClipboard();
         SetClipboardData(CF_TEXT_U, Some(HANDLE(hg.0)));
-        set_self_shield();
+        crate::platform::screenshot::set_self_shield_opened();
         Some(())
     })
     .is_some();
@@ -3699,42 +3774,21 @@ unsafe fn write_text(s: &str) {
 }
 
 unsafe fn write_files(files: &[String]) {
-    // 构造 DROPFILES：pFiles=20, fWide=TRUE，后接若干以 NUL 结尾的宽字符串 + 双 NUL。
-    let mut paths_w: usize = 0;
-    for f in files {
-        paths_w += (f.encode_utf16().count() + 1) * 2;
-    }
-    let total = 20 + paths_w + 2;
-    let hg = match GlobalAlloc(GHND, total) {
+    // DROPFILES 构造统一走 `screenshot::alloc_hdrop`（pFiles=20, fWide=TRUE）——与
+    // 图片条目"粘贴为文件"（`to_clipboard_with_files`）共用同一份字节布局，两边
+    // 不再各写一份、也不会漂移。
+    let hg = match crate::platform::screenshot::alloc_hdrop(files) {
         Ok(h) => h,
         Err(_) => return,
     };
-    let p = GlobalLock(hg);
-    if p.is_null() {
-        let _ = GlobalFree(Some(hg));
-        return;
-    }
-    let bytes = std::slice::from_raw_parts_mut(p as *mut u8, total);
-    // pFiles = 20
-    bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
-    // fWide = TRUE（offset 16）
-    bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
-    let mut off = 20usize;
-    for f in files {
-        for w in f.encode_utf16() {
-            bytes[off..off + 2].copy_from_slice(&w.to_le_bytes());
-            off += 2;
-        }
-        bytes[off..off + 2].copy_from_slice(&0u16.to_le_bytes());
-        off += 2;
-    }
-    bytes[off..off + 2].copy_from_slice(&0u16.to_le_bytes());
-    GlobalUnlock(hg);
-    // ★ 同上：走进程级门禁。
+    // ★ 走进程级门禁（2026-10-13）：`EmptyClipboard()` 会把 `clip-thumb` 正在读的
+    //   那块内存抽走 —— 它是 use-after-free，不是"读失败"。
     let opened = crate::platform::clipboard::with_clipboard(|| unsafe {
         let _ = EmptyClipboard();
         SetClipboardData(CF_HDROP_U, Some(HANDLE(hg.0)));
-        set_self_shield();
+        // 明示"复制"语义（防目标把粘贴解释成移动、把文件搬走）+ 自写屏蔽。
+        crate::platform::screenshot::set_preferred_drop_effect_copy();
+        crate::platform::screenshot::set_self_shield_opened();
         Some(())
     })
     .is_some();
@@ -3743,37 +3797,189 @@ unsafe fn write_files(files: &[String]) {
     }
 }
 
-/// 写一条命名格式（空 DWORD）标记"这是 CurSeen 自己写回的"，捕获端见之即跳过。
-unsafe fn set_self_shield() {
-    let fmt = RegisterClipboardFormatW(PCWSTR(wide("CurSeen.ClipboardSelf").as_ptr()));
-    if fmt == 0 {
-        return;
+/// 注册名 → 剪贴板格式号。与 `clipboard.rs::register_format` 同义（那边私有，这里
+/// 自持一份——注册在系统级幂等，同名必同号，两份不会分叉）。
+fn reg_fmt(name: &str) -> u32 {
+    let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(PCWSTR(w.as_ptr())) }
+}
+
+/// 板上是否"裸图"：除了图像格式与富格式（文本 / CF_HTML——重写时会**原样搬走**，
+/// 不算损失），没有任何我们搬不走的语义。
+///
+/// 拒绝名单（重写会毁掉它们，一律不动板）：
+/// - `CF_HDROP`：文件板（文件语义不是我们能"搬走重放"的）；
+/// - OLE 嵌入族（Embed Source / Link Source / Object Descriptor / Ole Private Data /
+///   Embedded Object / Link Source Descriptor）：Excel、Word、PowerPoint 复制时放的
+///   "可粘回原程序的对象"，重写即毁；
+/// - `FileName(W)`：与文件语义绑定的引用格式；
+/// - 自写屏蔽命中（self_fmt 在板上）= 这是我们自己刚写回的板，绝不再动（防回环）。
+unsafe fn clipboard_is_bare_image(self_fmt: u32) -> bool {
+    if self_fmt != 0 && IsClipboardFormatAvailable(self_fmt).is_ok() {
+        return false;
     }
-    let hg = match GlobalAlloc(GHND, 4) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
+    if IsClipboardFormatAvailable(CF_HDROP_U).is_ok() {
+        return false;
+    }
+    const VETO: [&str; 8] = [
+        "Embed Source",
+        "Link Source",
+        "Object Descriptor",
+        "Ole Private Data",
+        "Embedded Object",
+        "Link Source Descriptor",
+        "FileName",
+        "FileNameW",
+    ];
+    !VETO.iter().any(|n| {
+        let f = reg_fmt(n);
+        f != 0 && IsClipboardFormatAvailable(f).is_ok()
+    })
+}
+
+/// 分配一块装好 UTF-16（含终止符）的全局内存。
+unsafe fn alloc_utf16_block(s: &str) -> Option<HGLOBAL> {
+    let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    let hg = GlobalAlloc(GHND, (utf16.len() * 2) as usize).ok()?;
     let p = GlobalLock(hg);
     if p.is_null() {
         let _ = GlobalFree(Some(hg));
-        return;
+        return None;
     }
-    *(p as *mut u32) = 0;
+    // SAFETY: `p` 是 `GlobalLock` 刚成功的可写指针，块大小恰为源字节数；源是本地
+    // `Vec`、目的是全局堆块，不重叠；写完立刻 `GlobalUnlock`。
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), p.cast::<u16>(), utf16.len());
     GlobalUnlock(hg);
-    SetClipboardData(fmt, Some(HANDLE(hg.0)));
+    Some(hg)
 }
 
-/// 写回剪贴板**之后**再补一道自写标记（此刻剪贴板已关，这里自己开一次）。
+/// 分配一块按字节原样拷入的全局内存（PNG / CF_HTML 等二进制格式共用）。
+unsafe fn alloc_byte_block(bytes: &[u8]) -> Option<HGLOBAL> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let hg = GlobalAlloc(GHND, bytes.len()).ok()?;
+    let p = GlobalLock(hg);
+    if p.is_null() {
+        let _ = GlobalFree(Some(hg));
+        return None;
+    }
+    // SAFETY: 同 `alloc_utf16_block`——块大小恰为源长度，源为本地切片。
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p.cast::<u8>(), bytes.len());
+    GlobalUnlock(hg);
+    Some(hg)
+}
+
+/// 捕获成功后的**上板重写**（2026-11-10 二轮口径）：把板上那张裸图替换为
+/// **文件引用（CF_HDROP）+ 像素（CF_DIB）+ PNG**，板上原有的文本 / CF_HTML 原样
+/// 搬走。目的：不进面板、直接 Ctrl+V 的粘贴也成立——桌面 / 资源管理器贴出文件，
+/// 聊天框等认位图的宿主照旧拿像素。
 ///
-/// [`set_self_shield`] 只能在"剪贴板已打开且还没关"时用；而通用的
-/// `screenshot::to_clipboard` 自己会开关，调用方插不进去 —— 所以补这个后手。
-/// 目的：让监听端跳过"我们自己刚写回的内容"，不去做一次无谓的回读（回读要
-/// `GlobalLock` + 逐行拷贝 + PNG 重编码）。
-unsafe fn shield_after_write() {
-    let _ = crate::platform::clipboard::with_clipboard(|| {
-        set_self_shield();
-        Some(())
+/// 三道安全阀（缺一不动板）：
+/// ① [`clipboard_is_bare_image`]：OLE 嵌入 / 文件列表来源绝不碰；
+/// ② 序列号两验（这里一次 + 开板后一次）：读图或搬运期间用户复制了新内容就放弃，
+///    绝不拿旧图盖新板；
+/// ③ 写不进（板被占）就放弃，板上保留来源原样——重写是增强，不是必需。
+///
+/// 返回 true = 板已被替换。失败/放弃全部静默（这是后台增强路径，不值得打扰用户）。
+unsafe fn maybe_rewrite_board(
+    self_fmt: u32,
+    seq0: u32,
+    shot: &Shot,
+    png: &[u8],
+    file: &std::path::Path,
+) -> bool {
+    if !clipboard_is_bare_image(self_fmt) {
+        return false;
+    }
+    if GetClipboardSequenceNumber() != seq0 {
+        return false;
+    }
+    // 能无损搬走的富格式先取走（各自内部开板读；此刻板仍是 seq0 那份内容）。
+    let text = get_text_raw();
+    let html = super::clipboard_html::read().filter(|b| {
+        super::clipboard_html::plausible(b) && b.len() <= super::clipboard_html::MAX_HTML_BYTES
     });
+
+    // 五块内存备齐：HDROP / DIB 必需（备不齐整单放弃），PNG / 文本 / HTML 有则带上。
+    let Ok(hdrop) = alloc_hdrop(&[file.to_string_lossy().into_owned()]) else {
+        return false;
+    };
+    let Ok(dib) = alloc_dib(shot.w, shot.h, &shot.bgra, false) else {
+        let _ = GlobalFree(Some(hdrop));
+        return false;
+    };
+    let png_blk = alloc_byte_block(png);
+    let text_blk = text.as_ref().and_then(|s| alloc_utf16_block(s));
+    let html_blk = html.as_ref().and_then(|b| alloc_byte_block(b));
+
+    // 一次开板完成全部写入（读端 `get_text_raw` / `clipboard_html::read` 自己开关板，
+    // 与进程级门禁互斥——所以搬运必须发生在这次开板**之外**）。
+    let r = crate::platform::clipboard::with_clipboard(|| unsafe {
+        // 开板后最后再验一次序列号：搬运期间板变了就整单放弃（内存全数自收）。
+        if GetClipboardSequenceNumber() != seq0 {
+            return None;
+        }
+        let _ = EmptyClipboard();
+        let mut ok = false;
+        let png_fmt = crate::platform::clipboard::png_format();
+        if SetClipboardData(CF_HDROP_U, Some(HANDLE(hdrop.0))).is_ok() {
+            ok = true;
+        } else {
+            let _ = GlobalFree(Some(hdrop));
+        }
+        if let Some(h) = png_blk {
+            if png_fmt == 0 || SetClipboardData(png_fmt, Some(HANDLE(h.0))).is_err() {
+                let _ = GlobalFree(Some(h));
+            }
+        }
+        if SetClipboardData(CF_DIB_U, Some(HANDLE(dib.0))).is_err() {
+            let _ = GlobalFree(Some(dib));
+        }
+        if let Some(h) = text_blk {
+            if SetClipboardData(CF_TEXT_U, Some(HANDLE(h.0))).is_err() {
+                let _ = GlobalFree(Some(h));
+            }
+        }
+        if let Some(h) = html_blk {
+            let fmt = super::clipboard_html::html_format();
+            if fmt == 0 || SetClipboardData(fmt, Some(HANDLE(h.0))).is_err() {
+                let _ = GlobalFree(Some(h));
+            }
+        }
+        // 明示"复制"语义（防目标把粘贴解释成移动、把备份原件搬走）+ 自写屏蔽
+        // （监听端见之即跳过，不会把我们刚重写的板又录一遍）。
+        if ok {
+            crate::platform::screenshot::set_preferred_drop_effect_copy();
+        }
+        crate::platform::screenshot::set_self_shield_opened();
+        Some(ok)
+    });
+    match r {
+        Some(true) => {
+            log::info!(
+                "剪贴板: 已把图片以 文件+像素 双格式重写上板（桌面/资源管理器直接粘贴可得文件）：{}",
+                file.display()
+            );
+            true
+        }
+        Some(false) => false,
+        // 开板失败 / 序列号变了：闭包没跑或提前退出，没交出去的块自己回收。
+        None => unsafe {
+            let _ = GlobalFree(Some(hdrop));
+            let _ = GlobalFree(Some(dib));
+            if let Some(h) = png_blk {
+                let _ = GlobalFree(Some(h));
+            }
+            if let Some(h) = text_blk {
+                let _ = GlobalFree(Some(h));
+            }
+            if let Some(h) = html_blk {
+                let _ = GlobalFree(Some(h));
+            }
+            false
+        },
+    }
 }
 
 unsafe fn read_files_opened() -> Option<Vec<String>> {
@@ -5013,6 +5219,120 @@ mod tests {
             hash: sig,
             missing: false,
         }
+    }
+
+    /// 图片条目的文件引用解析：新条目优先 `images/` 原件，老条目（无原件）退
+    /// `thumbs/`（≤720px 时代那份本就是全尺寸像素），皆无则 None（纯像素写回）。
+    /// 见 `image_entry_file_rel` 与 2026-11-10"粘贴为文件"改造。
+    #[test]
+    fn 图片条目文件引用优先原件再退缩略图() {
+        let mut full = entry(Kind::Image, "", &[], 10, 10, 0);
+        full.full = Some("images/ab.png".into());
+        full.thumb = Some("thumbs/ab.png".into());
+        assert_eq!(
+            image_entry_file_rel(&full),
+            Some("images/ab.png".to_string())
+        );
+
+        let mut legacy = entry(Kind::Image, "", &[], 10, 10, 0);
+        legacy.thumb = Some("thumbs/ab.png".into());
+        assert_eq!(
+            image_entry_file_rel(&legacy),
+            Some("thumbs/ab.png".to_string())
+        );
+
+        let none = entry(Kind::Image, "", &[], 10, 10, 0);
+        assert_eq!(image_entry_file_rel(&none), None);
+    }
+
+    /// 裸图判定：文件板 / 自写屏蔽命中 → 拒绝；纯位图板 → 放行。
+    /// （文本/HTML 板不拒——重写会原样搬走它们，不算损失。）
+    #[test]
+    fn 裸图判定_文件板拒绝_纯图放行() {
+        unsafe {
+            // 文件板：绝不算裸图。
+            write_files(&["C:\\curseen_probe\\a.png".to_string()]);
+            assert!(!clipboard_is_bare_image(0));
+            // 纯位图板（截图工具/画图这类来源）：裸图，允许重写。
+            let shot = Shot {
+                w: 2,
+                h: 2,
+                bgra: vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
+            };
+            assert!(crate::platform::screenshot::to_clipboard(&shot).is_ok());
+            assert!(clipboard_is_bare_image(0));
+            // 自写屏蔽命中：绝不重写（防回环）。
+            let fmt = reg_fmt(crate::platform::screenshot::SELF_SHIELD_FORMAT);
+            assert!(fmt != 0);
+            crate::platform::clipboard::with_clipboard(|| {
+                crate::platform::screenshot::set_self_shield_opened();
+                Some(())
+            });
+            assert!(!clipboard_is_bare_image(fmt));
+        }
+    }
+
+    /// 端到端（真板）：板上放一张裸图 → `capture_image_bg` → 板应被重写为
+    /// 文件引用 + 像素 + PNG，且 HDROP 第一条路径指向 `images/` 原件。
+    /// 这就是"复制图片 → 桌面直接 Ctrl+V 贴出文件"的产品判据。
+    #[test]
+    fn 捕获裸图后板上出现文件引用() {
+        let tmp = std::env::temp_dir().join("curseen_clip_rewrite_e2e");
+        let thumbs = tmp.join("thumbs");
+        let images = tmp.join("images");
+        let _ = std::fs::create_dir_all(&thumbs);
+        let _ = std::fs::create_dir_all(&images);
+        let shot = Shot {
+            w: 8,
+            h: 8,
+            bgra: vec![0x40_u8; 8 * 8 * 4],
+        };
+        assert!(crate::platform::screenshot::to_clipboard(&shot).is_ok());
+        let mut last = None;
+        let (cap, _) = capture_image_bg(0, &thumbs, Some(&images), &mut last);
+        let cap = cap.expect("8x8 裸图应能捕获");
+        let full_rel = cap.full.clone().expect("恒存口径下原件应已落盘");
+        let full_abs = from_app_relative(&full_rel);
+        assert!(
+            full_abs.is_file(),
+            "备份原件应真实存在：{}",
+            full_abs.display()
+        );
+        unsafe {
+            let first = crate::platform::clipboard::with_clipboard(|| {
+                use windows::Win32::Foundation::HGLOBAL;
+                use windows::Win32::System::DataExchange::{
+                    GetClipboardData, IsClipboardFormatAvailable,
+                };
+                use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+                if IsClipboardFormatAvailable(CF_HDROP_U).is_err() {
+                    return None;
+                }
+                let h = GetClipboardData(CF_HDROP_U).ok()?;
+                let ptr = GlobalLock(HGLOBAL(h.0));
+                if ptr.is_null() {
+                    return None;
+                }
+                let size = GlobalSize(HGLOBAL(h.0)) as usize;
+                // SAFETY: ptr 是刚 GlobalLock 成功的指针，size 是系统报的长度；只读，
+                // 读完整块 GlobalUnlock（剪贴板持有所有权，不 GlobalFree）。
+                let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
+                let parsed = parse_dropfiles(bytes);
+                let _ = GlobalUnlock(HGLOBAL(h.0));
+                parsed.and_then(|v| v.first().cloned())
+            });
+            assert_eq!(
+                first.as_deref(),
+                Some(full_abs.to_string_lossy().as_ref()),
+                "板上文件引用应指向 images/ 原件"
+            );
+            let png_fmt = crate::platform::clipboard::png_format();
+            assert!(
+                png_fmt != 0 && IsClipboardFormatAvailable(png_fmt).is_ok(),
+                "PNG 格式应随重写上板"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// ★ 超限大文本预览截断必须按**字符边界**（多字节中文不能被拦腰切成半个字，

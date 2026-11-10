@@ -164,7 +164,7 @@ impl Backdrop {
 /// 避免两处各写一次 α 补全。还要继续用原帧的调用方用这一版；只转一次就用
 /// [`shot_to_bitmap_owned`]——它省掉一份 `w*h*4` 的分配与拷贝。
 ///
-/// ★ 读**文件**得到的图不许走这一档：见 [`shot_to_bitmap_with_alpha`]。
+/// ★ 读**文件**得到的图不许走这一档：见 `shot_to_bitmap_with_alpha`。
 pub fn shot_to_bitmap(shot: &Shot) -> Option<RgbaBitmap> {
     if shot.w <= 0 || shot.h <= 0 {
         return None;

@@ -1,6 +1,6 @@
 [package]
 name = "curseen-ui"
-version = "2.1.3"
+version = "2.1.4"
 edition = "2021"
 rust-version = "1.94"
 # ★ description 与 README 主标题 / 托盘 tooltip / 关于页副标题同一套口径（2026-10-08 定稿）。
@@ -94,6 +94,25 @@ path = "examples/mem_attrib.rs"
 name = "gen_icon"
 path = "examples/gen_icon.rs"
 required-features = ["icon-gen"]
+# 一次性诊断探针：显式登记只为清单可查（Cargo 本来也会自动发现它们）。
+[[example]]
+name = "ai_chat_probe"
+path = "examples/ai_chat_probe.rs"
+[[example]]
+name = "idle_cpu_probe"
+path = "examples/idle_cpu_probe.rs"
+[[example]]
+name = "lua_scan_cost"
+path = "examples/lua_scan_cost.rs"
+[[example]]
+name = "mem_probe"
+path = "examples/mem_probe.rs"
+[[example]]
+name = "repro_colon"
+path = "examples/repro_colon.rs"
+[[example]]
+name = "wic_decode_probe"
+path = "examples/wic_decode_probe.rs"
 
 # ── 真机探针（tests/probes/，需硬件或真实窗口，**不是门禁**） ──
 #
@@ -243,9 +262,8 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT_Graphics",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_System_WinRT_Direct3D11",
-    # 数位板低延迟直通（platform/input/stylus.rs）：RealTimeStylus（RTS）直接从
-    # 数位板驱动取包，绕开"指针→传统鼠标消息"翻译层的手势消歧缓冲（起笔 ~0.5s
-    # 延迟的根因）。
+    # 这两项原为数位板 RTS 直通（platform/input/stylus.rs）引入，该模块已删除；
+    # feature 暂留，清理前先确认没有其它 Win32 COM / Variant 调用依赖它们。
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     # 剪贴板（截图后直接可粘贴）：CF_DIB 是 Paint / 微信 / Word 都认的通用格式

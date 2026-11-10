@@ -17,6 +17,8 @@
 //! `EnumDisplayMonitors` 给出的就是**物理像素**，与 [`ScreenRect`] 同一坐标系，
 //! 可以直接传给 `BitBlt`，不需要再乘 DPI。
 
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
@@ -24,7 +26,9 @@ use windows::Win32::Graphics::Gdi::{
     CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, ROP_CODE,
     SRCCOPY,
 };
-use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{
+    EmptyClipboard, RegisterClipboardFormatW, SetClipboardData,
+};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 
 use crate::core::error::{CurSeenError, Result};
@@ -40,6 +44,24 @@ pub use crate::core::image::Shot;
 ///
 /// 定义在 `Win32_System_Ole` 下（值 8），为一个常量开一整个 feature 不值，本地钉住。
 const CF_DIB: u32 = 8;
+
+/// 剪贴板格式 `CF_HDROP`（值 15）：一组文件的引用（DROPFILES）。
+///
+/// 同 [`CF_DIB`] 的本地钉住惯例（为一个常量开一整个 feature 不值）。
+const CF_HDROP: u32 = 15;
+
+/// 自写屏蔽的注册格式名（全项目唯一正本）。
+///
+/// 写回方在同一次开板里把它一并放上，监听端（剪贴板历史）见之即跳过——
+/// "这是我们刚写回的，不要再回读重录"。`clipboard_html` / `clipboard_history`
+/// 的写回也都引用这里，名字只此一份，不会漂移。
+pub(crate) const SELF_SHIELD_FORMAT: &str = "CurSeen.ClipboardSelf";
+
+/// 资源管理器的期望拖放语义注册名（`CFSTR_PREFERREDDROPEFFECT`）。
+const PREFERRED_DROP_EFFECT: &str = "Preferred DropEffect";
+
+/// `DROPEFFECT_COPY`：明示"这是复制，不是剪切"。
+const DROPEFFECT_COPY: u32 = 1;
 
 /// `SRCCOPY | CAPTUREBLT`：windows crate 只导出 `SRCCOPY`，合成值自己算。
 const SRCCOPY_CAPTUREBLT: ROP_CODE = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
@@ -62,7 +84,7 @@ const SRCCOPY_CAPTUREBLT: ROP_CODE = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
 ///
 /// 真正可靠的自我排除是 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`（同一次
 /// 实测把两种 rop 都压到 **0.00%**），它按**窗口**生效，见 `platform::pip_window`。
-/// 实测数据与探针在 `tests/pip_probe.rs`。
+/// 实测数据与探针在 `tests/probes/pip_probe.rs`。
 pub fn grab(rect: ScreenRect) -> Result<Shot> {
     grab_with(rect, SRCCOPY_CAPTUREBLT)
 }
@@ -379,16 +401,201 @@ pub fn to_clipboard_rgba(bmp: &RgbaBitmap) -> Result<()> {
     put_dib(w, h, &bmp.rgba, true)
 }
 
-/// `src`（自上而下、4 字节/像素）→ CF_DIB 全局内存 → 剪贴板。
+/// 构造一块 CF_HDROP 全局内存（DROPFILES 头 + 逐条宽字符路径 + 双 NUL 终止）。
+///
+/// 两条写回路——文件条目的写回（`clipboard_history::write_files`）与图片条目
+/// "粘贴为文件"（[`to_clipboard_with_files`]）——共用这一个构造，字节布局只此一份：
+/// `pFiles=20`、`fWide=TRUE`，两边不会各写一份、也不会漂移。失败路径内存自收，
+/// 纪律同 [`alloc_dib`]。
+pub(crate) fn alloc_hdrop(files: &[String]) -> Result<HGLOBAL> {
+    let mut paths_w: usize = 0;
+    for f in files {
+        paths_w += (f.encode_utf16().count() + 1) * 2;
+    }
+    let total = 20 + paths_w + 2;
+    let hg = unsafe {
+        let hg =
+            GlobalAlloc(GHND, total).map_err(|_| CurSeenError::Unsupported("GlobalAlloc 失败"))?;
+        if hg.is_invalid() {
+            return Err(CurSeenError::Unsupported("GlobalAlloc 失败"));
+        }
+        let ptr = GlobalLock(hg);
+        if ptr.is_null() {
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+            return Err(CurSeenError::Unsupported("GlobalLock 失败"));
+        }
+        let bytes = std::slice::from_raw_parts_mut(ptr.cast::<u8>(), total);
+        // pFiles = 20：DROPFILES 结构体自身的尺寸。
+        bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
+        // fWide = TRUE（offset 16）：路径是 UTF-16。
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let mut off = 20usize;
+        for f in files {
+            for w in f.encode_utf16() {
+                bytes[off..off + 2].copy_from_slice(&w.to_le_bytes());
+                off += 2;
+            }
+            bytes[off..off + 2].copy_from_slice(&0u16.to_le_bytes());
+            off += 2;
+        }
+        // 列表以双 NUL 结束（最后一条路径的终止符之外再补一个空串终止符）。
+        bytes[off..off + 2].copy_from_slice(&0u16.to_le_bytes());
+        let _ = GlobalUnlock(hg);
+        hg
+    };
+    Ok(hg)
+}
+
+/// 写一条命名格式（空 DWORD）标记"这是 CurSeen 自己写回的"。
+///
+/// ★ 调用前提：剪贴板**已打开**（在 `with_clipboard` 的闭包里调用，与
+/// [`to_clipboard_with_files`] / `clipboard_history` / `clipboard_html` 的写回同一
+/// 纪律）。注册名见 [`SELF_SHIELD_FORMAT`]（全项目唯一正本）。
+pub(crate) unsafe fn set_self_shield_opened() {
+    let w: Vec<u16> = SELF_SHIELD_FORMAT
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let fmt = RegisterClipboardFormatW(PCWSTR(w.as_ptr()));
+    if fmt == 0 {
+        return;
+    }
+    let hg = match GlobalAlloc(GHND, 4) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let p = GlobalLock(hg);
+    if p.is_null() {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+        return;
+    }
+    // SAFETY: `p` 是 `GlobalLock` 刚成功返回的可写指针，块大小 4 字节正好容下一个
+    // u32；写完立刻 `GlobalUnlock`。
+    *(p.cast::<u32>()) = 0;
+    let _ = GlobalUnlock(hg);
+    let _ = SetClipboardData(fmt, Some(windows::Win32::Foundation::HANDLE(hg.0)));
+}
+
+/// 写 `Preferred DropEffect = DROPEFFECT_COPY`（期望拖放语义 = 复制）。
+///
+/// ★ 为什么必须明示：资源管理器对**没有** DropEffect 的 `CF_HDROP` 粘贴默认按复制
+/// 处理，但这是实现细节而不是承诺——万一哪个目标把它解释成"移动"，粘贴就会把
+/// 我们的备份原件**搬走**，历史条目的文件引用当场断掉。显式写 COPY 消除歧义，
+/// 这也是资源管理器自己复制文件时板上带的同款格式。
+///
+/// ★ 调用前提：剪贴板已打开（同 [`set_self_shield_opened`]）。
+pub(crate) unsafe fn set_preferred_drop_effect_copy() {
+    let w: Vec<u16> = PREFERRED_DROP_EFFECT
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let fmt = RegisterClipboardFormatW(PCWSTR(w.as_ptr()));
+    if fmt == 0 {
+        return;
+    }
+    let hg = match GlobalAlloc(GHND, 4) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let p = GlobalLock(hg);
+    if p.is_null() {
+        let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+        return;
+    }
+    // SAFETY: 同 `set_self_shield_opened`——4 字节块写一个 u32，写完即解锁。
+    *(p.cast::<u32>()) = DROPEFFECT_COPY;
+    let _ = GlobalUnlock(hg);
+    let _ = SetClipboardData(fmt, Some(windows::Win32::Foundation::HANDLE(hg.0)));
+}
+
+/// 把一帧放到剪贴板：**CF_DIB（像素）+ CF_HDROP（文件引用）双格式**。
+///
+/// # 为什么图片要带上文件（2026-11-10 用户口径）
+/// 在别的软件里复制的图片，板上常常只有像素、没有"文件"——粘进只认文件的目标
+/// （网页上传框、部分办公软件）就是"图片无法上传"。图片条目的原件既然按内容哈希
+/// 落盘在剪贴板文件夹（`temp/clipboard/images/<hash>.png`），写回时把这份文件一并
+/// 放上 CF_HDROP：认位图的宿主照旧拿 CF_DIB，认文件的宿主拿文件引用直接上传，
+/// 两不耽误。这也是资源管理器复制图片文件时板上同时有 CF_HDROP 与 CF_DIB 的
+/// 同款形态，各应用按自己的优先级取用，不需要调用方关心。
+///
+/// `files` 为空或 HDROP 构造失败 → 不放文件引用，行为退化为纯像素写回；
+/// 任一 `SetClipboardData` 失败只回收那块内存、另一个格式照放（半格式也比全空强）。
+///
+/// 写回在**同一次开板**里附带两样东西：`Preferred DropEffect = COPY`（有文件时，
+/// 防目标把粘贴解释成移动、搬走我们的备份原件）与自写屏蔽（监听端见之即跳过，
+/// 不会把我们刚写的板又回读重录一遍）——调用方不需要也不应该再补屏蔽。
+pub fn to_clipboard_with_files(shot: &Shot, files: &[String]) -> Result<()> {
+    let hg_dib = alloc_dib(shot.w, shot.h, &shot.bgra, false)?;
+    let hg_files = if files.is_empty() {
+        None
+    } else {
+        alloc_hdrop(files).ok()
+    };
+    unsafe {
+        // ★ 进程级门禁：与 [`put_dib`] 同一条纪律（2026-10-13，`EmptyClipboard` 会把
+        //   `clip-thumb` 正在读的那块内存抽走）。
+        let r = crate::platform::clipboard::with_clipboard(|| {
+            let _ = EmptyClipboard();
+            let mut any = false;
+            if let Some(h) = hg_files {
+                if SetClipboardData(CF_HDROP, Some(windows::Win32::Foundation::HANDLE(h.0)))
+                    .is_err()
+                {
+                    // 失败的那块自己回收；另一块照放（半格式也比全空强）。
+                    let _ = windows::Win32::Foundation::GlobalFree(Some(h));
+                } else {
+                    any = true;
+                }
+            }
+            if SetClipboardData(CF_DIB, Some(windows::Win32::Foundation::HANDLE(hg_dib.0))).is_err()
+            {
+                let _ = windows::Win32::Foundation::GlobalFree(Some(hg_dib));
+            } else {
+                any = true;
+            }
+            // 有文件引用才带拖放语义（纯像素板上的 DropEffect 无意义）。
+            if any {
+                set_preferred_drop_effect_copy();
+            }
+            set_self_shield_opened();
+            if any {
+                Some(None)
+            } else {
+                Some(Some("SetClipboardData 失败"))
+            }
+        });
+        match r {
+            Some(None) => {}
+            Some(Some(msg)) => return Err(CurSeenError::Unsupported(msg)),
+            None => {
+                // OpenClipboard 失败：两块内存都还归我们（上面的闭包没跑过），各自回收。
+                if let Some(h) = hg_files {
+                    let _ = windows::Win32::Foundation::GlobalFree(Some(h));
+                }
+                let _ = windows::Win32::Foundation::GlobalFree(Some(hg_dib));
+                return Err(CurSeenError::Unsupported("OpenClipboard 失败"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `src`（自上而下、4 字节/像素）→ 校验尺寸 → 装好 CF_DIB 的全局内存。
 ///
 /// `swap_rb` 为真时逐像素 RGBA→BGRA（`RgbaBitmap`）；为假时整行 `memcpy`
 /// （`Shot` 本来就是这个通道序）。两条路都只过一趟整帧。
-fn put_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<()> {
-    // ★★ 不变量先钉死，再碰 `unsafe`。`Shot` / `RgbaBitmap` 都是**公开且外部可构造**
-    //    的结构（PNG 解码、缩略图缩放、剪贴板回读都会造一个），一旦像素缓冲比 `w*h*4`
-    //    短，下面那段逐行拷贝就会读越界——在 `unsafe` 里越界就是 0xC0000005，且发布版
-    //    无符号、现场只留一句"程序没了"（2026-09-29 剪贴板"复制置顶"一按即崩）。
-    //    宁可这一笔不写。
+///
+/// ★★ 不变量先钉死，再碰 `unsafe`。`Shot` / `RgbaBitmap` 都是**公开且外部可构造**
+///    的结构（PNG 解码、缩略图缩放、剪贴板回读都会造一个），一旦像素缓冲比 `w*h*4`
+///    短，下面那段逐行拷贝就会读越界——在 `unsafe` 里越界就是 0xC0000005，且发布版
+///    无符号、现场只留一句"程序没了"（2026-09-29 剪贴板"复制置顶"一按即崩）。
+///    宁可这一笔不写。
+///
+/// 返回的句柄只有两条出路：交给剪贴板（`SetClipboardData` 成功即被接管，不许再
+/// `GlobalFree`），或由调用方 `GlobalFree`。失败路径上内存由本函数自收，调用方拿到的
+/// 一定是可用的句柄——这是 [`put_dib`] 与 [`to_clipboard_with_files`] 能各管各的
+/// 打开/回收而不漏不双免的前提。
+pub(crate) fn alloc_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<HGLOBAL> {
     if w <= 0 || h <= 0 {
         return Err(CurSeenError::Unsupported("DIB 尺寸非法"));
     }
@@ -403,7 +610,7 @@ fn put_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<()> {
     let Some(total) = header.checked_add(pixel_bytes) else {
         return Err(CurSeenError::Unsupported("DIB 尺寸非法"));
     };
-    unsafe {
+    let hg = unsafe {
         let hg =
             GlobalAlloc(GHND, total).map_err(|_| CurSeenError::Unsupported("GlobalAlloc 失败"))?;
         if hg.is_invalid() {
@@ -425,7 +632,15 @@ fn put_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<()> {
             return Err(CurSeenError::Unsupported("DIB 数据长度不符"));
         }
         let _ = GlobalUnlock(hg);
+        hg
+    };
+    Ok(hg)
+}
 
+/// [`alloc_dib`] 的产物 → 开剪贴板 → 清空 → 只放 CF_DIB。
+fn put_dib(w: i32, h: i32, src: &[u8], swap_rb: bool) -> Result<()> {
+    let hg = alloc_dib(w, h, src, swap_rb)?;
+    unsafe {
         // ★★★ 必须走进程级门禁（2026-10-13 根因修复）：`EmptyClipboard()` 会释放
         //   剪贴板上现有的数据块，而 `clip-thumb` 线程同一时刻可能正拿着那块的指针
         //   逐行 memcpy —— Windows 对**同进程内**的并发 `OpenClipboard` 不提供互斥
@@ -876,5 +1091,124 @@ mod tests {
             "sizes(rgba): default={rgba_slow_len} B fast={rgba_fast_len} B ({:.2}x)",
             rgba_fast_len as f64 / rgba_slow_len as f64
         );
+    }
+
+    /// HDROP 字节布局钉死：pFiles=20、fWide=TRUE、路径 UTF-16 逐条 NUL 结尾、整块
+    /// 双 NUL 结束。这份字节是**对外契约**——错一个字节，目标程序读出的就是乱码
+    /// 路径或整条拒绝。
+    #[test]
+    fn hdrop_layout_is_dropfiles_wide() {
+        let files = vec!["C:\\a b\\图.png".to_string(), "D:\\x.txt".to_string()];
+        let hg = alloc_hdrop(&files).expect("HDROP 应构造成功");
+        unsafe {
+            let ptr = GlobalLock(hg);
+            assert!(!ptr.is_null());
+            let size = windows::Win32::System::Memory::GlobalSize(HGLOBAL(hg.0)) as usize;
+            // SAFETY: ptr 是刚 GlobalLock 成功的指针，size 是系统报的这块内存长度；
+            // 只读，读完 GlobalUnlock。
+            let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
+            assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 20);
+            assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1);
+            let mut off = 20usize;
+            for f in &files {
+                for u in f.encode_utf16().chain(std::iter::once(0)) {
+                    assert_eq!(
+                        u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()),
+                        u
+                    );
+                    off += 2;
+                }
+            }
+            // 尾部"双 NUL"（宽字符下 = 最后一条路径的终止符 + 列表结束符，共 4 个零
+            // 字节），且整块刚好用完（不多不少）。
+            assert_eq!(&bytes[off - 2..off + 2], &[0, 0, 0, 0]);
+            assert_eq!(off + 2, size);
+            let _ = GlobalUnlock(hg);
+            let _ = windows::Win32::Foundation::GlobalFree(Some(hg));
+        }
+    }
+
+    /// 双格式写回回读：CF_HDROP 里第一条路径 = 传入路径，且 CF_DIB 同时在板上。
+    ///
+    /// ★ 真实剪贴板操作（先例：`clipboard.rs` 的门禁测试也要开真板）：gate 单线程跑，
+    /// 写进去的内容紧跟着被本测试读走验证。
+    #[test]
+    fn clipboard_with_files_roundtrip() {
+        let shot = Shot {
+            w: 2,
+            h: 1,
+            bgra: vec![1, 2, 3, 255, 4, 5, 6, 255],
+        };
+        let path = std::env::temp_dir().join("curseen_clip_with_files_roundtrip.png");
+        std::fs::write(&path, b"standin bytes").unwrap();
+        let files = vec![path.to_string_lossy().into_owned()];
+        to_clipboard_with_files(&shot, &files).expect("双格式写回应成功");
+        let first = crate::platform::clipboard::with_clipboard(|| unsafe {
+            use windows::Win32::System::DataExchange::{
+                GetClipboardData, IsClipboardFormatAvailable,
+            };
+            use windows::Win32::System::Memory::GlobalSize;
+            if IsClipboardFormatAvailable(CF_HDROP).is_err()
+                || IsClipboardFormatAvailable(CF_DIB).is_err()
+            {
+                return None;
+            }
+            let h = GetClipboardData(CF_HDROP).ok()?;
+            let ptr = GlobalLock(HGLOBAL(h.0));
+            if ptr.is_null() {
+                return None;
+            }
+            let size = GlobalSize(HGLOBAL(h.0)) as usize;
+            // SAFETY: ptr 是刚 GlobalLock 成功的指针，size 是系统报的长度；只读，
+            // 读完整块 GlobalUnlock（剪贴板持有所有权，不 GlobalFree）。
+            let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
+            let mut off = 20usize;
+            let mut units = Vec::new();
+            loop {
+                let u = u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap());
+                off += 2;
+                if u == 0 {
+                    break;
+                }
+                units.push(u);
+            }
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Some(String::from_utf16_lossy(&units))
+        });
+        assert_eq!(
+            first.as_deref(),
+            Some(path.to_string_lossy().as_ref()),
+            "板上第一条文件路径应与写入的一致"
+        );
+        // 期望拖放语义 = 复制（防目标把粘贴解释成移动、搬走备份原件）。
+        let copy = crate::platform::clipboard::with_clipboard(|| unsafe {
+            use windows::Win32::System::DataExchange::{
+                GetClipboardData, IsClipboardFormatAvailable, RegisterClipboardFormatW,
+            };
+            use windows::Win32::System::Memory::GlobalSize;
+            let w: Vec<u16> = "Preferred DropEffect"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let fmt = RegisterClipboardFormatW(windows::core::PCWSTR(w.as_ptr()));
+            if fmt == 0 || IsClipboardFormatAvailable(fmt).is_err() {
+                return None;
+            }
+            let h = GetClipboardData(fmt).ok()?;
+            let ptr = GlobalLock(HGLOBAL(h.0));
+            if ptr.is_null() {
+                return None;
+            }
+            let size = GlobalSize(HGLOBAL(h.0)) as usize;
+            if size < 4 {
+                return None;
+            }
+            // SAFETY: ptr 是刚 GlobalLock 成功的指针；对齐读 4 字节后解锁。
+            let v = std::ptr::read_unaligned(ptr.cast::<u32>());
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Some(v)
+        });
+        assert_eq!(copy, Some(1), "DropEffect 应为 DROPEFFECT_COPY");
+        let _ = std::fs::remove_file(&path);
     }
 }

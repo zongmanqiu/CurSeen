@@ -19,9 +19,9 @@ use super::engine::ScriptingEngine;
 /// 音效下拉 / 目录与文件浏览 / 文本框）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamType {
-    /// 浮点滑块（0..1 映射到 [min,max]）。
+    /// 浮点滑块（0..1 映射到 `[min,max]`）。
     Float,
-    /// 整数滑块（四舍五入后取 [min,max] 整数）。
+    /// 整数滑块（四舍五入后取 `[min,max]` 整数）。
     Int,
     /// 开关。
     Bool,

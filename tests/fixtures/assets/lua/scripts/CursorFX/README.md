@@ -6,11 +6,62 @@
 
 ## 内容
 
-共 42 个效果：
+共 42 个效果（名字与脚本下拉一致；同名的 `bubbles` / `stars` 在拖尾与点击各有一份，
+下拉里会带「拖尾 / 点击」后缀区分）：
 
-- 17 个光标模型（含 4 把枪、F1 赛车）
-- 9 个拖尾
-- 16 个点击效果
+### 光标（17）
+
+| 脚本 | 视觉 |
+|---|---|
+| blob | 柔和光斑跟随指针 |
+| clock | 指针旁的实时时钟 |
+| crosshair | 十字准星 |
+| emoji | 表情光标 |
+| f1car | F1 赛车跟随 |
+| ghost | 半透明幽灵 |
+| gun-pistol / gun-rifle / gun-shotgun / gun-sniper | 四种枪械光标 |
+| orb | 发光球 |
+| pixel | 像素块 |
+| ribbon | 飘带 |
+| ring | 圆环 |
+| rocket | 火箭 |
+| spotlight | 聚光 |
+| textflag | 文字旗 |
+
+### 拖尾（9）
+
+| 脚本 | 视觉 |
+|---|---|
+| bubbles | 气泡拖尾 |
+| emojirain | 表情雨 |
+| fire | 火焰拖尾 |
+| neon | 霓虹拖尾 |
+| petals | 花瓣拖尾 |
+| rainbow | 彩虹拖尾 |
+| snow | 雪花拖尾 |
+| sparkles | 火花拖尾 |
+| stars | 星星拖尾 |
+
+### 点击（16）
+
+| 脚本 | 视觉 |
+|---|---|
+| animals | 动物群 |
+| birds | 鸟群 |
+| bubbles | 气泡 |
+| butterflies | 蝴蝶 |
+| confetti | 彩纸 |
+| emojiburst | 表情爆散 |
+| fireworks | 烟花 |
+| gunshot | 枪击 |
+| hearts | 爱心 |
+| ink | 墨迹 |
+| notes | 音符 |
+| ripple | 波纹 |
+| shockwave | 冲击波 |
+| stars | 星星 |
+| textburst | 文字爆散 |
+| waves | 波浪 |
 
 ## 使用
 

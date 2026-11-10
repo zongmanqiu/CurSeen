@@ -15,7 +15,7 @@
   python build/gate.py                     # 全量（默认）
   python build/gate.py paths key_display   # 只跑这两组
   python build/gate.py --list              # 看有哪些组
-  python build/gate.py --check             # 只做类型检查（cargo check --release）
+  python build/gate.py --check             # 只做类型检查（cargo check --release --tests）
 """
 
 import os
@@ -73,7 +73,9 @@ def main():
         return 0
 
     if "--check" in args:
-        ok, _ = run(["cargo", "check", "--release"], "cargo check --release")
+        # ★ 必须带 --tests：不带只编 lib，#[cfg(test)] 代码里的类型错误要等跑测试才炸。
+        #   下面两条 `cargo test` 本来就编 cfg(test)，不需要再加。
+        ok, _ = run(["cargo", "check", "--release", "--tests"], "cargo check --release --tests")
         return 0 if ok else 1
 
     picked = [a for a in args if not a.startswith("--")]

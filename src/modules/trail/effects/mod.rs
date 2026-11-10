@@ -92,7 +92,7 @@ pub struct EffectEntry {
 /// 注册表。顺序即 UI 下拉顺序，不要动。当前为空：所有特效都来自 `assets/MouseTrail/` 的脚本。
 pub static EFFECT_REGISTRY: &[EffectEntry] = &[];
 
-/// 由 hue [0,1] 与 alpha [0,255] 生成 Argb 颜色（rainbow 模式）。
+/// 由 hue `[0,1]` 与 alpha `[0,255]` 生成 Argb 颜色（rainbow 模式）。
 pub fn hue_color(hue: f32, alpha: u8) -> crate::core::color::Argb {
     let h = (hue * 360.0).rem_euclid(360.0);
     let c = crate::core::color::Rgba::from_hsv(h, 1.0, 1.0, alpha);

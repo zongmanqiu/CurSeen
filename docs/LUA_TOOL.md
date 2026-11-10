@@ -168,8 +168,9 @@ AI 最容易浪费时间的两个问题不是"怎么写"，而是"**说明在哪
 
 ## 七、已知限制
 
-- **离屏 `params` 不合并 `schema()` 默认值**：`trace` / `shot` 只把显式 `--param` 交给脚本，
-  而真机宿主（`scripting/ext_runner.rs::merged_params`，m17）会合并。脚本里
+- **离屏 `params` 不合并 `schema()` 默认值**：`trace` / `shot` 只把显式 `--param` 交给脚本；
+  真机侧也只有 `image` 角色的 `run` 模型（`scripting/ext_runner.rs::merged_params`，m17）
+  会合并，击键音效与四个回调宿主仍吃裸配置（现行契约见 `assets/lua/API.md` §8）。脚本里
   `params.x or V` 的 V 必须与 schema 的 `default` 一致，否则离屏与真机两条路径行为不同
   （外部 AI 实测：改默认值三轮出图不变，传 `--param` 立刻变）。修它会整体改变出厂脚本的
   判据基线，属于需单独量化回归面的行为变更；当前口径写在随包《MCP说明.md》§5。

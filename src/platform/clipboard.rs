@@ -127,6 +127,36 @@ impl Drop for Unlocker {
     }
 }
 
+/// 读取剪贴板文本（CF_UNICODETEXT）——**原样**，不做任何修剪。
+///
+/// 与 [`get_text`] 的差别只在末尾：那个版本是“给人看”的（去尾部空白/首尾空白，
+/// 空串归 None）；本版本是“给板子看”的——捕获重写上板（把板上内容原样搬走再补
+/// 文件引用）用它，保证写回去的文本与来源逐字符一致，不引入我们自己的篡改。
+pub fn get_text_raw() -> Option<String> {
+    with_clipboard(|| unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
+            return None;
+        }
+        let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+        let ptr = GlobalLock(HGLOBAL(h.0));
+        if ptr.is_null() {
+            return None;
+        }
+        let _guard_mem = Unlocker(ptr.cast());
+        // 与 get_text 同一道闸：GlobalSize 不可信，用页表夹住再扫，扫出分配区之外
+        // 就是 0xC0000005（2026-10-11 崩溃排查防御项）。
+        let total = readable_bytes(ptr.cast(), GlobalSize(HGLOBAL(h.0)) as usize)?;
+        let max_chars = total / 2;
+        let mut len = 0_usize;
+        let u16_ptr = ptr.cast::<u16>();
+        while len < max_chars && *u16_ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(u16_ptr, len);
+        Some(String::from_utf16_lossy(slice))
+    })
+}
+
 /// 读取剪贴板文本（CF_UNICODETEXT）。
 pub fn get_text() -> Option<String> {
     with_clipboard(|| unsafe {
@@ -186,13 +216,16 @@ fn register_format(name: &str) -> u32 {
 }
 
 /// Chromium / Firefox 复制图片时写的 PNG 格式（注册名 `PNG`）。
-fn png_format() -> u32 {
+///
+/// ★ 捕获重写上板（`clipboard_history::rewrite_image_board`）也要用同一个格式号：
+/// 注册是系统级幂等的（同名回同号），这里作为进程内唯一注册点。
+pub(crate) fn png_format() -> u32 {
     static F: OnceLock<u32> = OnceLock::new();
     *F.get_or_init(|| register_format("PNG"))
 }
 
 /// 少数应用按 MIME 名注册（`image/png`）——一并认下，代价只是一个 u32。
-fn png_mime_format() -> u32 {
+pub(crate) fn png_mime_format() -> u32 {
     static F: OnceLock<u32> = OnceLock::new();
     *F.get_or_init(|| register_format("image/png"))
 }
@@ -216,7 +249,8 @@ fn png_mime_format() -> u32 {
 ///   ① [`readable_bytes`] 用页表把"声称的长度"夹成真值；② 逐行走 [`read_into`]
 ///   （`ReadProcessMemory` 读自己），读不动就返回 `None`，**永远不会崩**。
 ///   ⚠ 别再把它当成"剪贴板数据不可信"的证据去夹别的地方——无写者时 `GlobalSize`
-///   与页表完全一致（同一探针第 3 问），夹了只会平白丢内容。
+///   不会超额声称（同一探针第 3 问：声称 5,238,364 ⊂ 页表可读 5,238,720），
+///   夹了只会平白丢内容。
 pub fn get_image() -> Option<Shot> {
     with_clipboard(|| unsafe {
         if let Some(s) = read_png() {

@@ -17,10 +17,10 @@
 //! - [`installer`]：生成 `curseen_update.bat` 并启动——**替换动作发生在进程外**，
 //!   因为 Windows 不允许覆盖正在运行的可执行文件。
 //! - [`state`]：`UpdateState`，面板可见的更新状态（`Signal` 属于 windui，故进不了 `core`）。
-//! - [`task`]：线程编排（联网动作起后台线程，结果经 [`UiMsg::Update`] 回 UI 线程）。
+//! - [`task`]：线程编排（联网动作起后台线程，结果经 `UiMsg::Update` 回 UI 线程）。
 //!
 //! 注意 [`UpdateEvent`] **不在**本目录：它是"后台 → UI"的消息契约，与 `InputEvent`
-//! 同类，放在 [`crate::core::events`]；[`UiMsg`] 同理（对齐 Pecia 把 `PipeProtocol.h`
+//! 同类，放在 [`crate::core::events`]；`UiMsg` 同理（对齐 Pecia 把 `PipeProtocol.h`
 //! 放进 `core` 的做法）。这样本子系统只依赖 `core`，分层图无环。
 
 pub mod checker;
