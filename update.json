@@ -1,9 +1,9 @@
 {
-  "version": "2.1.4",
-  "published": "2026-11-10",
-  "notes": "### 新增\n\n- **剪贴板图片直接当文件用**：进入剪贴板历史的图片（截图 / RStudio / 浏览器复制来的图）自动备份为 PNG（`temp/clipboard/images/`），并把「文件 + 图片」两种格式当场放回剪贴板——桌面 / 资源管理器直接 Ctrl+V 贴出文件，聊天框照旧贴出图片，网页上传框可直接上传；Excel / Word 等带嵌入对象的复制不受影响。\n\n### 修复\n\n- **录制完成提示窗不再迟到**：停止录制后提示窗最迟 250ms 内弹出——原来后台收尾比\n  「正在保存…」浮字慢时，完成结论会一直等下一次鼠标 / 键盘输入才浮出来。\n- **录制时托盘图标恢复黑底红点**：白色底色是图标产物过期（矢量源改了没重跑生成器）；\n  重新生成后录制态与常规态同为黑底，圆点红色。",
+  "version": "2.1.5",
+  "published": "2026-11-11",
+  "notes": "### 修复\n\n- **「贴图」改为按剪贴板历史的顺序取内容**：素材取「剪贴板」模块的历史——图片按原件 1:1 贴出、文字栅格化成图片、文件条目不参与；连续按贴图键沿历史一条条往前翻。原先只认本次运行攒下的贴图环，重启后怎么按都是同一段文字。\n- **自己截的图贴图时落回截图时的位置**：用本程序截下来的图（同一次运行里连截多张，每一张都算）按截图时的位置与尺寸贴出；外部复制来的图仍在屏幕居中。\n- **截图与贴图不再各自盯剪贴板**：贴图读历史后不再每 250ms 轮询剪贴板，浏览器「图 + 一段文字」的复制不会再被认成纯文字。",
   "urls": {
-    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.4/CurSeen_2.1.4.zip",
-    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.4/CurSeen_2.1.4.zip"
+    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.5/CurSeen_2.1.5.zip",
+    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.5/CurSeen_2.1.5.zip"
   }
 }
