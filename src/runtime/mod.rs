@@ -223,6 +223,12 @@ pub struct Runtime {
     pub snap: snap::SnapMgr,
     /// 上次见过的剪贴板序列号（`GetClipboardSequenceNumber`）。0 = 还没对过账。
     clip_seq: u32,
+    /// ★ 上一次按贴图键时看到的剪贴板序列号。
+    ///
+    /// 用途只有一个：判"用户在两按之间又复制了东西"——是则把回溯游标归零，下次按键
+    /// 回到最新一条。用序列号而不是"历史首条的 id"：id 在"重复复制同一内容"时不变
+    /// （历史只是把它上浮），而"又复制了一次"恰恰应该重新从最新开始。
+    pin_walk_seq: Option<u32>,
     /// 上次**我们自己**写剪贴板的序列号（把截图放进剪贴板那一刻的值）。
     ///
     /// 用途只有一个但很关键：轮询 / 贴图快捷键读到这个序列号时，说明剪贴板里就是"我们刚截的
@@ -581,6 +587,7 @@ impl Runtime {
             drawing_was_active: false,
             panel_close_hint: false,
             clip_seq: 0,
+            pin_walk_seq: None,
             own_clip_seq: None,
             panel_dirty: false,
             panel_last_save_ms: 0,

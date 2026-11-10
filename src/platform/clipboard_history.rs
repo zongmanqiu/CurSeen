@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Once, OnceLock};
+use std::sync::{mpsc, Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -591,6 +591,72 @@ struct ClipEntry {
     ///   **不落盘**——U 盘插回来就翻假，持久化会把暂时状态钉死）。
     #[serde(skip)]
     missing: bool,
+}
+
+// ── 贴图素材（runtime 的「贴图」快捷键从这里取内容）─────────────────────
+//
+// ★ 为什么贴图改读这里（2026-11-11 用户报）：贴图原本只认自己那份**本次运行**的
+//   贴图环——环靠 250ms 轮询碰运气攒内容，重启即空，于是连续按贴图键只会在那一两条
+//   之间来回（用户原话："经过一个轮次以后就会重复贴图已经存在屏幕里的图"）。
+//   而剪贴板历史早就把图文按复制顺序存好了（还有盘上原件），顺序就是用户在面板里
+//   看到的顺序。所以贴图直接读它：图片解原件、文本栅格化、**文件条目跳过**
+//   （用户口径："文件可以不用"）。
+//
+// 为什么是一份镜像而不是让 runtime 直接读 `entries`：`entries` 归剪贴板线程独占，
+// 跨线程要么等消息（会卡 UI 线程），要么共享锁（面板线程每帧都在碰）。镜像是一份
+// 只读快照，在每次条目变动后由**面板线程**重建，读端只 clone 一份就走——一条锁、
+// 零等待。代价只有一次 Vec clone（几十条元数据 + 文本），而 `persist()` 每次复制都要
+// 把整份历史序列化写盘，这点开销在同一个量级里根本看不见。
+
+/// 一条贴图素材：只收"能钉在桌面上"的两种形态。
+#[derive(Clone)]
+pub enum PinSource {
+    /// 文本（含链接）。超限大文本给的是**面板所见的那份**（预览 + 一句说明）：
+    /// 全文在 `texts/` 里，可十几万字栅格化既没意义，也会撞 `text_raster` 的 16384px
+    /// 高度上限（那里会返回 `None`，用户看到的是"贴不出来"）。
+    Text(String),
+    /// 图片：全尺寸原件（`temp/clipboard/images/<hash>.png`）的 app 相对路径。
+    /// 没有原件时退回缩略图路径（窄图不降采样，那份本身就是全尺寸）。
+    Image(String),
+}
+
+/// 镜像里的一条（`id` 只供调用方判"剪贴板换过没有"，不作身份用）。
+#[derive(Clone)]
+pub struct PinItem {
+    pub id: u64,
+    pub source: PinSource,
+}
+
+/// 镜像深度：贴图回溯档最大 20（`core::config::PIN_CAP_VALUES`），留一点余量。
+/// 更旧的内容不会再被回头翻到，没必要每复制一条就跟着搬一次。
+const PIN_MIRROR_MAX: usize = 32;
+
+static PIN_MIRROR: OnceLock<Mutex<Vec<PinItem>>> = OnceLock::new();
+
+/// 重建贴图镜像（**只在剪贴板线程上调**，见 [`ClipboardMgr`] 里各变更点）。
+fn sync_pin_mirror(entries: &[ClipEntry]) {
+    let items: Vec<PinItem> = entries
+        .iter()
+        .filter_map(|e| {
+            let source = match e.kind {
+                Kind::Text | Kind::Link => PinSource::Text(e.text.clone()),
+                Kind::Image => PinSource::Image(e.full.clone().or_else(|| e.thumb.clone())?),
+                // 文件不进贴图（用户口径："文件可以不用"）——但它照旧留在历史面板里。
+                Kind::File => return None,
+            };
+            Some(PinItem { id: e.id, source })
+        })
+        .take(PIN_MIRROR_MAX)
+        .collect();
+    let m = PIN_MIRROR.get_or_init(|| Mutex::new(Vec::new()));
+    // 中毒也照收：这里存的是纯数据，恢复出来的值仍然自洽（本项目锁的统一口径）。
+    *m.lock().unwrap_or_else(|e| e.into_inner()) = items;
+}
+
+/// 贴图素材快照（新→旧，只含图片与文本）。剪贴板模块没起来 / 历史为空时为空表。
+pub fn pin_items() -> Vec<PinItem> {
+    let m = PIN_MIRROR.get_or_init(|| Mutex::new(Vec::new()));
+    m.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 // ── 公共入口（供 modules/clipboard 与 UI 调用）───────────────────────────
@@ -1821,6 +1887,9 @@ impl ClipboardMgr {
                 }
             }
         }
+        // 载入即同步贴图镜像：重启后按贴图键就能翻到上次运行留下的图文（这正是用户
+        // 报的"重启后只能重复同一段文字"的正面修复）。
+        sync_pin_mirror(&self.entries);
     }
 
     /// 原子重写 JSONL（临时文件 → rename）。
@@ -1977,6 +2046,7 @@ impl ClipboardMgr {
             let mut e = self.entries.remove(pos);
             e.ts = now_secs();
             self.entries.insert(0, e);
+            sync_pin_mirror(&self.entries);
             self.persist();
             self.refresh_panel();
             return;
@@ -2003,6 +2073,8 @@ impl ClipboardMgr {
             self.thumbs.insert(id, shot);
         }
         self.evict();
+        // ★ 淘汰也要反映进贴图镜像（`evict` 只动 `entries`），所以同步放在它之后。
+        sync_pin_mirror(&self.entries);
         self.persist();
         self.refresh_panel();
     }
@@ -2273,6 +2345,7 @@ impl ClipboardMgr {
         self.persist();
         self.selected = 0;
         self.scroll = 0;
+        sync_pin_mirror(&self.entries);
         self.refresh_panel();
     }
 
@@ -2467,6 +2540,7 @@ impl ClipboardMgr {
         }
         self.hover = None;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+        sync_pin_mirror(&self.entries);
         self.persist();
         self.refresh_panel();
     }
@@ -2854,6 +2928,8 @@ impl ClipboardMgr {
             let mut e = self.entries.remove(pos);
             e.ts = now_secs();
             self.entries.insert(0, e);
+            // 「重新复制」= 上浮到最新：贴图顺序与面板顺序必须一致，镜像跟着重排。
+            sync_pin_mirror(&self.entries);
             self.persist();
             self.refresh_panel();
         }
@@ -5219,6 +5295,51 @@ mod tests {
             hash: sig,
             missing: false,
         }
+    }
+
+    /// ★ 贴图镜像的三条语义（2026-11-11 把「贴图」的素材换成剪贴板历史）：
+    /// 文件不进、顺序跟历史（新→旧）、深度封顶 [`PIN_MIRROR_MAX`]。
+    ///
+    /// 这三条合起来就是"按剪贴板顺序贴图"的全部内容。镜像顺序一旦反过来或漏掉图片，
+    /// 贴图键会退化成用户报的那个样子：翻来覆去只贴同一条。
+    #[test]
+    fn pin_mirror_keeps_images_and_text_in_history_order_but_skips_files() {
+        let mut img = entry(Kind::Image, "", &[], 4, 4, 11);
+        img.id = 3;
+        img.full = Some("temp\\clipboard\\images\\aaa.png".into());
+        // 没有全尺寸原件（窄图不降采样）时必须退回缩略图路径，否则这张图贴不出来。
+        let mut thumb_only = entry(Kind::Image, "", &[], 2, 2, 14);
+        thumb_only.id = 4;
+        thumb_only.thumb = Some("temp\\clipboard\\thumbs\\bbb.png".into());
+        let mut file = entry(Kind::File, "", &["C:\\a.txt"], 0, 0, 12);
+        file.id = 2;
+        let mut txt = entry(Kind::Text, "你好", &[], 0, 0, 13);
+        txt.id = 1;
+
+        sync_pin_mirror(&[thumb_only, img, file, txt]);
+        let got = pin_items();
+        assert_eq!(got.len(), 3, "文件条目不进贴图素材");
+        assert_eq!(got[0].id, 4, "顺序必须跟历史（新→旧）");
+        assert_eq!(got[1].id, 3);
+        assert!(matches!(&got[0].source, PinSource::Image(p) if p.ends_with("bbb.png")));
+        assert!(matches!(&got[1].source, PinSource::Image(p) if p.ends_with("aaa.png")));
+        assert_eq!(got[2].id, 1);
+        assert!(matches!(&got[2].source, PinSource::Text(t) if t == "你好"));
+
+        // 深度封顶：比回溯档更深的老条目不再进镜像。
+        let many: Vec<ClipEntry> = (0..(PIN_MIRROR_MAX + 8) as u64)
+            .map(|i| {
+                let mut e = entry(Kind::Text, "x", &[], 0, 0, i);
+                e.id = i;
+                e
+            })
+            .collect();
+        sync_pin_mirror(&many);
+        assert_eq!(pin_items().len(), PIN_MIRROR_MAX);
+
+        // 清空历史必须同步清镜像，否则"清完还能贴出旧图"。
+        sync_pin_mirror(&[]);
+        assert!(pin_items().is_empty());
     }
 
     /// 图片条目的文件引用解析：新条目优先 `images/` 原件，老条目（无原件）退

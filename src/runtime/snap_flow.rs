@@ -10,21 +10,56 @@ use super::*;
 /// **文本也栅格化成图片**（用户要求："剪贴板文字转 jpg/png 图片"）：贴到桌面上的是图，
 /// 不再是那种"深色圆角框 + 白字"的伪文本窗——后者既不能存也不能复制。
 /// 文本读到了但栅格化失败（极小概率）就退回试图像。
+///
+/// ★ 只有**剪贴板模块关着**时才会走到这里（见 [`Runtime::pin_next`]）：模块开着时
+/// 贴图素材来自剪贴板历史，那边的分类优先级是 files > image > text，比这里"文本优先"
+/// 更贴近剪贴板真实内容（浏览器复制的图往往同时带一段文字）。
 pub(crate) fn read_clipboard_content(screen: ScreenRect) -> Option<snap::PinContent> {
-    let dpi = crate::platform::display::dpi_scale();
     if let Some(text) = crate::platform::clipboard::get_text() {
-        let max_w = ((text_raster::MAX_W_LOGICAL as f32) * dpi)
-            .min(screen.w as f32 * 0.9)
-            .max(160.0);
-        if let Some(shot) = text_raster::render_text(&text, max_w as i32, dpi) {
-            if let Some(b) = crate::core::backdrop::shot_to_bitmap_owned(shot) {
-                return Some(snap::PinContent::Image(Rc::new(b)));
-            }
+        if let Some(content) = text_pin_content(&text, screen) {
+            return Some(content);
         }
     }
     crate::platform::clipboard::get_image()
         .and_then(crate::core::backdrop::shot_to_bitmap_owned)
         .map(|b| snap::PinContent::Image(Rc::new(b)))
+}
+
+/// 一段文本 → 贴图素材（白底黑字的位图）。
+///
+/// 剪贴板内容与剪贴板历史两条来源共用：宽度上限一样、字号一样，用户拿到的是同一种
+/// 观感（"把这段文字当截图看"）。空串/全是空白 → `None`（调用方据此提示"没有可贴的"）。
+fn text_pin_content(text: &str, screen: ScreenRect) -> Option<snap::PinContent> {
+    let dpi = crate::platform::display::dpi_scale();
+    let max_w = ((text_raster::MAX_W_LOGICAL as f32) * dpi)
+        .min(screen.w as f32 * 0.9)
+        .max(160.0);
+    let shot = text_raster::render_text(text, max_w as i32, dpi)?;
+    let bmp = crate::core::backdrop::shot_to_bitmap_owned(shot)?;
+    Some(snap::PinContent::Image(Rc::new(bmp)))
+}
+
+/// 剪贴板历史里的一条素材 → 贴图内容。
+///
+/// 图片解**全尺寸原件**（`temp/clipboard/images/<hash>.png`，历史捕获时落的那份）：
+/// 缩略图只有 720 宽，钉在桌面上会糊。解不出来（文件被清、盘上被人删）返回 `None`，
+/// 调用方跳过这一条接着往下翻——比"按了没反应"好解释，也比贴一张空图诚实。
+fn history_pin_content(
+    item: &crate::platform::clipboard_history::PinItem,
+    screen: ScreenRect,
+) -> Option<snap::PinContent> {
+    use crate::platform::clipboard_history::PinSource;
+    match &item.source {
+        PinSource::Text(t) => text_pin_content(t, screen),
+        PinSource::Image(rel) => {
+            let shot =
+                crate::platform::screenshot::load_png(&crate::core::paths::from_app_relative(rel))?;
+            // ★ 文件来的图必须走 `_alpha`：`shot_to_bitmap` 那一档按抓屏语义把 α 一律
+            //   刷成 255，会毁掉带透明通道的图（见该函数的文档）。
+            let bmp = crate::core::backdrop::shot_to_bitmap_alpha(&shot)?;
+            Some(snap::PinContent::Image(Rc::new(bmp)))
+        }
+    }
 }
 
 /// 文件名友好的本地时间戳 `YYYY-MM-DD_HH-MM-SS`。
@@ -646,18 +681,93 @@ impl Runtime {
         log::info!("截图区域选择取消");
     }
 
-    /// 贴图快捷键：系统剪贴板有新内容 → 贴"倒数第一"；否则沿贴图环回溯。
+    /// 贴图快捷键：把剪贴板历史里的一条图文钉到桌面，**按历史顺序**（新→旧，翻到
+    /// 深度上限绕回最新）。
+    ///
+    /// ★★ 2026-11-11 换源（用户报）：素材原来只有"本次运行攒的贴图环"——环靠 250ms
+    /// 轮询碰运气收内容，进程一重启就空，于是连续按贴图键只会在那一两条之间来回
+    /// （用户原话："结果却只是重复贴图同一段文字"）。现在素材直接取**剪贴板历史**
+    /// （`platform::clipboard_history::pin_items`）：那里本来就按复制顺序存着全部图文，
+    /// 还有盘上原件可解。文件条目不在素材里（用户口径："文件可以不用"）。
+    ///
+    /// 剪贴板模块关着时退回老路（读当前剪贴板 + 环），于是"只开截图与贴图、不开剪贴板"
+    /// 的那种配置照旧能用。
+    ///
+    /// 序号 0 的特殊照顾见 [`Self::pin_from_history`]。
+    pub fn pin_next(&mut self) {
+        let cur = crate::platform::clipboard::sequence_number();
+        // 剪贴板变了 = 用户又复制了东西 → 回溯从最新重来（否则会从中间接着走）。
+        if self.pin_walk_seq != Some(cur) {
+            self.pin_walk_seq = Some(cur);
+            self.snap.hist_reset();
+        }
+        // 剪贴板模块开着 → 素材取历史。历史为空（还没复制过东西）时落到下面那条老路，
+        // 别让"刚复制就拿去贴"撞上"历史还没落账"的那几毫秒空窗。
+        if self.config.clipboard.enabled && self.pin_from_history() {
+            return;
+        }
+        self.pin_from_ring(cur);
+    }
+
+    /// 从剪贴板历史取一条贴出。返回 `true` = 已经贴出去了（或给了提示）。
+    ///
+    /// **原位复现**：取到的内容会先在贴图环里按像素认亲（[`snap::SnapMgr::ring_origin_of`]）
+    /// ——凡是用我们自己的截图功能截下来的图，环里都记着它当初在屏幕的哪一块，于是
+    /// "截图 → 按贴图键"落回原处，连截多张时每一张落回**它自己**的位置。认亲按像素做，
+    /// 因为历史模块会把剪贴板重写一遍，序列号判据（`own_clip_seq`）那之后就失效了。
+    /// 认不出来（外部复制的图 / 上次运行截的图）就居中。
+    fn pin_from_history(&mut self) -> bool {
+        let items = crate::platform::clipboard_history::pin_items();
+        if items.is_empty() {
+            return false;
+        }
+        let len = items.len();
+        let depth = self.config.screenshot.pin_ring_cap;
+        // 解不出来的条目（原件被删 / 文本空）顺延下一条，最多试 `depth` 次。
+        for _ in 0..depth.min(len) {
+            let Some(d) = self.snap.hist_step(len, depth) else {
+                break;
+            };
+            let Some(item) = items.get(d) else { break };
+            let Some(content) = history_pin_content(item, self.screen) else {
+                log::warn!("贴图：剪贴板历史第 {} 条取不出内容，跳过", d + 1);
+                continue;
+            };
+            let origin = self.snap.ring_origin_of(&content).flatten();
+            let req = self.snap.pin_show(content, origin);
+            match origin {
+                Some(r) => log::info!(
+                    "贴图请求（剪贴板历史第 {} 条，自有截图原位 {:.0},{:.0} {:.0}×{:.0}）：{}",
+                    d + 1,
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    req.content.describe()
+                ),
+                None => log::info!(
+                    "贴图请求（剪贴板历史第 {} 条）：{}",
+                    d + 1,
+                    req.content.describe()
+                ),
+            }
+            return true;
+        }
+        self.action_notify.show("剪贴板历史里没有可贴的图片或文字");
+        true
+    }
+
+    /// 老路：系统剪贴板有新内容 → 贴"倒数第一"；否则沿贴图环回溯。
     ///
     /// 剪贴板轮询已经把两次按键之间的复制收进了环，所以这里读到的剪贴板通常与环尾相同
     /// ——那正是"沿环回溯"该走的分支。
     ///
     /// ★ 例外：序列号等于 [`Self::own_clip_seq`] 时（剪贴板里是我们刚截的那张）不读剪贴板，
     /// 直接沿环回溯——那张已经在环里且带着原位。
-    pub fn pin_next(&mut self) {
+    fn pin_from_ring(&mut self, cur: u32) {
         // ★ 剪贴板里如果就是"我们自己刚截的那张"，**不要读**：它已经在环里且带着原位。
         //   把 `None` 交给状态机 = "剪贴板没有新东西"，于是沿环回溯到那张截图，原位还在
         //   （用户口径 2：纯截图后按贴图键必须落回截图那一块，而不是屏幕正中）。
-        let cur = crate::platform::clipboard::sequence_number();
         let clip = if self.own_clip_seq == Some(cur) {
             None
         } else {
@@ -803,11 +913,12 @@ impl Runtime {
     /// 只读一个 u32 序列号，比读一次图文内容便宜几个数量级，所以可以挂在既有的 250ms
     /// 对账上而不付任何代价。没变的序列号直接跳过。
     ///
-    /// ★ 一定开启（原「监听剪贴板」开关删除）。内存上界由**贴图数量上限**兜住：
-    /// 轮询收进来的内容进的是同一个贴图环，环按 `pin_ring_cap` 裁剪，所以"监听"再多也只
-    /// 常驻 N 张位图——这也正是用户说的"根据贴图数量上限，只需要监听一部分而已"。
+    /// ★ 只在**剪贴板模块关着**时才有意义（2026-11-11）：模块开着时贴图素材直接来自
+    /// 剪贴板历史（历史线程按 `WM_CLIPBOARDUPDATE` 逐条收，不漏不重），再由这里读一遍
+    /// 等于把同一张图解码两次，还会因"文本优先"把浏览器复制来的图认成一段文字
+    /// （用户报的"贴图只是一段文字"里就有这一层）。所以模块一开，这段整个跳过。
     ///
-    /// 两个贴图快捷键都停用时整个跳过：没有任何出口能用上这些内容，不必积累。
+    /// 两个贴图快捷键都停用时同样跳过：没有任何出口能用上这些内容，不必积累。
     pub(crate) fn poll_clipboard(&mut self) {
         // ★ 截图总开关关着就整段跳过（2026-10-24）：贴图/贴剪贴板快捷键的派发在
         //   `handle_action_key` 里同样受 `screenshot.enabled` 管（`input.rs`），关着时
@@ -819,6 +930,10 @@ impl Runtime {
         if self.config.screenshot.hotkey_pin_clipboard.is_empty()
             && self.config.screenshot.hotkey_pin.is_empty()
         {
+            return;
+        }
+        // ★ 贴图素材由剪贴板历史供给时，环不再需要"偷偷攒内容"（见函数头）。
+        if self.config.clipboard.enabled {
             return;
         }
         let n = crate::platform::clipboard::sequence_number();

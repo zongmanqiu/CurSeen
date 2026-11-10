@@ -12,7 +12,7 @@
 //!   → 取消（Esc / 单击 / 关窗）→ Runtime::cancel_snap()
 //!
 //! 快捷键（贴图）
-//!   → Runtime::pin_next()           剪贴板有新内容 = 倒数第一；否则沿环回溯
+//!   → Runtime::pin_next()           取剪贴板历史的下一条（新→旧，深度见 pin_ring_cap）
 //!   → overlay 通道回调开"贴图窗"（layer::pin：图片 1:1，带 2px 分层描边）
 //!
 //! 落位由**环条目自带的原位**决定（见 [`RingItem`]）：凡是通过本功能截下来的图（纯截图
@@ -23,14 +23,26 @@
 //! `Esc` 关掉它、`Ctrl+S` 把它另存为 PNG，选中态见 [`SnapMgr::selected_pin`]。
 //! ```
 //!
-//! # 贴图环（"最多支持 pin 最近的 10 个内容"）
+//! # 贴图素材从哪来（2026-11-11 换源）
 //!
-//! Windows 没有可编程的剪贴板历史读取 API（Win+V 是 shell 功能），因此用**本地环**
-//! 逼近"倒数第一、第二、第三"的语义：
+//! **剪贴板模块开着**（出厂默认的用法）：素材 = 剪贴板历史
+//! （`platform::clipboard_history::pin_items`）。历史按复制顺序存着全部图文，重启后
+//! 还在，所以"按一次换一条"真的成立 —— 那是用户要的语义："按照我们的剪贴板顺序贴出
+//! 来"。文件条目不在素材里（用户口径："文件可以不用"）。
+//!
+//! 状态机这边只保留**游标**（[`SnapMgr::hist_step`]）：第一条给最新、逐格往前翻、
+//! 到回溯深度绕回最新。内容由 `Runtime` 按游标取来喂（[`SnapMgr::pin_show`]），
+//! 本模块不碰平台。
+//!
+//! **剪贴板模块关着**时退回老路：[`SnapMgr::pin_next`] 读当前剪贴板 + 沿本地环回溯。
+//! 本地环（"最多支持 pin 最近的 10 个内容"）当年是为了逼近剪贴板历史而造的——
+//! Windows 没有可编程的历史读取 API；现在历史就在我们自己手里，环退居为"没开剪贴板
+//! 模块时的兜底"：
 //!
 //! - 每次贴出的内容入环（`Rc` 共享位图，不复制像素）；环容量 [`PIN_RING_CAP`]，超出淘汰最旧。
 //! - 剪贴板内容由 `clipboard::sequence_number()` 轮询补收（见 `Runtime::poll_clipboard`），
-//!   所以**两次按键之间复制的内容也会进环**——否则"最近 10 个"名不副实。
+//!   所以**两次按键之间复制的内容也会进环**。剪贴板模块开着时这条轮询整段跳过
+//!   （历史比轮询更全，也不必把同一张图解码两次）。
 //! - 游标是**距环尾的偏移**，不是绝对下标：淘汰头部不影响语义。
 //!
 //! 图像条目判同只比对尺寸 + 像素（`Rc::ptr_eq` 先短路，同一份位图不会走逐字节比较）。
@@ -41,7 +53,11 @@ use std::rc::Rc;
 use crate::core::geometry::{Rect, ScreenRect};
 use crate::core::image::RgbaBitmap;
 
-/// 贴图环容量（用户要求：最多 pin 最近的 10 个内容）。
+/// 贴图回溯深度（用户要求：最多 pin 最近的 10 个内容）。
+///
+/// ★ 2026-11-11 起它约束的是**剪贴板历史的回溯深度**（素材来源换了，见模块头）；
+/// 剪贴板模块关着时才退回约束本地环的容量。两种含义在用户侧是同一句话：
+/// "最多 pin 最近的 N 个内容"。
 pub const PIN_RING_CAP: usize = 10;
 
 /// 同时存活的贴图窗上限。一张 4K 贴图是 33 MB 常驻，不限量迟早吃满内存；
@@ -199,6 +215,12 @@ pub struct SnapMgr {
     cap: usize,
     /// 游标：**距环尾的偏移**（0 = 最新）。`None` = 下次按贴图键从最新的开始。
     cursor: Option<usize>,
+    /// ★ 贴图素材换成「剪贴板历史」之后的游标：**距最新的偏移**（0 = 最新一条）。
+    ///
+    /// 与上面的 `cursor` 是**两条链**，不共用：环只在"剪贴板模块关着"的老路上用
+    /// （见 `Runtime::pin_next`），历史那条路一条内容都不进环——所以两者的游标各记各的，
+    /// 谁也不会把对方的位置带歪。
+    hist_cursor: Option<usize>,
     /// 贴图窗序号（标题去重）。
     seq: u32,
     /// 存活中的贴图窗（新在尾）。用户手关的窗由 `note_pin_closed` 摘除——`post_close_by_title`
@@ -233,6 +255,7 @@ impl SnapMgr {
             ring: VecDeque::new(),
             cap: cap.max(1),
             cursor: None,
+            hist_cursor: None,
             seq: 0,
             open_pins: VecDeque::new(),
             selected: None,
@@ -441,6 +464,63 @@ impl SnapMgr {
         self.pin_req.take()
     }
 
+    // ── 贴图素材 = 剪贴板历史（2026-11-11）────────────────────────────────
+    //
+    // 上面的 `pin_next` 只认**本次运行**里攒下的环：重启即空，连续按只会在那一两条
+    // 之间来回（用户报的正是这个）。新路把素材交给剪贴板历史，调用方按"历史第 d 条"
+    // 把内容喂进来——状态机仍然只管游标与请求记账，依旧不懂平台。
+
+    /// 沿历史走一格，返回**距最新的偏移**（0 = 最新）。
+    ///
+    /// `len` = 可贴条目数，`depth` = 回溯深度上限（面板「最多支持 pin 最近的 N 个」）。
+    /// 走满 `depth` 条绕回最新——与老环"到头循环"同一个手感，用户不必学两套。
+    pub fn hist_step(&mut self, len: usize, depth: usize) -> Option<usize> {
+        let d = next_hist_index(self.hist_cursor, len, depth)?;
+        self.hist_cursor = Some(d);
+        Some(d)
+    }
+
+    /// 回溯游标归零：剪贴板变了（用户又复制了东西）→ 下次从最新一条开始。
+    pub fn hist_reset(&mut self) {
+        self.hist_cursor = None;
+    }
+
+    /// 贴一条内容；`origin` 决定落位（`Some` = 截图原位 1:1，`None` = 屏幕居中）。
+    ///
+    /// 不动环、也不动老游标：历史那条路上的内容本身没有"原位"，原位由
+    /// [`Self::ring_origin_of`] 从环里认领回来再传进来。
+    pub fn pin_show(&mut self, content: PinContent, origin: Option<Rect>) -> PinRequest {
+        let req = PinRequest {
+            content,
+            seq: self.next_seq(),
+            origin,
+        };
+        self.pin_req = Some(req.clone());
+        req
+    }
+
+    /// 这一份内容**是不是我们自己截的图**：是则返回它当初在屏幕上的矩形。
+    ///
+    /// 返回值是 `Option<Option<..>>`：外层 `None` = 环里没有这份内容（外部复制进来的，
+    /// 落位居中）；内层 `None` = 环里有、但它本来就是从外部剪贴板进来的（同样居中）。
+    /// 调用方照 `origin` 走即可，不必区分这两种"没有原位"。
+    ///
+    /// 为什么按**内容**认亲而不是按剪贴板序列号：截图写进剪贴板之后，剪贴板历史会立刻
+    /// 把板重写一遍（补文件引用 + PNG 格式，见 `clipboard_history` 的"捕获即重写上板"），
+    /// 序列号随之变化——`Runtime::own_clip_seq` 那一刻就失效了。像素不会骗人：
+    /// 尺寸 + 逐字节相同的，就是我们自己截的那张。
+    ///
+    /// ★ 搜**整个环**而不是只看环尾：一个会话里连截三张，三张都在环里，翻到哪一张都该
+    /// 落回**它自己**的位置（只看环尾的话，只有最后截的那张认得回来，前两张会跑到屏幕
+    /// 正中）。环容量上限 [`PIN_RING_CAP`]，最坏也就十次"尺寸比对 + 逐字节比较"。
+    pub fn ring_origin_of(&self, probe: &PinContent) -> Option<Option<Rect>> {
+        self.ring
+            .iter()
+            .rev()
+            .find(|it| it.content.same_content(probe))
+            .map(|it| it.origin)
+    }
+
     /// 登记一个刚打开的贴图窗；超出 [`PIN_WINDOW_CAP`] 时返回**该关掉**的那个序号。
     ///
     /// `content` 与窗口一起记账：选中后 `Ctrl+S` 另存为要拿的就是它（见 [`OpenPin`]）。
@@ -611,6 +691,23 @@ impl SnapMgr {
         self.cursor = Some(d);
         Some(len - 1 - d)
     }
+}
+
+/// 「贴图素材 = 剪贴板历史」时的下一格下标（**距最新的偏移**）。
+///
+/// 单独成函数是因为它装的就是全部手感：第一条给最新、之后逐格往前翻、翻到
+/// `depth` 绕回最新。`depth` = 面板「最多支持 pin 最近的 N 个」，大于 `len` 时按
+/// `len` 算（否则前 `len` 格走完就该绕回，不该在空气里空转）。
+fn next_hist_index(cursor: Option<usize>, len: usize, depth: usize) -> Option<usize> {
+    let depth = depth.min(len);
+    if depth == 0 {
+        return None;
+    }
+    Some(match cursor {
+        None => 0,
+        Some(d) if d + 1 >= depth => 0,
+        Some(d) => d + 1,
+    })
 }
 
 #[cfg(test)]
@@ -1129,6 +1226,97 @@ mod tests {
         let req = s.pin_next(None).expect("按贴图键应贴出刚才那张截图");
         assert_eq!(req.origin, Some(rect), "纯截图的原位必须被记住并带出来");
         assert_eq!(req.content.bitmap().rgba[0], 4);
+    }
+
+    /// ★★ 贴图素材换成剪贴板历史后的核心手感（2026-11-11）：**按历史顺序，从最新往下翻，
+    /// 翻到深度上限绕回最新**。
+    ///
+    /// 用户报的缺陷正是这条不成立时的样子：素材只有本次运行攒的一两条，于是"按一次
+    /// 换个内容"变成"怎么按都是同一段文字"。
+    #[test]
+    fn hist_walk_goes_newest_first_and_wraps_at_the_depth_limit() {
+        let mut s = SnapMgr::new();
+        // 历史里 5 条，深度上限 3 → 只在前 3 条之间循环。
+        let seq: Vec<usize> = (0..7).filter_map(|_| s.hist_step(5, 3)).collect();
+        assert_eq!(seq, vec![0, 1, 2, 0, 1, 2, 0], "0 = 最新，翻到上限绕回");
+
+        // 深度超过实际条数时按条数绕（不该在空气里空转）。
+        s.hist_reset();
+        let seq: Vec<usize> = (0..5).filter_map(|_| s.hist_step(2, 10)).collect();
+        assert_eq!(seq, vec![0, 1, 0, 1, 0]);
+
+        // 历史为空 → 没有下一格。
+        s.hist_reset();
+        assert_eq!(s.hist_step(0, 10), None);
+    }
+
+    /// 用户又复制了东西 → 下次按键必须回到最新（否则会从中间莫名其妙接着走）。
+    #[test]
+    fn hist_reset_makes_the_next_press_start_from_the_newest() {
+        let mut s = SnapMgr::new();
+        assert_eq!(s.hist_step(4, 4), Some(0));
+        assert_eq!(s.hist_step(4, 4), Some(1));
+        s.hist_reset();
+        assert_eq!(s.hist_step(4, 4), Some(0), "复制完新东西应贴最新那条");
+    }
+
+    /// 历史来源的内容**居中**贴出（没有原位），而且**不动环**——环只留给"我们自己
+    /// 截的那张"，被历史条目污染的话，截图后再按贴图键就会贴出别人的内容。
+    #[test]
+    fn pin_show_centers_the_content_and_leaves_the_ring_alone() {
+        let mut s = SnapMgr::new();
+        let r = s.pin_show(img_stub(3, 3, 42), None);
+        assert_eq!(r.origin, None, "历史来源没有原位 → 居中");
+        assert_eq!(s.ring_len(), 0, "历史素材不进环");
+        assert_eq!(s.take_pin_request().expect("应有开窗请求").seq, r.seq);
+        assert!(s.take_pin_request().is_none(), "边沿触发");
+    }
+
+    /// ★★ 自家截图的**原位认亲**：按像素在环里找同一张图，找回它自己的位置。
+    ///
+    /// 判据必须是像素：截图一进剪贴板，历史模块就把板重写一遍（补文件引用 + PNG），
+    /// 序列号随之变化，`own_clip_seq` 那之后就不可信了（实测就栽在这里）。
+    ///
+    /// ★ 一条容易漏的口径：**连截多张时每一张都要落回它自己的位置**——所以搜的是整个
+    /// 环，不是只看环尾（只看环尾 = 只有最后截的那张认得回来，前面几张跑到屏幕正中，
+    /// 那正是用户这次问的"能不能复现位置"）。
+    #[test]
+    fn every_own_screenshot_is_recognised_with_its_own_origin() {
+        let mut s = SnapMgr::new();
+        let first = Rect {
+            x: 100.0,
+            y: 200.0,
+            w: 30.0,
+            h: 40.0,
+        };
+        let second = Rect {
+            x: 500.0,
+            y: 600.0,
+            w: 30.0,
+            h: 40.0,
+        };
+        s.note_shot(img_stub(2, 2, 7), first);
+        s.note_shot(img_stub(2, 2, 9), second);
+        assert!(s.take_pin_request().is_none(), "纯截图只入环，不请求开窗");
+
+        // 历史里的那一份是另一份位图，像素逐字节相同（这正是"认亲"的入口）。
+        assert_eq!(
+            s.ring_origin_of(&img_stub(2, 2, 7)),
+            Some(Some(first)),
+            "先前截的那张也要能认出自己的位置"
+        );
+        assert_eq!(
+            s.ring_origin_of(&img_stub(2, 2, 9)),
+            Some(Some(second)),
+            "最新截的那张落回它自己的位置"
+        );
+        // 不同内容（哪怕尺寸一样）不许认亲——否则贴别人的图会落到上次截图的位置。
+        assert_eq!(s.ring_origin_of(&img_stub(2, 2, 8)), None);
+        // 环里那份本来就是从外部剪贴板进来的 → "没有原位"（居中），与"环里没有"要分得开。
+        s.note_external(img_stub(4, 4, 11));
+        assert_eq!(s.ring_origin_of(&img_stub(4, 4, 11)), Some(None));
+        // 环空 → 什么都不认。
+        assert_eq!(SnapMgr::new().ring_origin_of(&img_stub(2, 2, 7)), None);
     }
 
     /// 同一张截图重复记录（例如重新确认）只刷新原位，不在环里出现两次——

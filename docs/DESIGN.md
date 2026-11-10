@@ -592,7 +592,9 @@ PipWindow::present ──发布面板位图──▶ 共享槽 ──▶ Session
 8. **剪贴板历史大文本落盘**：文本 ≤ 100KB 时直接进内存条目；**超限**全文写到
    `temp/clipboard/texts/<内容哈希>.txt`，条目只留 400 字节预览（按字符边界截断），
    粘贴/复制时从盘上读全文（`clipboard_history.rs`，2026-09-29 用户口径："超出限制的
-   文本直接作为文件存入"）。缩略图 ≤ `THUMB_MAX_W = 720`；贴图环有 `pin_ring_cap` 上限。
+   文本直接作为文件存入"）。缩略图 ≤ `THUMB_MAX_W = 720`；贴图素材取自这份历史
+   （2026-11-11 起：图片解 `images/` 原件、文本栅格化、文件跳过），回溯深度由
+   `pin_ring_cap` 约束。
 9. **VM 稳态受约束**：`scripting/runtime.rs::EngineCache` 按脚本路径缓存长期 VM，按
    `(mtime, len)` 热重载并 `gc()` 清理已删脚本；`FxCore` 实例常驻而非每帧重建。
 

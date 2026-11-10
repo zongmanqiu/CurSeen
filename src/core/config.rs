@@ -434,8 +434,13 @@ pub struct ScreenshotSettings {
     /// ★ 截图后贴图键（**UI 行名**「截图后贴图」；区域选择 → 剪贴板 + 钉到桌面）。空串 = 停用。
     #[serde(default = "default_hk_screenshot_pin")]
     pub hotkey_pin: String,
-    /// ★ 贴图键（**UI 行名**「贴图」；剪贴板内容钉到桌面；文本以位图形式；多次按逆序回溯
-    /// 贴图历史）。空串 = 停用。
+    /// ★ 贴图键（**UI 行名**「贴图」；按剪贴板历史顺序把图文钉到桌面——图片 1:1、
+    /// 文本栅格化成位图；文件条目跳过。多次按 = 沿历史往前翻，翻到深度上限绕回最新）。
+    ///
+    /// ★ 2026-11-11 换源：素材从"本次运行的贴图环"改成**剪贴板历史**
+    /// （`platform::clipboard_history`）——环只在本次进程里攒内容，重启即空，
+    /// 于是用户连续按贴图键只会在那一两条之间来回（"只是重复贴图同一段文字"）。
+    /// 剪贴板模块关着时仍退回老路（读当前剪贴板 + 环）。空串 = 停用。
     #[serde(default = "default_hk_pin_clipboard")]
     pub hotkey_pin_clipboard: String,
     /// ★ 长截图快捷键（**开始 / 结束**一键开关，同录屏）：框一块区域 → 滚动页面 →
@@ -448,10 +453,11 @@ pub struct ScreenshotSettings {
     /// 受 `enabled` 管辖。
     #[serde(default = "default_hk_scroll_wide")]
     pub hotkey_scroll_wide: String,
-    /// ★ 贴图历史环容量（"最多支持 pin 最近的 N 个内容"）。默认 10。
+    /// ★ 贴图回溯深度（"最多支持 pin 最近的 N 个内容"）。默认 10。
     ///
-    /// 这个值同时约束剪贴板监听的内存上界：轮询只是**按需收新内容**，环本身裁剪到
-    /// 本容量，所以常驻内存最坏就是 N 张位图（见 `Runtime::poll_clipboard`）。
+    /// ★ 2026-11-11 起它约束的是**剪贴板历史的回溯深度**（贴图素材换源，见
+    /// `runtime::snap` 模块头）：连按贴图键只在前 N 条图文之间循环。剪贴板模块关着时
+    /// 仍约束本地贴图环的容量（那一档同时还决定剪贴板轮询常驻的位图数）。
     #[serde(default = "default_pin_ring_cap")]
     pub pin_ring_cap: usize,
 }

@@ -2,8 +2,8 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.1.4 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.4/CurSeen_2.1.4.zip)**
- ｜ **[⬇️ 下载 2.1.4 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.4/CurSeen_2.1.4.zip)**
+**[⬇️ 下载 2.1.5 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.5/CurSeen_2.1.5.zip)**
+ ｜ **[⬇️ 下载 2.1.5 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.5/CurSeen_2.1.5.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
@@ -12,7 +12,7 @@
 - **鼠标轨迹**：鼠标拖尾、悬浮标（跟随光标，含聚光灯 / 激光笔等脚本）、点击波纹与特效。
 - **键盘呈现**：点击声音、击键回显（屏幕显示你按下的键）、虚拟键盘（主播向布局 + 高亮注入）。
 - **屏幕标注**：透明 / 白板画笔，支持撤销 / 重做 / 清空；截图后可进编辑态标注。
-- **截图与贴图**：截图进剪贴板或钉到桌面，贴图可移动 / 缩放 / 另存为（`Ctrl+S` 存当前画面）。
+- **截图与贴图**：截图进剪贴板或钉到桌面；贴图按「剪贴板」历史顺序取图文（图片 1:1、文字转图片、文件跳过），自己截的图贴回截图时的位置；贴图可移动 / 缩放 / 另存为（`Ctrl+S` 存当前画面）。
 - **录制**：MP4 视频录制（分辨率 / 帧率 / 硬件加速回退）+ GIF 录制（选区 / 帧间差量 / 裁剪另存）。
 - **辅助**：放大镜（画中画 / 全屏，滚轮调倍率）、计时器（正 / 倒计时，可调锚点与字号）、
   便签、剪贴板历史（粘贴板回顾）。
