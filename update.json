@@ -1,9 +1,9 @@
 {
-  "version": "2.1.3",
+  "version": "2.1.4",
   "published": "2026-11-10",
-  "notes": "### 新增\n\n- **发行版自带 Lua 工具台与 MCP 服务器**：不开窗、不提权，`--lua-check` / `--lua-trace` / `--lua-shot` 可离线体检并判定脚本能否运行；`--mcp` 起 stdio 服务器，八个工具覆盖「写脚本 → 体检 → 判据 → 出图 → 启用 → 清理」，没有文件系统权限的 AI 客户端也能用。\n- **随包文档**：`assets/docs/接入指南.md`（怎么接）、`MCP说明.md`（协议与工具细节）、`配置说明.md`（每个配置键）；`--help` 与工具返回里直接给出路径。",
+  "notes": "### 新增\n\n- **剪贴板图片直接当文件用**：进入剪贴板历史的图片（截图 / RStudio / 浏览器复制来的图）自动备份为 PNG（`temp/clipboard/images/`），并把「文件 + 图片」两种格式当场放回剪贴板——桌面 / 资源管理器直接 Ctrl+V 贴出文件，聊天框照旧贴出图片，网页上传框可直接上传；Excel / Word 等带嵌入对象的复制不受影响。\n\n### 修复\n\n- **录制完成提示窗不再迟到**：停止录制后提示窗最迟 250ms 内弹出——原来后台收尾比\n  「正在保存…」浮字慢时，完成结论会一直等下一次鼠标 / 键盘输入才浮出来。\n- **录制时托盘图标恢复黑底红点**：白色底色是图标产物过期（矢量源改了没重跑生成器）；\n  重新生成后录制态与常规态同为黑底，圆点红色。",
   "urls": {
-    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.3/CurSeen_2.1.3.zip",
-    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.3/CurSeen_2.1.3.zip"
+    "gitee": "https://gitee.com/qiuzongman/curseen/releases/download/2.1.4/CurSeen_2.1.4.zip",
+    "github": "https://github.com/zongmanqiu/CurSeen/releases/download/2.1.4/CurSeen_2.1.4.zip"
   }
 }
