@@ -1,6 +1,6 @@
 # MCP 说明（`curseen.exe --mcp`）
 
-这份文档讲**协议与工具细节**：怎么握手、八个工具各自收什么参数、返回里每个字段什么意思、
+这份文档讲**协议与工具细节**：怎么握手、十二个工具各自收什么参数、返回里每个字段什么意思、
 出错了怎么判。它面向要把 CurSeen 接进自己客户端的人或 AI。
 
 > 只想快速接上并跑通闭环，先读 [`接入指南.md`](接入指南.md)（两种接法、四步闭环、硬规则）。
@@ -39,6 +39,9 @@ curseen.exe --mcp
 `command` 必须写**绝对路径**（客户端不会替你切到程序目录）。接上后先读
 `initialize` 返回的 `instructions`——那是给模型的速查版规则。
 
+不想手拼：在程序目录运行 `curseen.exe --mcp-init`，它打印一段带本机绝对路径的
+`mcpServers` 配置块。只打印、不改任何客户端的配置文件。
+
 ## 2. 握手
 
 请求：
@@ -53,7 +56,7 @@ curseen.exe --mcp
 
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `protocolVersion` | 原样回显客户端的版本 | 客户端不报时用 `2024-11-05` |
+| `protocolVersion` | 协商结果：客户端报的版本在支持表里就原样回，否则回我们支持的最新版（`2025-06-18`）；客户端不报时用 `2024-11-05` | 不会答应没实现过的版本 |
 | `capabilities` | `{"tools": {}}` | 只提供工具 |
 | `serverInfo` | `curseen-lua` / 版本号 | 版本号跟发行版一致 |
 | `instructions` | 规则全文 | 脚本放哪、判活铁律、文档路径，都在这里 |
@@ -64,19 +67,25 @@ curseen.exe --mcp
 - `id` 原样回，数字与字符串都合法；
 - 单条消息不合法只回一条错误包，**不会退出**（`-32700` 解析失败 / `-32601` 不支持的方法 /
   `-32602` 参数不对）。
+- **单帧上限 8 MiB**：超长帧整帧丢弃并回一条 `-32700`，服务继续（剩下的半帧不会被当成
+  新帧，之后的分帧不会被污染）。
 
-## 3. 八个工具
+## 3. 十二个工具
 
 | 工具 | 输入 | 返回里要看的字段 |
 |---|---|---|
 | `list_scripts` | 无 | `scripts[]`：id / 宿主 / UI 入口 / 是否热重载 |
+| `list_docs` | 无 | `docs[]`：`path` + 一句话说明 |
 | `read_doc` | `path`（只收 `.md`） | `text` 原文、`chars`；HTML 手册会被明确拒绝 |
 | `write_script` | `path`、`code`、`overwrite`(默认 false) | `id`、`ui_entry`、`hot_reload`、`created` |
+| `patch_script` | `path`、`edits[]`、`preview`(默认 false) | `applied`、`changed`、`receipt`、`backup` |
 | `lua_check` | `path`、`mode`(可选) | `ok`、`warnings[]`、`schema[]`、`schema_present`、`docs[]` |
 | `lua_trace` | `path`、`frames`、`mode`、`params`、`input` | `verdict`、`failed[]`、`judged`、`checks{}` |
 | `lua_shot` | `path`、`frames`、`at`、`out`、`mode`、`input`、`params` | `out` + **PNG 图片块**（base64） |
 | `set_active` | `script`、`enabled`、`button`、`params` | `changed[]`（真的改了哪些配置键）、`notes[]` |
 | `delete_script` | `path` | `moved_to`：移到回收站的位置 |
+| `read_script` | `path` | `text` 原文、`lines`、`bytes`、`id`、`hot_reload` |
+| `host_status` | 无 | `running`、`state`（pid / 重扫时间 / 面板状态）、`disk`（各挂载计数 + 最新 mtime）、`pending_ms` |
 
 路径参数收三种等价写法：`HoverDot/foo`、`HoverDot/foo.lua`、
 `assets/lua/HoverDot/foo.lua`。`write_script` 返回的 `id` 就是简写，直接喂回 check / trace 即可。
@@ -86,15 +95,38 @@ curseen.exe --mcp
 给"静止够久才触发"的脚本用；没有它会把正确的脚本判成零指令）。
 
 挂载目录只认五个：`MouseTrail/` `HoverDot/` `ClickFx/` `KeySound/` `scripts/`。
-前三个各进对应特效下拉，`scripts/` 是「脚本」页常驻卡片且**唯一热重载**。
+前三个各进对应特效下拉，`scripts/` 是「脚本」页常驻卡片。五个挂载都热重载（脚本文件改动会重建实例；`KeySound/` 在下一次按键生效）。
+
+### `patch_script`：只改一两行时用
+
+```json
+{"path":"HoverDot/foo","preview":true,"edits":[
+  {"op":"replace","old_text":"size = 6","new_text":"size = 12"},
+  {"op":"insert_after","old_text":"-- 参数","new_text":"\nlocal debug = false"}
+]}
+```
+
+- 1–20 项，按顺序应用；`replace` / `insert_after` 要 `new_text`，`delete` 只要 `old_text`。
+- 每条 `old_text` 必须在**当前**文本里**唯一命中**：0 处（原文已变）或 >1 处（改哪一处有歧义）
+  都整批拒绝，文件一个字节不动。
+- `preview=true` 只回变更摘要；正式写入前把原文件备份进 `temp/lua_tool_trash/`。
+- 回执 `receipt`：`lines_before` / `lines_after` / `first_changed_line` / `last_changed_line` /
+  `bytes_before` / `bytes_after`——改完只重读变动的那几行。
+
+### 失败指路：`next`
+
+`lua_check` / `lua_trace` / `patch_script` / `list_docs` / `read_doc` / `set_active` / `host_status` 的返回里
+可能带 `next` 字段，直接写明下一步该调哪个工具或先修什么。`write_script` 原本就有。
+看到 `next` 就照着走，不必自己猜流程。
 
 ## 4. 四步闭环
 
 ```
-write_script(path, code)
+write_script(path, code)   // 只改一两行 → patch_script
   → lua_check(path)          warnings 必须为空
   → lua_trace(path)          verdict 必须 pass
   → set_active(script, ...)  用户重启一次程序，就在面板里
+  → host_status()            可选：确认宿主在跑、已看见这次文件改动
 ```
 
 一次真实运行的返回节选：
@@ -195,7 +227,9 @@ set_active  : enabled=true  changed=['trail.hover_enabled','trail.hover_type',
 | 要看什么 | 读哪个 |
 |---|---|
 | 怎么接、四步闭环、硬规则总览 | `assets/docs/接入指南.md` |
-| 本页：MCP 协议 / 八个工具 / 参数口径 / 排查 | `assets/docs/MCP说明.md` |
+| 从零写一个脚本：结构 / schema 控件 / 生命周期 / 调试 / 发布 | `assets/docs/Lua开发指南.md` |
+| 本页：MCP 协议 / 十二个工具 / 参数口径 / 排查 | `assets/docs/MCP说明.md` |
+| 按主题读功能规则（鼠标 / 键盘 / 屏幕 / 工具 / 文件 / 脚本包） | `assets/docs/README.md` §1 |
 | `config.json` 每个键怎么填 + 案例 | `assets/docs/配置说明.md` |
 | Lua 接口（签名、事件、绘制上下文） | `assets/lua/API.md` |
 | 悬浮标脚本的额外约定（续帧 / `hide_cursor`） | `assets/lua/HoverDot/README.md` |

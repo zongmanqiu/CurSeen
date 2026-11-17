@@ -169,6 +169,7 @@ pub fn capture_labels() -> Vec<&'static str> {
         "麦克风",
         "麦克风试听",
         "麦克风降噪",
+        "仅录音",
     ]
 }
 
@@ -307,6 +308,17 @@ pub fn build_capture_section(m: &PanelModel, col1_w: i32) -> Element {
                             HotkeyField::RecordTrim,
                             m.hotkey_capture,
                             col1_w,
+                        ))
+                        // ★ 仅录音（m81 #3；2026-11-16 用户口径：不做独立卡）：
+                        //   即按即录的 M4A，音源/降噪就是下方「声音」子卡那套——
+                        //   放同一张卡里，降噪配置就在眼前。★ 不受本卡总开关管辖
+                        //   （独立 WASAPI 通道，关视频卡只关录屏），空串即停用。
+                        .child(card::hotkey_row(
+                            "仅录音",
+                            m.hk_record_audio,
+                            HotkeyField::RecordAudio,
+                            m.hotkey_capture,
+                            col1_w,
                         )),
                 )
                 .build_title_row(col1_w, 0);
@@ -432,6 +444,9 @@ pub fn build_capture_section(m: &PanelModel, col1_w: i32) -> Element {
     content = content
         .child(title)
         .child(body.visible_when(move || exp.get()));
+
+    // ★ m82 口径收窄（2026-11-17）：直播图层不再有独立卡——唯一可路由单元
+    //   （虚拟键盘）的「直播捕获」下拉挂在键盘页虚拟键盘卡里（见 key_display.rs）。
 
     content
 }

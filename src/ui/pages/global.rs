@@ -208,6 +208,7 @@ pub(crate) const HOTKEY_ENTRIES: &[(&str, HotkeyField)] = &[
     ("视频录制 > 录屏", HotkeyField::Record),
     ("视频录制 > 选区录屏", HotkeyField::RecordRegion),
     ("视频录制 > 时间裁剪", HotkeyField::RecordTrim),
+    ("视频录制 > 仅录音", HotkeyField::RecordAudio),
     // ── 工具页（页内卡序：便签 → 剪贴板 → 计时器）──
     ("便签 > 快捷键", HotkeyField::Sticky),
     ("剪贴板 > 快捷键", HotkeyField::Clipboard),
@@ -236,7 +237,7 @@ pub fn build_global_page(
     //   两组各只留一个（`global.switches` / `global.hotkey`）。
     let switches_expanded = m.expand("global.switches");
     let hotkey_expanded = m.expand("global.hotkey");
-    // 「高级」卡（m69）：下载源 + 图层覆盖 + 工作文件夹 + 系统合并成的一张杂项卡。
+    // 「高级」卡（m69）：下载源 + 图层覆盖 + 工作文件夹 + 系统 + 录制提示 合并成的一张杂项卡。
     let advanced_expanded = m.expand("global.advanced");
     let help_expanded = m.expand("global.help");
 
@@ -395,7 +396,7 @@ pub fn build_global_page(
         .child(title)
         .child(body.visible_when(move || exp.get()));
 
-    // ── 高级（下载源 + 图层覆盖 + 工作文件夹 + 系统，m69 合并）──
+    // ── 高级（下载源 + 图层覆盖 + 工作文件夹 + 系统 + 录制提示，m69 合并）──
     //
     // ★ 2026-10-31 用户口径：三张薄卡（图层覆盖 2 行 / 工作文件夹 3 行 / 系统 1 行）
     //   与商店卡的来源下拉合成一张——四件都是"全局、低频、一次设好"的杂项，各自撑一张
@@ -494,40 +495,38 @@ pub fn build_global_page(
                     Element::checkbox("", m.admin_launch),
                     col1_w,
                 ))
+                .child(card::divider())
+                // ★ 录制提示（2026-11-16 用户拍板）：倒计时横幅全功能唯一（录屏/GIF/录音
+                //   都画同一张「即将开始 N」），开关也只有一个。不勾时 3 秒等待与可取消
+                //   照旧，只是不在桌面画横幅。
+                .child(card::group_label("录制提示"))
+                .child(card::option_row(
+                    "桌面倒计时横幅",
+                    Element::checkbox("", m.show_countdown),
+                    col1_w,
+                ))
         })
         .build_title_row(col1_w, card::INDENT_CARD);
     content = content
         .child(title)
         .child(body.visible_when(move || exp.get()));
 
-    // ── 帮助（随包文档的入口）──
+    // ── 帮助（随包手册入口）──
     //
-    // 用户口径（2026-09-29）：说明书要"设置里点一下就能看"，而不是让用户去安装目录翻；
-    // Lua 指南与 API 参考**合并为一份 HTML 手册**（`Lua脚本手册.html`）；其第二部分三张
-    // 接口表由 `build/gen_manual_tables.py` 从 `assets/lua/API.md` 机械镜像，避免
-    // "两个入口一个内容"的困惑。
-    // 三份文档全部随 assets 发布，按钮直接 `ShellExecuteW` 打开：html 走默认浏览器。
+    // 只有**一份**给人看的 HTML 手册：操作、产物位置、固定快捷键都在里面。Lua 的接口与
+    // 写法只保留给 AI 的 `.md` 文档（`assets/docs/`，由 MCP `read_doc` 读取），不再在
+    // 帮助里放第二份人读的 Lua 手册——两份描述同一套接口，迟早互相指错。
     let (title, body, exp) = FeatureCard::new("帮助", help_expanded)
         .body({
-            let manual = crate::core::paths::from_app_relative("assets/docs/隐藏快捷键手册.html");
-            let lua_manual = crate::core::paths::from_app_relative("assets/lua/Lua脚本手册.html");
-            Element::col()
-                .child(card::option_row(
-                    "隐藏快捷键手册",
-                    Element::button("打开").on_click(move |_ctx| {
-                        log::info!("打开文档：隐藏快捷键手册（{}）", manual.display());
-                        crate::platform::win_util::open_doc(&manual);
-                    }),
-                    col1_w,
-                ))
-                .child(card::option_row(
-                    "Lua 脚本手册",
-                    Element::button("打开").on_click(move |_ctx| {
-                        log::info!("打开文档：Lua 脚本手册（{}）", lua_manual.display());
-                        crate::platform::win_util::open_doc(&lua_manual);
-                    }),
-                    col1_w,
-                ))
+            let manual = crate::core::paths::from_app_relative("assets/docs/操作手册.html");
+            Element::col().child(card::option_row(
+                "操作手册",
+                Element::button("打开").on_click(move |_ctx| {
+                    log::info!("打开文档：操作手册（{}）", manual.display());
+                    crate::platform::win_util::open_doc(&manual);
+                }),
+                col1_w,
+            ))
         })
         .build_title_row(col1_w, card::INDENT_CARD);
     content = content
@@ -605,6 +604,7 @@ mod tests {
             Record,
             RecordRegion,
             RecordTrim,
+            RecordAudio,
             Gif,
             Trim,
             Timer,
@@ -885,9 +885,9 @@ mod tests {
         );
     }
 
-    /// 「高级」卡（m69，2026-10-31 用户口径）：下载源 + 图层 + 工作文件夹 + 系统四组
-    /// 合成**一张**卡。缺哪一组都不会报错——只是卡里少几行；这类退步在真机上要展开
-    /// 那张卡才看得见，所以在源码层钉住。
+    /// 「高级」卡（m69，2026-10-31 用户口径）：下载源 + 图层 + 工作文件夹 + 系统 +
+    /// 录制提示（2026-11-16 增）多组合成**一张**卡。缺哪一组都不会报错——只是卡里少几行；
+    /// 这类退步在真机上要展开那张卡才看得见，所以在源码层钉住。
     ///
     /// 工作文件夹组要齐备：**占用（信号驱动的文本）** / **打开目录按钮**，以及**打开
     /// 面板时先算一次**。★ 不摆「位置」行（2026-09-28 用户口径）：路径显示不全也抄不了，
@@ -924,6 +924,10 @@ mod tests {
             "管理员权限 (已启用)",
             "m.admin_launch",
             "option_row_signal(",
+            // 录制提示组（2026-11-16 用户拍板：全功能唯一倒计时横幅 + 可关）。
+            "card::group_label(\"录制提示\")",
+            "\"桌面倒计时横幅\"",
+            "m.show_countdown",
         ] {
             assert!(p.contains(needle), "设置页「高级」卡缺少：{needle}");
         }

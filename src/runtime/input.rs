@@ -503,6 +503,16 @@ impl Runtime {
             self.request_mp4_trim_standalone();
             return;
         }
+        // ★ 纯录音快捷键（m81 #3）：一键开关（3 秒倒计时后开录）。★★ 不受
+        //   `record.enabled` 管辖（2026-11-16 晚用户实测拍板：关掉「视频录制」卡，
+        //   仅录音照常工作——它有独立的 WASAPI 通道，不占桌面复制单例）；热键留空
+        //   = 停用。音源/降噪沿用「视频录制 > 声音」的三态配置。
+        let audio_hk = self.config.record.audio.hotkey.clone();
+        if !audio_hk.is_empty() && hk_matches(&audio_hk, key, mods) {
+            log::info!("录音快捷键命中");
+            self.toggle_audio_recording();
+            return;
+        }
         // ★ 裁剪快捷键排在最后：它跟录制状态**完全无关**（只开一个编辑窗），所以不需要像
         //   GIF 快捷键那样先看"是不是正在录"。放在后面也让"两把键恰好配成同一个组合"这种
         //   误配置退化成"先按录制语义走"—— 录制键的语义更重，优先它更合理。

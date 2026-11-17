@@ -456,6 +456,35 @@ impl VirtualKeyboardModule {
         crate::platform::input::hit::publish(rects, true);
     }
 
+    /// 键盘在当前配置下占的**世界物理**矩形：所有键帽矩形的并集 + 一圈余量。
+    ///
+    /// 直播捕获窗的尺寸与摆位都从它来（m82 B6）。★ 必须从**真实键帽矩形**取，而不是再拿
+    /// 布局总宽×行高算一遍：两套几何迟早漂移，漂移的后果是窗比画面小——键帽被切边，
+    /// 而用户只会看到"直播里键盘缺一条"。余量给 [`BORDER_W`] 的描边留位置。
+    /// 键盘没启用、或方案解析不出任何键帽时返回 `None`（= 没有该摆的窗）。
+    pub fn layout_world_bounds(&self, s: &VirtualKeyboardSettings) -> Option<(f32, f32, f32, f32)> {
+        if !s.enabled {
+            return None;
+        }
+        let vk_cfg = vk_config::VkConfig::load(s);
+        let rects = self.layout_rects_with(s, &vk_cfg);
+        let mut x0 = f32::MAX;
+        let mut y0 = f32::MAX;
+        let mut x1 = f32::MIN;
+        let mut y1 = f32::MIN;
+        for (_code, r) in &rects {
+            x0 = x0.min(r.x);
+            y0 = y0.min(r.y);
+            x1 = x1.max(r.x + r.w);
+            y1 = y1.max(r.y + r.h);
+        }
+        if !(x1 > x0 && y1 > y0) {
+            return None;
+        }
+        let pad = BORDER_W + 2.0;
+        Some((x0 - pad, y0 - pad, x1 - x0 + 2.0 * pad, y1 - y0 + 2.0 * pad))
+    }
+
     /// 只算「键码 + 矩形」，不算图例、不查高亮。
     ///
     /// 命中区发布（[`publish_hit_region`](Self::publish_hit_region)）**每帧**都要一份
@@ -837,6 +866,52 @@ mod tests {
         c.virtual_keyboard.enabled = false;
         m.tick(&t, &c, &None);
         assert!(!m.has_glow(), "关掉后不该还有高亮残留");
+    }
+
+    /// ★ m82 B6/B7：直播捕获窗的尺寸来自**真实键帽矩形的并集**，因此必须
+    /// **包住每一颗键帽**——窗比画面小就是"直播里键盘缺一条边"，而那种缺陷在
+    /// 单测里一行就能断死，不该等到用户在直播画面里看见。
+    /// 同时断言它**紧致**：不许退回到"整块虚拟桌面 1:1"（那正是捕获软件认不出它的形态）。
+    #[test]
+    fn layout_world_bounds_contains_every_keycap_and_is_tight() {
+        let mut s = VirtualKeyboardSettings {
+            enabled: true,
+            ..Default::default()
+        };
+        let c = cfg();
+        let m = VirtualKeyboardModule::new(&c);
+        for layout in ["ansi_104", "wasd_gaming"] {
+            s.layout = layout.to_string();
+            let (bx, by, bw, bh) = m
+                .layout_world_bounds(&s)
+                .unwrap_or_else(|| panic!("{layout} 应算得出包围盒"));
+            let cfg = vk_config::VkConfig::load(&s);
+            let rects = m.layout_rects_with(&s, &cfg);
+            assert!(!rects.is_empty(), "{layout} 没有键帽？");
+            for (_code, r) in &rects {
+                assert!(
+                    r.x >= bx && r.y >= by && r.x + r.w <= bx + bw && r.y + r.h <= by + bh,
+                    "{layout} 键帽 ({},{},{},{}) 超出了包围盒 ({bx},{by},{bw},{bh})",
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h
+                );
+            }
+            // 紧致：包围盒不得比键帽并集宽出 2px 以上（余量只有 BORDER_W+2 那一圈）。
+            let min_x = rects.iter().map(|(_, r)| r.x).fold(f32::INFINITY, f32::min);
+            let max_x = rects
+                .iter()
+                .map(|(_, r)| r.x + r.w)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let used_w = max_x - min_x;
+            assert!(
+                bw - used_w <= (BORDER_W + 2.0) * 2.0 + 0.5,
+                "{layout} 包围盒宽 {bw}，键帽并集只有 {used_w} —— 不紧致"
+            );
+            // 绝不是整屏尺寸（老形态）。
+            assert!(bw < 1920.0 && bh < 1080.0, "{layout} 包围盒不该等于整屏");
+        }
     }
 
     /// ★ 回归（2026-09-18）：**淡出区间里必须连帧**，否则 `hold` 与 `fade_sec` 都白设。

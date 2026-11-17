@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CurSeen 虚拟键盘</title>
+<style>
+  html, body { margin: 0; padding: 0; background: rgba(0,0,0,0); overflow: hidden;
+               width: 100%; height: 100%; }
+  /* 等比缩放 + 居中：OBS 里改来源宽高只改变视口，画面永远不拉伸（多出来的地方留空）。 */
+  canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+           display: block; }
+</style>
+<canvas id="c"></canvas>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d', { alpha: true });
+
+  // 视口按"等比 contain"适配：来源改成任何宽高，键盘都不会被拉扁。
+  function fit() {
+    if (!cv.width || !cv.height) return;
+    const s = Math.min(innerWidth / cv.width, innerHeight / cv.height);
+    // 不取整：四舍五入会让宽高比偏 0.5%，画面看着"差不多正"但其实是拉过的。
+    cv.style.width = Math.max(1, cv.width * s) + 'px';
+    cv.style.height = Math.max(1, cv.height * s) + 'px';
+  }
+  addEventListener('resize', fit);
+
+  async function pump() {
+    const r = await fetch('/frames?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok || !r.body) throw new Error('http ' + r.status);
+    const rd = r.body.getReader();
+    let buf = new Uint8Array(0);
+    let W = 0, H = 0, BYTES = 0;
+
+    for (;;) {
+      const { value, done } = await rd.read();
+      if (done) return;
+      if (value) {
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf);
+        merged.set(value, buf.length);
+        buf = merged;
+      }
+      // 连接的第一段是 8 字节尺寸头（u32 LE × 2）。
+      if (!W) {
+        if (buf.length < 8) continue;
+        const dv = new DataView(buf.buffer, buf.byteOffset, 8);
+        W = dv.getUint32(0, true);
+        H = dv.getUint32(4, true);
+        if (!W || !H || W > 8192 || H > 8192) throw new Error('bad frame size');
+        BYTES = W * H * 4;
+        cv.width = W;
+        cv.height = H;
+        fit();
+        buf = buf.subarray(8);
+      }
+      while (buf.length >= BYTES) {
+        const px = new Uint8ClampedArray(buf.buffer, buf.byteOffset, BYTES);
+        ctx.putImageData(new ImageData(px, W, H), 0, 0);
+        buf = buf.subarray(BYTES);
+      }
+    }
+  }
+
+  // 键盘换方案 / 改缩放 / 服务重启都会断流：无限重连即可（直播页常年开着）。
+  async function loop() {
+    for (;;) {
+      try { await pump(); } catch (e) { /* 服务还没起来或被关掉 */ }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  loop();
+})();
+</script>

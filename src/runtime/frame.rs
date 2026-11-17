@@ -253,15 +253,23 @@ impl Runtime {
         //   不会重复播报。放在错误消费之后，两条路不打架。
         let _ = self.consume_finished_recordings();
 
-        // 录制倒计时：逐帧递减，归零才真正开始录制（屏幕中央「即将录制 3/2/1」，
-        // 见 `draw_rec_countdown`）。停止快捷键在 `handle_action_key` 里取消倒计时。
-        // ★ 用 raw_ms 而非 dt_ms：dt_ms 经指数滑动平均 + clamp(0.5, 50) 平滑，
-        //   帧间隔大时（park 态唤醒延迟）实际流逝的时间被截断，3 秒倒计时会明显变长。
+        // 录制倒计时：remain 由「上膛锚点 + 真实流逝」重算（2026-11-16 晚，用户报
+        // "没有屏幕提示"的真正根因）：park 长眠后唤醒那帧的 raw_ms 是整段空闲，逐帧扣
+        // raw_ms 会把 3000ms 倒计时一口气扣完 —— 横幅一帧都没画就开录。锚点语义下
+        // 帧节奏/停帧天然免疫：倒计时按真实时间走，帧只负责展示与触发。
         if let Some(remain) = self.rec_countdown_ms.as_mut() {
-            *remain -= tick.raw_ms;
+            let elapsed = self.rec_countdown_anchor.elapsed().as_secs_f32() * 1000.0;
+            *remain = (self.rec_countdown_total_ms - elapsed).max(0.0);
             if *remain <= 0.0 {
                 self.rec_countdown_ms = None;
-                self.start_recording_now();
+                // ★ 录音与视频共用倒计时钟（m81 #3，2026-11-16 用户口径：提示格式统一）：
+                //   归零后按 pending 标记分流——录音开录音，视频走原路。
+                if self.audio_pending {
+                    self.audio_pending = false;
+                    self.start_audio_recording_now();
+                } else {
+                    self.start_recording_now();
+                }
             }
         }
 
@@ -280,6 +288,7 @@ impl Runtime {
     /// 渲染：清空 DrawList，让模块填充绘制指令。
     pub fn render(&mut self) {
         self.draw_list.clear();
+        self.live_draw_list.clear();
         self.sync_magnifier_lifecycle();
 
         // ★★ 全屏放大优先（它与画中画互斥：它是置顶全屏不透明的，画中画就算画了也
@@ -319,9 +328,25 @@ impl Runtime {
         let cfg = &self.config;
         // 绘制顺序（先画在底）：trail → key → vk → drawing。反馈类（计时器/浮字/
         // 倒计时/白闪）在下面单独画，恒在最顶。
+        // ★ m82 口径收窄（2026-11-17 用户拍板）：直播路由只有虚拟键盘一路，
+        //   鼠标特效与击键回显恒画桌面（trail 直绘老路，零行为差零开销）。
         self.trail.draw(&mut self.draw_list);
         self.key.draw(&mut self.draw_list, cfg);
-        self.vk.draw(&mut self.draw_list, cfg);
+        // ★ 直播捕获路由（m82 B6 / m83）：虚拟键盘只画在**一个**表面上——开了直播窗
+        //   或浏览器源就进直播列表，一个都没开就留在覆盖层（判据见
+        //   `LiveLayerSettings::draws_on_desktop`）。出厂（都没开）→ 与从前完全一致。
+        //   （vk 的 draw 是 &self 纯绘制，双调用不推进状态，可直接画两遍。）
+        if cfg.live.draws_on_desktop() {
+            self.vk.draw(&mut self.draw_list, cfg);
+        }
+        if cfg.live.any_surface() {
+            self.vk.draw(&mut self.live_draw_list, cfg);
+            // ★ 生产侧脏标记（m82 B4）：覆盖层每算出一帧直播内容就置一次，由合成窗的
+            //   33ms 轮询排空后跨窗失效。**不能再由那个轮询自己无条件踢帧**——那样
+            //   键盘一动不动时也在按 30fps 重画整块 1920×1080 表面（实测单核常驻
+            //   中位单核 26%，而关掉路由是 0%），把"静止零功耗"这条既有语义吃掉了。
+            self.live_frame_pending.set(true);
+        }
         self.drawing.draw(&mut self.draw_list, cfg);
         // 便签画在各自的原生窗上（`StickyNoteModule::draw` 空实现）。
         self.sticky.draw(&mut self.draw_list, cfg);
@@ -348,15 +373,14 @@ impl Runtime {
         }
         self.action_notify
             .draw_flash(&mut self.draw_list, self.screen);
-        // 录制倒计时（屏幕中央「即将录制 N」）。用户口径：录制前给 3-2-1 提示，
-        // 录制中**不再**显示时长指示器（顶部 REC 计时已按需求移除）。
+        // 录制倒计时（屏幕中央「即将开始 N」——全功能唯一横幅，2026-11-16 用户拍板）。
+        // 用户口径：录制前给 3-2-1 提示，录制中**不再**显示时长指示器（顶部 REC 计时
+        // 已按需求移除）。开关 = `general.show_countdown`：不勾时照常 3 秒等待与可取消，
+        // 只是不在桌面画横幅。
         if let Some(remain) = self.rec_countdown_ms {
-            // `rec_pending` 要到归零才被 `start_recording_now` 取走，所以倒计时期间它
-            // 就是"这次录什么"的可信来源（兜底 MP4 与 `start_recording_now` 同一处置）。
-            let kind = self
-                .rec_pending
-                .unwrap_or(crate::platform::recorder::RecKind::Mp4);
-            draw_rec_countdown(&mut self.draw_list, self.screen, remain, kind);
+            if self.config.general.show_countdown {
+                draw_countdown_banner(&mut self.draw_list, self.screen, remain);
+            }
         }
 
         // ★ 聚光灯增量帧检测（补丁 032）：指令表组装完之后判形态。命中且上一帧
@@ -435,7 +459,10 @@ impl Runtime {
             || self.drawing.controller().is_drawing()
             // 反馈浮字正在显示：这段时间里必须持续出帧把它淡出。
             || self.action_notify.is_showing()
-            // ★ 录制倒计时中：中央「即将录制 N」每秒跳一次数字，必须持续出帧。
+            // ★ 直播呈现面开着时覆盖层是帧引擎（live_draw_list 在 frame/render 里更新），
+            //   呈现侧只负责消费 —— 覆盖层睡了直播画面就冻结（m82 B1 / m83 浏览器源）。
+            || self.config.live.any_surface()
+            // ★ 录制倒计时中：中央「即将开始 N」每秒跳一次数字，必须持续出帧。
             || self.rec_countdown_ms.is_some()
             // ★ 画中画放大：跟随鼠标、逐帧抓屏重画。不把 `enabled` 算进"需要帧"，覆盖层会
             //   因只有它一个功能而休眠（park），而帧调度器在 `paint()` 里才跑——park 后
@@ -569,6 +596,15 @@ impl Runtime {
     pub fn frame_demand(&self) -> FrameDemand {
         if self.trail.is_animating() {
             return FrameDemand::Now;
+        }
+
+        // ★★ 录制倒计时续帧（2026-11-16 晚"没有屏幕提示"的第二根因）：倒计时是
+        //   **定时事件**，不是"画面会变"——屏幕静止时若在这里返回 Idle，倒计时就
+        //   冻结在上膛那一帧（唤醒帧扣 200ms 后再无帧来推）。之前能走通纯属侥幸：
+        //   开录浮字的淡出需求恰好也在续帧名单里，把它删掉后冻结就露馅了。必须在
+        //   一切早退 Idle 之前报出「睡到下一次数字跳变」。
+        if let Some(remain) = self.rec_countdown_ms {
+            return FrameDemand::After(rec_countdown_next_change_ms(remain).max(1));
         }
 
         // ★ 光标跟随特效（悬浮标 / 拖尾）的续帧门禁 —— 这是"快速移动卡顿 + CPU 随速度涨"
@@ -1106,6 +1142,70 @@ mod tests {
         assert!(
             matches!(rt.frame_demand(), FrameDemand::Now),
             "放大镜跟随光标应续帧"
+        );
+    }
+
+    /// ★ m82 B4/B6：直播表面的出帧由**生产侧脏标记**驱动，而且两个表面**互斥**。
+    ///
+    /// 判据四格，缺一格就是回归：① 窗没开时压根不重算直播列表 ⇒ 不许置脏，键盘画在覆盖层
+    /// 上；② 开着窗 ⇒ 每重算一次置一次脏，而覆盖层**不再画**键盘（用户口径「画面里只需要
+    /// 出现一次」，2026-11-17）；③ 消费侧 `replace(false)` 排空后不许自己复活——复活的写法
+    /// 等价于"无条件持续重绘"，那正是 B4 拆掉的东西（零输入窗口实测：静态键盘开着路由中位
+    /// 单核 26%，关掉路由 0%）；④ 关掉窗 ⇒ 键盘搬回覆盖层，且不残留在直播侧。
+    #[test]
+    fn live_frame_pending_is_produced_by_the_live_route_only() {
+        let mut rt = Runtime::new(Config::default());
+        rt.config.virtual_keyboard.enabled = true;
+        rt.frame(); // 让 vk 解析方案（否则 draw 没东西可画，判据会假绿）
+
+        rt.render();
+        assert!(
+            !rt.live_frame_pending.get(),
+            "窗没开：直播列表没重算过，不许置脏"
+        );
+        assert_eq!(rt.live_draw_list.len_all(), 0, "窗没开：直播侧零指令");
+        assert!(rt.draw_list.len_all() > 0, "出厂形态：键盘画在覆盖层上");
+
+        rt.config.live.mode = crate::core::config::LiveMode::Window;
+        rt.render();
+        assert!(rt.live_frame_pending.get(), "开窗后：重算过就必须置脏");
+        assert!(
+            rt.live_draw_list.len_all() > 0,
+            "开窗后：键盘指令要进直播列表"
+        );
+        assert_eq!(
+            rt.draw_list.len_all(),
+            0,
+            "★ 两个表面互斥：开着直播窗时覆盖层不该再画一遍键盘"
+        );
+        assert!(
+            rt.live_frame_pending.replace(false),
+            "消费侧第一次排空应取到脏"
+        );
+        assert!(
+            !rt.live_frame_pending.replace(false),
+            "排空后不许自己复活：复活 = 又变成无条件 30fps 重绘"
+        );
+
+        // 关掉窗：键盘搬回覆盖层，直播侧归零、也不再置脏。
+        rt.config.live.mode = crate::core::config::LiveMode::Desktop;
+        rt.render();
+        assert!(!rt.live_frame_pending.get(), "关掉直播窗后不再置脏");
+        assert_eq!(rt.live_draw_list.len_all(), 0, "关掉直播窗后直播侧归零");
+        assert!(rt.draw_list.len_all() > 0, "关掉直播窗后键盘回到覆盖层");
+
+        // 浏览器源走同一条路由：键盘不进桌面列表，直播列表照样有内容且置脏。
+        rt.config.live.mode = crate::core::config::LiveMode::Browser;
+        rt.render();
+        assert!(rt.live_frame_pending.get(), "浏览器源开着：重算过必须置脏");
+        assert!(
+            rt.live_draw_list.len_all() > 0,
+            "浏览器源开着：键盘进直播列表"
+        );
+        assert_eq!(
+            rt.draw_list.len_all(),
+            0,
+            "★ 浏览器源开着：覆盖层不许再画一遍键盘（画面里只出现一次）"
         );
     }
 

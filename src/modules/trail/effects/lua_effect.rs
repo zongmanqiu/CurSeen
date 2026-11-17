@@ -157,6 +157,18 @@ impl TrailEffect for LuaEffect {
         self.core.reset();
     }
 
+    fn reload_script(&mut self) -> bool {
+        if !self.core.ensure_fresh() {
+            return false;
+        }
+        // schema 默认值也可能改了：重建缓存，别让面板/首次加载继续用旧默认。
+        if let Ok(tbl) = self.core.engine.call_schema() {
+            self.defaults_cache =
+                Self::build_defaults(&crate::scripting::registry::parse_schema_table(&tbl));
+        }
+        true
+    }
+
     fn defaults(&self) -> EffectDefaults {
         self.defaults_cache.clone()
     }

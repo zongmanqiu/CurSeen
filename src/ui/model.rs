@@ -1054,6 +1054,8 @@ pub enum HotkeyField {
     RecordRegion,
     /// ★ MP4 时间裁剪快捷键（打开最近一次录像的裁剪窗；空串 = 停用）。
     RecordTrim,
+    /// ★ 纯录音快捷键（M4A，开始 / 停止一键开关，m81 #3；空串 = 停用）。
+    RecordAudio,
     /// 计时器开始 / 停止一键开关。
     Timer,
     /// 全屏放大开始 / 停止一键开关。
@@ -1335,6 +1337,32 @@ pub struct PanelModel {
     /// 自动清理下拉下标（指向 [`TEMP_CLEANUP_DAYS`]；0 = 永不）。
     pub temp_cleanup: Signal<usize>,
 
+    // ── 虚拟键盘 · 直播捕获（m82 B6 / B15，UI 挂在键盘页 vk 卡「直播捕获」子卡）──
+    /// 键盘画在哪（写 `config.live.mode`）：0 桌面 / 1 独立窗口 / 2 浏览器源。
+    /// ★ 三选一而不是三个开关：同一份键盘只出现在一个表面上，互斥关系由这一格承担。
+    pub live_mode: Signal<usize>,
+    /// 独立窗口的等比放大倍数（写 `config.live.window_scale`；滑条 0..1 映射到
+    /// `LIVE_WINDOW_SCALE_MIN..=MAX`，与输入框经 `slider_pair_sync` 对账）。
+    pub live_win_scale: Signal<f32>,
+    /// 上面那根滑条的镜像文本（三件套）。
+    pub live_win_scale_text: Signal<String>,
+    /// 抠图底色（写 `config.live.bg`，alpha 一律钉 255——窗口捕获不吃透明）。
+    pub live_bg: Signal<Color>,
+    /// 浏览器源**实际**地址（「复制地址」按钮读它）。★ 必须是信号：首选端口被占时
+    /// 服务会顺延（`web_out` 的端口回退），起始值只是配置里的首选，服务起来后由
+    /// 运行时回灌真实地址。**必须带 `http://`**——直播姬会自动补 https，补成 https
+    /// 后页面直接加载失败（2026-11-17 真机实测）。
+    pub live_url: Signal<String>,
+    /// 浏览器源帧尺寸（只读展示，如 `1484 × 396`）。**这一格的数字就是直播软件里
+    /// 「浏览器源」该填的宽高**——填对了键盘正好铺满，不用自己量。随键盘方案/键帽尺寸
+    /// 实时更新（帧尺寸一变，发布路径回灌这里）。
+    pub live_out_size: Signal<String>,
+
+    // ── 设置页 · 录制提示 ──
+    /// ★ 录制倒计时桌面横幅（录屏/GIF/录音共用一个开关，2026-11-16 用户拍板：
+    /// 提示文案全功能统一「即将开始 N」+ 可关）。写 `config.general.show_countdown`。
+    pub show_countdown: Signal<bool>,
+
     // ── 设置页 · 系统 ──
     /// 管理员权限启动勾选（写 `config.general.admin_launch`；**下次启动**生效，
     /// 由 `main.rs` 启动分支消费）。
@@ -1491,6 +1519,9 @@ pub struct PanelModel {
     pub hk_record_region: Signal<String>,
     /// MP4 时间裁剪快捷键（打开最近一次录像的裁剪窗；空串 = 停用）。
     pub hk_record_trim: Signal<String>,
+    /// 纯录音快捷键（M4A 一键开关；空串 = 停用，且这是唯一闸门——不受视频录制卡
+    /// 总开关管辖，2026-11-16 晚实测拍板）。
+    pub hk_record_audio: Signal<String>,
     /// 计时器**快捷键**（**开始 / 停止**一键开关；空串 = 停用）。2026-09-27 起出厂留空。
     ///
     /// 与录屏快捷键同款语义：没有独立的总开关，**快捷键为空串即停用**。理由见
@@ -2199,6 +2230,28 @@ impl PanelModel {
             hover_type: signal(hover_type_idx),
             // 设置页 · 工作文件夹：自动清理下拉下标。
             temp_cleanup: signal(temp_cleanup_idx),
+            show_countdown: signal(cfg.general.show_countdown),
+            // 虚拟键盘 · 直播捕获（m82 B6 / B15）：三选一 + 窗口缩放 + 底色 + 浏览器源地址。
+            live_mode: signal(cfg.live.mode.index()),
+            live_win_scale: signal(v2s(
+                cfg.live.window_scale.clamp(
+                    crate::core::config::LIVE_WINDOW_SCALE_MIN,
+                    crate::core::config::LIVE_WINDOW_SCALE_MAX,
+                ),
+                crate::core::config::LIVE_WINDOW_SCALE_MIN,
+                crate::core::config::LIVE_WINDOW_SCALE_MAX,
+            )),
+            live_win_scale_text: signal(format!(
+                "{:.2}",
+                cfg.live.window_scale.clamp(
+                    crate::core::config::LIVE_WINDOW_SCALE_MIN,
+                    crate::core::config::LIVE_WINDOW_SCALE_MAX,
+                )
+            )),
+            live_bg: signal(array_to_color(cfg.live.bg)),
+            live_url: signal(cfg.live.browser_url()),
+            // 初值由 `Runtime::open_panel` 按当前键盘包围盒填（面板模型自己拿不到 vk 模块）。
+            live_out_size: signal(String::new()),
             admin_launch: signal(cfg.general.admin_launch),
             hover_image: signal(t.hover_image.clone()),
             hover_params: signal(hover_cells),
@@ -2383,6 +2436,7 @@ impl PanelModel {
             hk_gif_trim: signal(cfg.gif.trim_hotkey.clone()),
             hk_record_region: signal(cfg.record.region_hotkey.clone()),
             hk_record_trim: signal(cfg.record.trim_hotkey.clone()),
+            hk_record_audio: signal(cfg.record.audio.hotkey.clone()),
             hk_timer: signal(cfg.global.timer.hotkey.clone()),
             hk_fullscreen_zoom: signal(cfg.magnifier_fullscreen.hotkey.clone()),
             hk_pip_toggle: signal(cfg.magnifier_pip.hotkey.clone()),
@@ -2682,6 +2736,7 @@ impl PanelModel {
             HotkeyField::Trim => &self.hk_gif_trim,
             HotkeyField::RecordRegion => &self.hk_record_region,
             HotkeyField::RecordTrim => &self.hk_record_trim,
+            HotkeyField::RecordAudio => &self.hk_record_audio,
             HotkeyField::Timer => &self.hk_timer,
             HotkeyField::FullscreenZoom => &self.hk_fullscreen_zoom,
             HotkeyField::PipToggle => &self.hk_pip_toggle,
@@ -3698,6 +3753,9 @@ impl PanelModel {
         setstr!(rec.hotkey, self.hk_record);
         setstr!(rec.region_hotkey, self.hk_record_region);
         setstr!(rec.trim_hotkey, self.hk_record_trim);
+        // 纯录音（m81 #3；2026-11-16 用户口径：仅录音行进本卡，无独立开关）：
+        // 音源/降噪沿用 rec.record_mic 等；enabled 已删，空串即停用。
+        setstr!(rec.audio.hotkey, self.hk_record_audio);
         // 帧率存下标、取值走换算表（见 `RECORD_FPS_VALUES`）：以后想改档位只动表。
         let fps = crate::core::config::RECORD_FPS_VALUES
             .get(self.rec_fps.get())
@@ -4276,6 +4334,46 @@ impl PanelModel {
             changed = true;
         }
 
+        // ── 设置页 · 录制提示「桌面倒计时横幅」──
+        // 勾选态写回 `config.general.show_countdown`（录屏/GIF/录音共用）。
+        if cfg.general.show_countdown != self.show_countdown.get() {
+            cfg.general.show_countdown = self.show_countdown.get();
+            changed = true;
+        }
+
+        // ── 虚拟键盘 · 直播捕获（m82 B6 / B15）──
+        // 三选一：面板存下标（`LiveMode::index`），写回前换回枚举；越界回「桌面」。
+        let mode = crate::core::config::LiveMode::from_index(self.live_mode.get());
+        if cfg.live.mode != mode {
+            cfg.live.mode = mode;
+            changed = true;
+        }
+        // 窗口缩放：滑条与输入框对账（三件套），范围/精度与初始化同一来源。
+        let win_scale = slider_pair_sync(
+            &self.live_win_scale,
+            &self.live_win_scale_text,
+            cfg.live.window_scale.clamp(
+                crate::core::config::LIVE_WINDOW_SCALE_MIN,
+                crate::core::config::LIVE_WINDOW_SCALE_MAX,
+            ),
+            crate::core::config::LIVE_WINDOW_SCALE_MIN,
+            crate::core::config::LIVE_WINDOW_SCALE_MAX,
+            0.05,
+            2,
+        );
+        if (cfg.live.window_scale - win_scale).abs() > 1e-3 {
+            cfg.live.window_scale = win_scale;
+            changed = true;
+        }
+        // 选择器给的是 RGBA，写回时 alpha 钉死 255：这块表面的透明在窗口捕获里本来就
+        // 无效（捕获端出黑底），留个能调的 alpha 只会让人以为它有用。
+        let picked = color_to_array(self.live_bg.get());
+        let bg = [picked[0], picked[1], picked[2], 255];
+        if cfg.live.bg != bg {
+            cfg.live.bg = bg;
+            changed = true;
+        }
+
         // ── 设置页 · 系统「管理员权限启动」──
         // 勾选态写回 `config.general.admin_launch`；**下次启动**才生效（main.rs 消费），
         // 当前进程的权限不变。
@@ -4467,6 +4565,7 @@ menu = \"演示\"
             HotkeyField::Trim,
             HotkeyField::RecordRegion,
             HotkeyField::RecordTrim,
+            HotkeyField::RecordAudio,
             HotkeyField::Timer,
             HotkeyField::FullscreenZoom,
             HotkeyField::PipToggle,

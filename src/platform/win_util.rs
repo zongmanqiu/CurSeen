@@ -254,6 +254,90 @@ pub fn set_topmost_by_title(title: &str) -> bool {
     }
 }
 
+/// 这扇窗还在不在（按标题找）。
+///
+/// ★ 最小化**算存在**：那是用户正常的窗口操作，不是"关掉了"。必须用 `find_raw_by_title`
+///   ——带 `IsIconic` 过滤的 `find_by_title` 会把最小化报成不存在，调用方就会把最小化
+///   误判成"用户按了 ×"（2026-11-17 用户实测：点最小化 ⇒ 设置里那行被取消勾选）。
+pub fn window_exists_by_title(title: &str) -> bool {
+    find_raw_by_title(title).is_some()
+}
+
+/// 把 Win11 的窗口圆角关掉（`DWMWA_WINDOW_CORNER_PREFERENCE` = 33 / `DWMWCP_DONOTROUND`）。
+///
+/// 圆角是 DWM 对**带框顶层窗**的默认装饰：它把整窗四角切成透明缺口，直播捕获拿到的
+/// 客户区跟着缺角。这块表面的尺寸就是键盘的紧致包围盒，圆角直接啃到键帽的直角上，
+/// 色键那一步会把缺角当背景抠穿（2026-11-17 用户实测）。所以显式要直角。
+///
+/// 返回 `None` = 窗还没建出来（`ctx.open_window` 是异步排队的，得下一拍再试）；
+/// `Some(false)` = 系统不认这个属性（Win10 2004~10 21H2 本来就没有圆角，降级正好）。
+pub fn square_corners_by_title(title: &str) -> Option<bool> {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+    let h = find_raw_by_title(title)?;
+    let pref: i32 = 1; // DWMWCP_DONOTROUND
+    let r = unsafe {
+        // SAFETY: `pref` 是栈上 i32，尺寸与绑定类型由 `size_of_val` 同源推出。
+        DwmSetWindowAttribute(
+            h,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of_val(&pref) as u32,
+        )
+    };
+    Some(r.is_ok())
+}
+
+/// 让这扇窗**从屏幕录制/显示器捕获里消失**（`WDA_EXCLUDEFROMCAPTURE`，Win10 2004+）。
+///
+/// ★ 这正是要解决的矛盾的钥匙：直播软件的「显示器捕获」会把屏幕上所有东西都拿进画面，
+///   于是我们那块表面在画面里出现两次（一次来自显示器捕获、一次来自窗口捕获，
+///   2026-11-17 用户实测）。排除之后它仍在物理屏幕上可见、仍可被按句柄的窗口捕获拿到
+///   ——后半句在 Windows 文档里是明写的（`SetWindowDisplayAffinity` 不影响
+///   Windows Graphics Capture 对**该窗本身**的采集），但**必须真机验**：
+///   本机屏拍量具被一个硬件叠加视频层压住（拍什么都黑），测不了。
+/// 返回 false = 系统不支持或被策略禁用（组策略里有开关）。
+pub fn set_exclude_from_capture_by_title(title: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+    };
+    let h = match find_by_title(title) {
+        Some(h) => h,
+        None => return false,
+    };
+    unsafe {
+        // SAFETY: `h` 来自 `find_by_title`；`SetWindowDisplayAffinity` 只接受句柄与一个
+        // 枚举值（SDK 里 17），不涉及任何指针算术。
+        SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE).is_ok()
+    }
+}
+
+/// 只挪位置：不动尺寸、不动 z 序、不抢焦点。窗口最小化/不存在返回 false。
+///
+/// 直播捕获窗"跟随键盘位置"用（B14）：这种移动必须**安静**——重建窗会闪、会打断直播端的
+/// 捕获源；`move_window_by_title` 那条会置顶且要激活，不适用。
+pub fn move_window_silently_by_title(title: &str, x: i32, y: i32) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let Some(h) = find_by_title(title) else {
+        return false;
+    };
+    unsafe {
+        // SAFETY: `h` 由 `find_by_title` 现取现用；四个标志位说明不改尺寸/不改 z 序/不激活，
+        // 只写位置。
+        SetWindowPos(
+            h,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .is_ok()
+    }
+}
+
 /// 按标题平移窗口到指定屏幕坐标（贴图窗拖动用）。窗口不存在时返回 false。
 pub fn move_window_by_title(title: &str, x: i32, y: i32) -> bool {
     use windows::core::PCWSTR;
@@ -464,19 +548,34 @@ pub fn invalidate_by_title(title: &str) -> bool {
 }
 
 /// 按标题找顶层窗口（找不到 / 已最小化返回 `None`——最小化时坐标是 `-32000` 这类哨兵值）。
+///
+/// 要给最小化窗做事的调用方（状态对账、恢复、改 DWM 属性）用 [`find_raw_by_title`]：
+/// 它们要的是"这扇窗在不在"，最小化恰恰是要处理的状态。
 fn find_by_title(title: &str) -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+
+    let hwnd = find_raw_by_title(title)?;
+    if unsafe {
+        // SAFETY: `hwnd` 刚由 `FindWindowW` 现取；`IsIconic` 只读状态位。
+        IsIconic(hwnd).as_bool()
+    } {
+        return None;
+    }
+    Some(hwnd)
+}
+
+/// 按标题找顶层窗口，**不过滤最小化**（找不到才是 `None`）。
+fn find_raw_by_title(title: &str) -> Option<windows::Win32::Foundation::HWND> {
     use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic};
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
     let mut wide: Vec<u16> = title.encode_utf16().collect();
     wide.push(0);
-    unsafe {
-        let hwnd = FindWindowW(None, PCWSTR(wide.as_ptr())).ok()?;
-        if hwnd.is_invalid() || IsIconic(hwnd).as_bool() {
-            return None;
-        }
-        Some(hwnd)
+    let hwnd = unsafe { FindWindowW(None, PCWSTR(wide.as_ptr())).ok()? };
+    if hwnd.is_invalid() {
+        return None;
     }
+    Some(hwnd)
 }
 
 /// 把窗口整体设为 `alpha`（0..=255，255 = 完全不透明），实现"贴图透明度 10%~100%"。

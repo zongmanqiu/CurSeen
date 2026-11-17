@@ -317,6 +317,8 @@ fn secs(ms: usize) -> String {
 /// 裁剪器的全部可变状态（时间单位一律**毫秒**）。
 struct TrimCore {
     path: Option<PathBuf>,
+    /// 纯音频文件（M4A，m81 #3）：无画面可解，预览区画占位文案，时间轴照常。
+    audio_only: bool,
     /// 总时长（毫秒）。载入时读一次，之后不变。
     total: usize,
 
@@ -355,6 +357,7 @@ impl TrimCore {
     fn empty() -> Self {
         Self {
             path: None,
+            audio_only: false,
             total: 0,
             removed: Vec::new(),
             a: 0,
@@ -405,7 +408,11 @@ impl TrimCore {
     fn try_load(&mut self, path: PathBuf) -> Result<(), String> {
         // 先确认新文件可读、时长有效，**再**动自己的字段。
         let ns = crate::platform::mp4_trim::mp4_duration_ns(&path)
-            .ok_or_else(|| "读不到视频时长".to_string())?;
+            .ok_or_else(|| "读不到媒体时长".to_string())?;
+        self.audio_only = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("m4a"))
+            .unwrap_or(false);
         let total = (ns / 10_000).max(1) as usize; // 100ns → ms，向上保 1ms 防 0 长度
         self.path = Some(path);
         self.total = total;
@@ -464,6 +471,14 @@ impl TrimCore {
         let Some(p) = self.path.clone() else {
             return;
         };
+        // ★ 纯音频（M4A，m81 #3）：无画面可解——占位标记置好即返回（画布按
+        //   `audio_only` 画提示文案），时间轴 / 区间 / 导出照常工作。
+        if self.audio_only {
+            self.preview = None;
+            self.built_for = Some(q);
+            self.preview_ms = q;
+            return;
+        }
         match crate::platform::mp4_trim::frame_rgba_at(&p, q as f64 / 1000.0) {
             Ok((w, h, rgba)) => match WImage::from_rgba(w, h, &rgba) {
                 Ok(img) => {
@@ -761,7 +776,17 @@ impl Widget for TrimCanvas {
                 canvas.draw_image(img, irect(r), Fit::Fill, 0.0, 1.0);
             }
             // 只有"载入了但这帧解不出来"才提示；空窗就是一块黑板——状态标题栏说了算
-            // （2026-09-30 用户定稿：提示太多余）。
+            // （2026-09-30 用户定稿：提示太多余）。纯音频（M4A，m81 #3）另有占位文案：
+            // 它不是"解不出来"，是本来就没有画面。
+            None if st.audio_only => {
+                canvas.draw_text(
+                    "♪ 音频文件（无画面预览）",
+                    irect(lay.preview),
+                    color(PREVIEW_HINT, 255),
+                    Align::Center,
+                    &ts,
+                );
+            }
             None if st.is_loaded() => {
                 canvas.draw_text(
                     "这一帧解不出来",

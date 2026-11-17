@@ -2,6 +2,7 @@
 
 mod frame;
 mod gif;
+pub(crate) mod host_state;
 mod input;
 pub mod layer;
 pub mod lua_tool;
@@ -22,7 +23,9 @@ mod zoom;
 // 各域搬走后留下的自由函数 / 类型在这里重新导出：子模块一句 `use super::*` 就能取到，
 // 不必各自去点兄弟模块的路径（兄弟互相 `use` 会让依赖关系变成一张网）。
 pub(crate) use self::input::{hk_matches_or_ctrl, shot_edit_entry};
-pub(crate) use self::record::{draw_rec_countdown, rec_countdown_next_change_ms, REC_COUNTDOWN_MS};
+pub(crate) use self::record::{
+    draw_countdown_banner, rec_countdown_next_change_ms, REC_COUNTDOWN_MS,
+};
 pub(crate) use self::sel_geom::{apply_zone, clamp_sel, sel_rect};
 pub(crate) use self::snap_flow::timestamp;
 
@@ -71,7 +74,7 @@ use crate::runtime::shot_edit::ShotEdit;
 pub mod snap;
 use crate::ui::model::PanelModel;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use windui::prelude::Sender;
 
@@ -178,8 +181,35 @@ pub struct Runtime {
     pub clipboard: ClipboardModule,
     pub clock: FrameClock,
     pub draw_list: DrawList,
+    /// ★ 直播合成窗的第二份绘制指令（m82 B1）：按 `config.live.route_virtual_keyboard`
+    /// 把虚拟键盘画进来，由 `layer/live_window.rs` 渲到普通窗。与桌面 `draw_list`
+    /// 同生命周期（render() 开头一起清空）。
+    pub live_draw_list: DrawList,
+    /// 直播表面脏标记（m82 B4）：`render()` 每重算一次 `live_draw_list` 置一次，
+    /// 由合成窗的 33ms 轮询排空后跨窗失效。**为什么走标记而不是直接失效**：呈现上限
+    /// 归一到 30fps，且节流吞掉的那一帧不会丢——标记留在原地等下一拍，淡出收尾帧
+    /// 必定落地（否则直播画面上会永久留一颗亮键）。
+    pub live_frame_pending: Cell<bool>,
+    /// 直播捕获窗的**世界物理原点**（m82 B6）：画布用它把世界坐标换算进这块小窗。
+    /// 由 `layer::live_window::sync` 每拍按键盘包围盒刷新；出厂 (0,0) = 覆盖层原点，
+    /// 也就是"整块虚拟桌面 1:1"那套老语义。
+    pub live_view: Cell<(f32, f32)>,
+    /// 浏览器源的最新一帧（m83）。HTTP 线程只认这个槽，渲染线程每排空一次脏标记就发布一帧。
+    pub(crate) web_frames: std::sync::Arc<crate::runtime::layer::web_out::FrameHub>,
+    /// 本地 HTTP 服务句柄（`None` = 没在跑；`Drop` 会停 accept 并断开所有流）。
+    pub(crate) web_server: Option<crate::runtime::layer::web_out::Server>,
+    /// 端口绑定失败后的重试时刻（避免 33ms 一拍地刷日志）。
+    pub(crate) web_retry_at: Option<std::time::Instant>,
+    /// 离屏渲染用的文本引擎（浏览器源每帧都要用，别每帧新建 DWrite 工厂）。
+    pub(crate) web_text: RefCell<Option<windui::text::DWriteEngine>>,
+    /// 上一次发布的帧尺寸（只在变化时记日志，避免 30fps 刷屏）。
+    pub(crate) web_last_size: Cell<(u32, u32)>,
     pub screen: ScreenRect,
     pub config_version: u64,
+    /// 宿主身份/重扫读数（`temp/lua_tool_state.json`，MCP `host_status` 读它）。
+    started_at_ms: u64,
+    asset_revision: u64,
+    last_assets_change_ms: Option<u64>,
     /// 本帧真实光标位置（物理像素）。`frame()` 每帧用 `cursor_pos()` 刷新，喂给"光标跟随"
     /// 特效（悬浮标中心 / 拖尾头），消除"画在事件过期坐标上"的滞后。
     pub live_cursor: (f32, f32),
@@ -269,6 +299,13 @@ pub struct Runtime {
     /// 故意放 `Option<Recorder>` 而不是「运行时全局单例」：录屏生命周期由
     /// `start_recording_now` / `stop_recording_now` 显式管理（见下）。
     recorder: Option<Recorder>,
+    /// 进行中的纯录音（m81 #3；与录屏状态机完全独立，见 `platform::audio_record` 模块头）。
+    /// 即按即录、再按即停；收尾走 `finish_detached`，结论经 AUDIO_FINISH_NOTICES 回 UI。
+    audio_rec: Option<crate::platform::audio_record::AudioRecorder>,
+    /// 进行中这段录音的产物路径（随 `audio_rec` 成对存取；停止时交给收尾通知）。
+    audio_rec_path: Option<std::path::PathBuf>,
+    /// 倒计时期间暂存的录音参数（归零才开录；与录屏的 `rec_pending` 同一角色）。
+    audio_rec_opts: Option<crate::platform::audio_record::AudioRecOptions>,
     /// 上一次录制**正在收尾**（`stop_recording_now` 已受理，结论还没回来）。
     ///
     /// ★★ 为什么必须有它（2026-10-02 现场）：录制线程一旦楔在 `AcquireNextFrame`
@@ -312,6 +349,16 @@ pub struct Runtime {
     /// 录制开始前的倒计时剩余毫秒（出厂 3 秒，见 [`REC_COUNTDOWN_MS`]）。
     /// `None` = 不在倒计时。倒计时期间按停止快捷键 → 取消（不开始录制）。
     rec_countdown_ms: Option<f32>,
+    /// 倒计时上膛时刻 + 总时长（2026-11-16 晚）：remain 每帧由「真实流逝时间」重算，
+    /// 而不是逐帧扣 raw_ms —— park 长眠后唤醒那帧的 raw_ms 是整段空闲，逐帧扣会把
+    /// 3000ms 倒计时一口气扣完（横幅一帧不画直接开录 = 用户报的"没有屏幕提示"）。
+    /// 锚点语义下帧节奏/停帧都天然免疫：倒计时按真实时间走，帧只负责展示与触发。
+    rec_countdown_anchor: std::time::Instant,
+    rec_countdown_total_ms: f32,
+    /// ★ 倒计时归零后要录的是**纯录音**（m81 #3；与 `rec_pending` 的 MP4/GIF 互斥）。
+    /// 共用同一只倒计时钟与同一张横幅（2026-11-16 用户口径：全功能统一成
+    /// 「即将开始 N」，见 `draw_countdown_banner`），只是归零后的动作不同。
+    audio_pending: bool,
     /// ★ 倒计时归零后要录的东西（MP4 还是 GIF）。
     ///
     /// 倒计时是一条共用通道（录屏快捷键 / GIF 快捷键都进它），所以"录什么"必须随倒计时
@@ -382,6 +429,9 @@ pub struct Runtime {
     /// 与 `last_gif` 同一条理由：记的是我们刚亲手写出去的那一个，不靠"去目录里找最新
     /// 的 .mp4"猜（目录可能被用户塞进别的东西）。
     last_mp4: Option<std::path::PathBuf>,
+    /// 最近一次成功落盘的 M4A（录音裁剪入口的输入）。`None` = 还没录过。
+    /// 与 `last_mp4` 同一条理由：记的是我们刚亲手写出去的那一个，不靠目录猜。
+    last_audio: Option<std::path::PathBuf>,
     /// 当前选框（`gif_sel`）是给**哪种格式**用的。
     ///
     /// ★ `gif_sel` 这块选框/控件条现在是 **GIF 与选区录屏（MP4）共用**的同一套 UI
@@ -521,6 +571,36 @@ pub enum TrimRequest {
 }
 
 impl Runtime {
+    /// 把面板上「画面来源」那行回灌成「桌面」。
+    ///
+    /// ★ 面板信号只在 `PanelModel::from_config` 时读一次配置，之后**不会自己回读**；
+    ///   用户从标题栏 × 关掉那扇窗时若只改 `config.live.mode`，面板还停在「独立窗口」——
+    ///   那就是用户说的"两边不同步"。`panel` 字段是本模块私有的，回灌只能走这里。
+    pub(crate) fn panel_uncheck_live_window(&mut self) {
+        if let Some(model) = self.panel.as_mut() {
+            model.live_mode.set(0);
+        }
+    }
+
+    /// 把浏览器源**实际**在用的地址回灌到面板（端口顺延后「复制地址」才不会指错）。
+    pub(crate) fn panel_set_live_url(&mut self, url: String) {
+        if let Some(model) = self.panel.as_mut() {
+            if model.live_url.get() != url {
+                model.live_url.set(url);
+            }
+        }
+    }
+
+    /// 把浏览器源的帧尺寸回灌到面板「来源尺寸」那行（只在该行可见时才有观感意义，
+    /// 但信号的更新无条件做——面板随后再打开也是新模型，这里不处理）。
+    pub(crate) fn panel_set_live_size(&mut self, w: u32, h: u32) {
+        if let Some(model) = self.panel.as_mut() {
+            let s = format!("{w} × {h}");
+            if model.live_out_size.get() != s {
+                model.live_out_size.set(s);
+            }
+        }
+    }
     pub fn new(config: Config) -> Self {
         let screen = ScreenRect::FALLBACK;
         // 开关边沿检测的初值必须在把 `config` 移动进结构体**之前**算好：
@@ -573,9 +653,21 @@ impl Runtime {
             trail: TrailModule::new(),
             clock: FrameClock::new(),
             draw_list: DrawList::new(),
+            live_draw_list: DrawList::new(),
+            live_frame_pending: Cell::new(false),
+            live_view: Cell::new((0.0, 0.0)),
+            web_frames: crate::runtime::layer::web_out::FrameHub::new(),
+            web_server: None,
+            web_retry_at: None,
+            web_text: RefCell::new(None),
+            web_last_size: Cell::new((0, 0)),
             screen,
             // 故意与 TrailModule.last_config_version(0) 错开，保证首帧就同步一次配置。
             config_version: 1,
+            started_at_ms: host_state::now_ms(),
+            asset_revision: 0,
+            // 启动那次扫描就是"已看见"的起点：早于启动的脚本文件不该被算成 pending。
+            last_assets_change_ms: Some(host_state::now_ms()),
             live_cursor: (0.0, 0.0),
             last_presented: Cell::new((0.0, 0.0)),
             spot_prev: None,
@@ -597,6 +689,9 @@ impl Runtime {
             temp_usage: TempUsageState::new(),
             ui_tx: None,
             recorder: None,
+            audio_rec: None,
+            audio_rec_path: None,
+            audio_rec_opts: None,
             rec_finishing: false,
             rec_wedged: false,
             rec_written_seen: 0,
@@ -604,6 +699,9 @@ impl Runtime {
             rec_after_finish: None,
             rec_after_finish_crop: None,
             rec_countdown_ms: None,
+            rec_countdown_anchor: std::time::Instant::now(),
+            rec_countdown_total_ms: 0.0,
+            audio_pending: false,
             rec_pending: None,
             pending_crop: None,
             gif_sel: None,
@@ -614,6 +712,7 @@ impl Runtime {
             rec_toast: None,
             last_gif: None,
             last_mp4: None,
+            last_audio: None,
             sel_kind: RecKind::Gif,
             gif_trim_req: None,
             gif_trim_open: false,
@@ -1074,13 +1173,38 @@ impl Runtime {
             return false;
         }
         let _ = crate::platform::dir_watch::take_dirty();
-        let Some(model) = self.panel.as_mut() else {
-            return false;
-        };
-        let n = model.reload_lua_cards(&self.config, &self.lua_ext_dir);
-        model.reload_asset_lists(&self.config);
-        log::info!("assets 目录变化 → 自动刷新脚本 {n} 项 + 资产下拉");
+        self.asset_revision = self.asset_revision.wrapping_add(1);
+        self.last_assets_change_ms = Some(host_state::now_ms());
+        // ★ m86：先让**正在运行的实例**热重载（面板没开时这步也要跑）。脚本页的下拉只是
+        //   "能选到什么"，实例才是"屏幕上正在发生什么"；AI 改脚本时用户多半关着面板。
+        let reloaded = self.trail.reload_assets();
+        let mut cards = 0;
+        if let Some(model) = self.panel.as_mut() {
+            cards = model.reload_lua_cards(&self.config, &self.lua_ext_dir);
+            model.reload_asset_lists(&self.config);
+        }
+        self.write_host_state();
+        log::info!(
+            "assets 目录变化 → 热重载 {reloaded} 个实例 + 刷新脚本 {cards} 项（面板{}）",
+            if self.panel.is_some() {
+                "打开"
+            } else {
+                "未开"
+            }
+        );
         true
+    }
+
+    /// 写宿主状态快照（启动 / 资产重扫 / 面板开关时调用；不做周期心跳）。
+    pub fn write_host_state(&self) {
+        let snapshot = serde_json::json!({
+            "started_at_ms": self.started_at_ms,
+            "asset_revision": self.asset_revision,
+            "last_assets_change_ms": self.last_assets_change_ms,
+            "panel_open": self.panel.is_some(),
+            "hot_reload": ["MouseTrail", "HoverDot", "ClickFx", "KeySound", "scripts"],
+        });
+        let _ = host_state::write(&crate::core::paths::app_dir(), snapshot);
     }
 
     /// 快捷键触发的脚本运行：后台线程脱手执行（结果自弹，阻塞 HTTP 不碰 UI 线程）。
@@ -1115,11 +1239,25 @@ impl PanelHost for Runtime {
     }
 
     fn open_panel(&mut self, model: PanelModel) {
+        // 浏览器源的「来源尺寸」初值：面板模型不持有键盘模块，这里按当前包围盒填一次；
+        // 之后键盘换方案/改尺寸时由发布路径回灌（见 `panel_set_live_size`）。
+        if let Some((w, h)) =
+            crate::runtime::layer::web_out::output_size(&self.vk, &self.config.virtual_keyboard)
+        {
+            model.live_out_size.set(format!("{w} × {h}"));
+        }
+        // 「复制地址」用**实际**在用的端口（首选被占时服务会顺延）。
+        let url = match self.web_server.as_ref() {
+            Some(srv) => format!("http://127.0.0.1:{}/", srv.port()),
+            None => self.config.live.browser_url(),
+        };
+        model.live_url.set(url);
         self.panel = Some(model);
         // 面板每次打开都是一套全新的信号，其中可能包含与"当前配置"一致的初值；
         // 清掉脏标记，避免刚打开就白写一次盘。
         self.panel_dirty = false;
         self.panel_last_save_ms = 0;
+        self.write_host_state();
     }
 
     fn update_state(&self) -> UpdateState {
@@ -1208,6 +1346,31 @@ function run(ctx) return \"ok\" end
         let _ = crate::platform::dir_watch::take_dirty();
         assert!(!rt.refresh_assets_if_changed());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★ m86：资产变化必须先让**正在运行的实例**热重载，再考虑刷面板。
+    /// 面板没开时旧实现直接 `return false`，用户关着面板看效果时 AI 改脚本永远不生效。
+    #[test]
+    fn asset_change_reloads_running_scripts_before_touching_the_panel() {
+        let src = include_str!("mod.rs");
+        // 只看生产段：断言文本自己就含这两个标识符，不切掉测试段等于自己证明自己。
+        let src = &src[..src
+            .find(
+                "
+#[cfg(test)]
+mod tests",
+            )
+            .unwrap_or(src.len())];
+        let take = src.find("dir_watch::take_dirty()").expect("应能取脏标记");
+        let reload = src
+            .find("self.trail.reload_assets()")
+            .expect("资产变化必须调用 TrailModule::reload_assets");
+        let panel = src[take..]
+            .find("self.panel.as_mut()")
+            .map(|i| take + i)
+            .expect("后面才轮到面板刷新");
+        assert!(take < reload, "先取脏标记，再重载实例");
+        assert!(reload < panel, "实例热重载必须排在面板刷新之前");
     }
 
     /// ★ 2026-10-29 用户口径：监听**整个 `assets/`**，不只 `assets/lua`——往

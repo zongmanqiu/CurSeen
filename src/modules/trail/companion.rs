@@ -205,10 +205,10 @@ impl Companion {
 
     /// 热重载检查：脚本文件 (mtime, 字节数) 变了 → 重建 VM、重放参数（脚本状态清零，
     /// 与 `EngineCache` 的热更新语义一致）。
-    pub fn ensure_fresh(&mut self) {
+    pub fn ensure_fresh(&mut self) -> bool {
         let (mtime, len) = file_stamp(&self.root.join(format!("{}.lua", self.id)));
         if mtime == self.mtime && len == self.len {
-            return;
+            return false;
         }
         let params = std::mem::take(&mut self.params);
         let fresh = Self::load_in(&self.root, &self.id);
@@ -224,6 +224,7 @@ impl Companion {
         self.fault_logged = fresh.fault_logged;
         self.params = params;
         log::info!("复合脚本 {} 已热重载（文件改动生效）", self.id);
+        true
     }
 
     /// 注入该实例的参数表（缺键由脚本内 `params.x or 默认` 兜底）。
@@ -505,11 +506,15 @@ impl CompanionHost {
         }
     }
 
-    /// 热重载检查（每 tick 一次；代价 = 每实例一次 stat）。
-    pub fn ensure_fresh(&mut self) {
+    /// 热重载检查（每 tick 一次；代价 = 每实例一次 stat）。返回真重载的实例数。
+    pub fn ensure_fresh(&mut self) -> usize {
+        let mut n = 0;
         for c in &mut self.instances {
-            c.ensure_fresh();
+            if c.ensure_fresh() {
+                n += 1;
+            }
         }
+        n
     }
 
     /// 鼠标采样分发：真实点 + 快移插值点（与轨迹类特效同密度，复合拖尾不断线）。

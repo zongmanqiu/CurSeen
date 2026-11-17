@@ -462,6 +462,21 @@ pub struct ScreenshotSettings {
     pub pin_ring_cap: usize,
 }
 
+/// 纯录音（M4A）设置——m81 §3 拍板的最小面。2026-11-16 用户口径修订：不再独立开卡、
+/// 也不再设独立开关——「仅录音」作为一行快捷键放进「视频录制 > 快捷键」子卡；
+/// ★★ **不受 `record.enabled` 管辖**（2026-11-16 晚实测拍板：录音是独立功能，
+/// 用户关掉视频录制卡后仅录音照常工作），热键留空即停用；音源/降噪沿用同卡
+/// 「声音」子卡的 `record.record_mic / record_speaker / mic_denoise`（降噪就在眼前，
+/// 不用两头找）。
+/// ★ 封装格式只有 m4a 一档：WAV 选项当日提出当日撤销（用户："特地多一个选项根本
+///   没必要"），字段不保留，旧配置里的 `format` 键被 serde 静默忽略。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AudioRecordSettings {
+    /// 仅录音快捷键（**开始 / 停止**一键开关，3 秒倒计时后开录）。空串 = 停用。
+    #[serde(default)]
+    pub hotkey: String,
+}
+
 /// 屏幕录制设置。
 ///
 /// ★ 2026-09-19（用户口径）：录制快捷键改**一键开关** —— 按一下开始（3 秒倒计时后录），
@@ -553,6 +568,10 @@ pub struct RecordSettings {
     /// 列表由 `audio_capture::list_speaker_devices` 提供。
     #[serde(default)]
     pub speaker_device: String,
+    /// 纯录音（M4A；屏幕页第四卡，m81 #3）：只收开关与一键开关快捷键，
+    /// 音源/降噪沿用本结构体的 `record_mic / record_speaker / mic_denoise`。
+    #[serde(default)]
+    pub audio: AudioRecordSettings,
 }
 
 /// 音频来源的**三态**：`None` = 关闭；`Some("")` = 跟随系统默认；`Some(名)` = 指定设备。
@@ -773,8 +792,202 @@ pub struct GeneralSettings {
     /// 自然回到普通（普通重启反而会继承管理员权限——这是绕开它的原因）。
     #[serde(default)]
     pub admin_launch: bool,
+    /// ★ 录制倒计时桌面横幅（2026-11-16 用户拍板“全部统一成『即将开始 N』+ 可关”）：
+    /// 录屏 / GIF / 录音开录前的居中横幅。勾选（出厂）= 画「即将开始 3/2/1」；
+    /// 不勾 = 照常 3 秒等待与可取消语义，只是不在桌面画横幅（有的用户不想要桌面大字）。
+    /// 三个录制功能共用这一个开关 —— 提示函数也只有唯一一个入口（见 `draw_countdown_banner`）。
+    #[serde(default = "default_true")]
+    pub show_countdown: bool,
 }
 
+// 直播捕获窗的抠图底色：**出厂黑**（2026-11-17 用户拍板：给颜色选择器，默认黑，
+// 剩下让用户自己选；透明度那条路不提供——窗口捕获不吃 alpha，见 `live_window` 模块头）。
+//
+// ★ 实测代价要写在这里，别让用户自己踩：黑会撞键帽自身的近黑像素，色键一刀下去
+//   连键盘一起抠穿（同日用户实测；NohBoard 的出厂底色是深蓝 `0,0,100`，
+//   `Keyboard\KeyboardStyle.cs:62`，就是为了避开这一撞）。所以《配置说明》里那句
+//   "键色与底色撞了就把底色换掉"是真话，不是免责条款。
+/// 虚拟键盘画在哪个表面上（m82 B15 三选一）。
+///
+/// 2026-11-17 用户口径：三个开关/互斥关系要收成**一个选择**——「键盘画在哪」同一时刻
+/// 只有一个答案；「桌面 / 独立窗口 / 浏览器源」是它的三个取值。
+///
+/// ★ 枚举名与 JSON 值**别按旧字段名理解**：B6 的 `enabled`（窗）与 m83 的 `browser`
+///   两个布尔已被本枚举取代，老配置在 [`Config::load`] 里一次性迁过来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveMode {
+    /// 出厂：键盘画在桌面覆盖层上（与不直播时完全一致）。
+    #[default]
+    Desktop,
+    /// 独立窗口：键盘搬进 `CurSeen 虚拟键盘` 那扇普通小窗，直播软件用「窗口捕获」抓它。
+    Window,
+    /// 浏览器源：本机 HTTP 服务，直播软件里加「浏览器源」→ 透明画面，桌面不出窗。
+    Browser,
+}
+
+impl LiveMode {
+    /// 面板下拉/分段控件用的下标顺序（也是迁入迁出的唯一映射）。
+    pub const ALL: [LiveMode; 3] = [LiveMode::Desktop, LiveMode::Window, LiveMode::Browser];
+
+    pub fn index(self) -> usize {
+        match self {
+            LiveMode::Desktop => 0,
+            LiveMode::Window => 1,
+            LiveMode::Browser => 2,
+        }
+    }
+
+    /// 越界（手改配置/旧下标）回出厂「桌面」——那是最安全的一个：什么都不建、不监听。
+    pub fn from_index(i: usize) -> Self {
+        Self::ALL.get(i).copied().unwrap_or_default()
+    }
+}
+
+/// 直播捕获设置（m82）。
+///
+/// 2026-11-17 用户口径（B6 收口）：**没有"桌面也画一份"**——同一份键盘画两遍没有意义：
+/// **画面里只需要出现一次**。所以任一呈现面开着 = 键盘从覆盖层**搬进**那个表面；
+/// 回到 [`LiveMode::Desktop`] = 搬回覆盖层（出厂形态）。
+///
+/// 字段拆除史（老配置里这些键一律被 serde 忽略，不需要迁移代码）：B1 的 `mode`/`offset_*`
+/// （摆放三模式）、B2 的 `route_trail`/`route_hover`/`route_key_display`（多单元路由）、
+/// B2.7 删掉的 `bg_color`（**B6 又加回来了**——当初删它建立在"底色必然是黑"这个错前提上）、
+/// B6 删掉的 `route_virtual_keyboard`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveLayerSettings {
+    /// 键盘画在哪：桌面 / 独立窗口 / 浏览器源（三选一，见 [`LiveMode`]）。
+    #[serde(default, deserialize_with = "de_live_mode")]
+    pub mode: LiveMode,
+    /// 独立窗口**被用户拖到哪儿**（物理像素）。`[-1, -1]` = 没拖过，出厂按键盘包围盒摆。
+    /// ★ 为什么要落盘：不记的话每次开窗都跳回键盘原位，用户刚拖好的位置白丢——
+    ///   而这块画板会挡住它那一块的鼠标，"摆到不碍事的地方"是它的正常用法。
+    #[serde(default = "default_live_pos")]
+    pub pos: [i32; 2],
+    /// 独立窗口的**等比放大**倍数（1.0 = 键盘实际大小；0.5–3.0，出厂 1.0）。
+    /// ★ 为什么需要：窗口捕获抓的是这扇窗的**实际像素**，直播里再拉大只会把像素放大、
+    ///   越拉越糊（用户实测：放大尺寸没有改善）。要清晰只能让窗口本身更大——本程序按
+    ///   这个倍数把键盘**重新矢量渲染**到更大的窗口里，抓到的就是大尺寸原图。
+    #[serde(default = "default_live_window_scale")]
+    pub window_scale: f32,
+    /// 抠图底色（RGB + 固定不透明）。alpha 位保留只为与其它颜色字段同形（`[u8; 4]`），
+    /// 面板上的选择器**不带透明度滑杆**，写回时一律钉 255。
+    #[serde(default = "default_live_bg", deserialize_with = "de_live_bg")]
+    pub bg: [u8; 4],
+    /// 浏览器源**首选**端口（只绑 `127.0.0.1`，不对外）。首选被别的程序占用时服务会
+    /// 自动顺延到后面的端口（见 `web_out::PORT_FALLBACKS`），面板「复制地址」复制的是
+    /// **实际**在用的地址。
+    #[serde(default = "default_browser_port")]
+    pub browser_port: u16,
+}
+
+/// 独立窗口缩放的取值范围（面板滑条与配置夹取共用这一份）。
+pub const LIVE_WINDOW_SCALE_MIN: f32 = 0.5;
+pub const LIVE_WINDOW_SCALE_MAX: f32 = 3.0;
+
+impl Default for LiveLayerSettings {
+    fn default() -> Self {
+        Self {
+            mode: LiveMode::Desktop,
+            pos: default_live_pos(),
+            window_scale: default_live_window_scale(),
+            bg: default_live_bg(),
+            browser_port: default_browser_port(),
+        }
+    }
+}
+
+fn default_live_window_scale() -> f32 {
+    1.0
+}
+
+fn default_live_pos() -> [i32; 2] {
+    [-1, -1]
+}
+
+/// 呈现方式反序列化：认不出的一律回「桌面」。
+///
+/// ★ 为什么不直接 derive：B1 那版的 `live.mode` 存过 `"hidden"` 这类值，而外部标签
+///   枚举遇到未知字符串会让**整份配置**读失败（丢的不是一个字段，是用户全部设置）。
+fn de_live_mode<'de, D>(d: D) -> std::result::Result<LiveMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v.as_str() {
+        Some("window") => LiveMode::Window,
+        Some("browser") => LiveMode::Browser,
+        _ => LiveMode::Desktop,
+    })
+}
+
+fn default_browser_port() -> u16 {
+    8765
+}
+
+fn default_live_bg() -> [u8; 4] {
+    [0, 0, 0, 255]
+}
+
+/// 底色反序列化：新格式是 `[r,g,b]` / `[r,g,b,a]` 数组；**老格式是字符串**
+/// （B6~B9 那几版存的是 "blue"/"green"/"magenta"）。
+/// ★ 必须兼容：用户手上的 config.json 里就是 `"bg": "blue"`，直接按数组解会让**整份配置**
+///   读失败。认不出的值（含写歪的字符串）回默认黑，不报错。
+fn de_live_bg<'de, D>(d: D) -> std::result::Result<[u8; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(d)?;
+    let byte = |x: &serde_json::Value| x.as_u64().map(|n| n.min(255) as u8).unwrap_or(0);
+    Ok(match v {
+        serde_json::Value::Array(a) if a.len() >= 3 => [
+            byte(&a[0]),
+            byte(&a[1]),
+            byte(&a[2]),
+            if a.len() >= 4 { byte(&a[3]) } else { 255 },
+        ],
+        serde_json::Value::String(s) => match s.as_str() {
+            // "blue" 是深蓝那一档（0,0,100），不是纯蓝——那是 B6~B9 的实际取值。
+            "green" => [0, 255, 0, 255],
+            "magenta" => [255, 0, 255, 255],
+            "blue" => [0, 0, 100, 255],
+            _ => default_live_bg(),
+        },
+        _ => default_live_bg(),
+    })
+}
+
+impl LiveLayerSettings {
+    /// 独立窗口该不该存在。
+    pub fn window_active(&self) -> bool {
+        self.mode == LiveMode::Window
+    }
+
+    /// 浏览器源该不该在跑。
+    pub fn browser_active(&self) -> bool {
+        self.mode == LiveMode::Browser
+    }
+
+    /// 有没有任何一个直播呈现面开着（独立窗口 / 浏览器源）。
+    pub fn any_surface(&self) -> bool {
+        self.mode != LiveMode::Desktop
+    }
+
+    /// 虚拟键盘要不要画在桌面覆盖层上。★ 与 [`any_surface`](Self::any_surface) 严格互斥：
+    ///   同一份键盘只出现在一个表面上（用户口径"画面里只需要出现一次"）。
+    pub fn draws_on_desktop(&self) -> bool {
+        self.mode == LiveMode::Desktop
+    }
+
+    /// 面板要展示、用户要复制的那条地址。**必须带 `http://` 前缀**：直播姬在地址没写
+    /// 协议时会自动补 `https://`，而本服务只有 HTTP——补成 https 的那一刻页面直接
+    /// 加载失败、画面全空（2026-11-17 真机实测：`handshake failed net_error -100`）。
+    pub fn browser_url(&self) -> String {
+        format!("http://127.0.0.1:{}/", self.browser_port)
+    }
+}
 /// 面板上**可折叠卡片**的 id 全集——展开态要落盘的就是这些（见 [`UiSettings::expanded`]）。
 ///
 /// 命名规则：顶层卡用裸名（`trail`），子卡用 `<父卡>.<键>`（`key_display.pos`）。
@@ -782,7 +995,7 @@ pub struct GeneralSettings {
 /// 下拉，参数在子卡正文——平铺行的参数段没有视觉分隔，用户拍板回子卡），5 个
 /// `ripple.<键>` id 回归；声音卡没有每键参数，保持平铺单卡，`sound.<键>` 仍退役。
 /// 老配置里残留的展开键（含 `sound.<键>`）被 serde 原样保留，`ripple.<键>` 直接复活。
-pub const CARD_IDS: [&str; 43] = [
+pub const CARD_IDS: [&str; 44] = [
     // 鼠标页（拖尾 / 悬浮标 / 点击效果 / 点击声音；分类判据 = 操作对象是鼠标，
     // 见 `ui::nav` 头注释。★ 卡片搬家不换 id：id 只管展开态落盘，与所属页无关）
     "trail",
@@ -820,12 +1033,13 @@ pub const CARD_IDS: [&str; 43] = [
     "record.video.hotkey",
     "record.video.image",
     "record.video.audio",
-    // 键盘页 · 虚拟键盘（父卡 + 四张子卡）
+    // 键盘页 · 虚拟键盘（父卡 + 五张子卡；「直播捕获」= m82，合成窗唯一入口）
     "virtual_keyboard",
     "virtual_keyboard.pos",
     "virtual_keyboard.window",
     "virtual_keyboard.look",
     "virtual_keyboard.color",
+    "virtual_keyboard.live",
     // 设置页（id 前缀 global. 为历史遗留；global.timer 计时器卡现挂工具页，id 保留）
     // ★ 2026-10-07：「功能开关」卡（原「模块开关」+「脚本开关」两张卡合并，正文分两段）
     //   与「快捷键」卡（原「快捷键」+「脚本快捷键」合并）**各只留一个展开态**——
@@ -2072,6 +2286,10 @@ pub struct Config {
     /// GIF录制（屏幕页顶层卡之二）。与录屏共用采集管线。
     #[serde(default)]
     pub gif: GifSettings,
+    /// 直播图层窗（m82）：第二块画布，可屏外摆放给直播软件窗口捕获；
+    /// 各效果按路由表决定画进桌面 / 直播 / 两者。
+    #[serde(default)]
+    pub live: LiveLayerSettings,
     /// 虚拟键盘（「键盘」页，与击键回显并列）。
     #[serde(default)]
     pub virtual_keyboard: VirtualKeyboardSettings,
@@ -2430,6 +2648,9 @@ impl Default for RecordSettings {
             mic_denoise: default_mic_denoise(),
             mic_device: String::new(),
             speaker_device: String::new(),
+            // 纯录音：无独立开关字段，热键空串 = 停用（出厂留空即"关"）；且不受
+            // record.enabled 管辖（2026-11-16 晚实测拍板，见 AudioRecordSettings 注释）。
+            audio: AudioRecordSettings::default(),
         }
     }
 }
@@ -2972,7 +3193,7 @@ impl Config {
     /// 与 [`Self::migrate_snap_hotkey_shadowing`] 同一套纪律：无条件、幂等、清空即停用
     /// （不给用户硬塞新键位），每次启动都跑。
     pub fn sanitize_global_hotkeys(&mut self) {
-        let fields: [(&'static str, &mut String); 15] = [
+        let fields: [(&'static str, &mut String); 16] = [
             ("截图", &mut self.screenshot.hotkey),
             ("截图后贴图", &mut self.screenshot.hotkey_pin),
             ("贴图", &mut self.screenshot.hotkey_pin_clipboard),
@@ -2981,6 +3202,7 @@ impl Config {
             ("视频录制", &mut self.record.hotkey),
             ("选区录屏", &mut self.record.region_hotkey),
             ("视频裁剪", &mut self.record.trim_hotkey),
+            ("录音", &mut self.record.audio.hotkey),
             ("GIF 录制", &mut self.gif.hotkey),
             ("GIF 裁剪", &mut self.gif.trim_hotkey),
             ("剪贴板", &mut self.clipboard.hotkey),
@@ -3082,6 +3304,35 @@ impl Config {
         k.to_ascii_lowercase().contains("color")
     }
 
+    /// `live.enabled` / `live.browser`（两个布尔）→ `live.mode`（三选一）。
+    ///
+    /// 只在 `live.mode` 不存在时迁移；旧键一并删掉（新结构已不认它们，留着只是噪音）。
+    /// 返回是否改动——改动过就要落盘，否则下次启动还得再迁一遍。
+    fn migrate_live_mode(v: &mut Value) -> bool {
+        let Some(live) = v.get_mut("live").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        if live.contains_key("mode") {
+            return false;
+        }
+        let take = |live: &mut serde_json::Map<String, Value>, k: &str| {
+            live.remove(k).and_then(|x| x.as_bool()).unwrap_or(false)
+        };
+        let browser = take(live, "browser");
+        let window = take(live, "enabled");
+        let mode = if browser {
+            LiveMode::Browser
+        } else if window {
+            LiveMode::Window
+        } else {
+            LiveMode::Desktop
+        };
+        let name = serde_json::to_value(mode).unwrap_or(Value::String("desktop".into()));
+        live.insert("mode".into(), name);
+        log::info!("config.json 的 live 呈现方式已迁移为 mode={mode:?}");
+        true
+    }
+
     /// 递归轮转 JSON 里的颜色串，返回改动处数。
     fn migrate_color_hex_in_value(v: &mut Value, n: &mut usize) {
         match v {
@@ -3126,22 +3377,27 @@ impl Config {
                     // ★ 一次性迁移：8 位颜色串 #AARRGGBB → #RRGGBBAA。
                     //   在 **JSON 层**做，只动文件里真实存在的键 —— serde 为缺字段补的
                     //   出厂默认值（已是新口径）不会经过这里，不会被误轮转。
-                    let migrated = if v.get("color_hex_v2").and_then(Value::as_bool) == Some(true) {
-                        false
-                    } else {
-                        let mut n = 0usize;
-                        Self::migrate_color_hex_in_value(&mut v, &mut n);
-                        if let Some(obj) = v.as_object_mut() {
-                            obj.insert("color_hex_v2".into(), Value::Bool(true));
-                        }
-                        if n > 0 {
-                            log::warn!(
-                                "config.json 里的 8 位颜色串已按 #RRGGBBAA 重排（{n} 处）：\
+                    let mut migrated =
+                        if v.get("color_hex_v2").and_then(Value::as_bool) == Some(true) {
+                            false
+                        } else {
+                            let mut n = 0usize;
+                            Self::migrate_color_hex_in_value(&mut v, &mut n);
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("color_hex_v2".into(), Value::Bool(true));
+                            }
+                            if n > 0 {
+                                log::warn!(
+                                    "config.json 里的 8 位颜色串已按 #RRGGBBAA 重排（{n} 处）：\
                              旧口径 #AARRGGBB 会让颜色悄悄变错（如 #FF000040 被读成深蓝）"
-                            );
-                        }
-                        n > 0
-                    };
+                                );
+                            }
+                            n > 0
+                        };
+                    // ★ 三选一迁移（B15）：旧的 live.enabled / live.browser 两个布尔 →
+                    //   live.mode。只在 `mode` 键**不存在**时做（幂等靠这个键）；两个都开着
+                    //   的（面板曾允许）按更"隐形"的浏览器源收口——它不在桌面上出现任何窗。
+                    migrated |= Self::migrate_live_mode(&mut v);
                     match serde_json::from_value::<Config>(v) {
                         Ok(mut cfg) => {
                             // 老配置迁移：cursor_* → 悬浮标；ripple_* → 每键波纹；sound_* → 每键声音
@@ -3607,6 +3863,132 @@ mod tests {
         );
     }
 
+    /// ★ 直播捕获（m82 B6 / B15）：出厂默认、三选一判定、底色回落、serde 与老键忽略。
+    #[test]
+    fn live_layer_defaults_and_flags() {
+        let c = Config::default();
+        // 出厂：画在桌面覆盖层上（与从前完全一致），不建窗、不监听。
+        assert_eq!(c.live.mode, LiveMode::Desktop, "出厂 = 桌面");
+        assert!(c.live.draws_on_desktop(), "出厂键盘照旧画在覆盖层上");
+        // 出厂底色 = 黑（用户拍板：给颜色选择器、默认黑、剩下他自己选）。
+        // ★ 实测代价记在字段注释里：黑会撞键帽的近黑像素，色键连键盘一起抠穿。
+        assert_eq!(c.live.bg, [0, 0, 0, 255]);
+        assert!(!c.live.window_active());
+        // 浏览器源：端口 8765；它同样把键盘从桌面拿走（任一呈现面开着都算）。
+        assert!(!c.live.browser_active());
+        assert_eq!(c.live.browser_port, 8765);
+        assert_eq!(c.live.browser_url(), "http://127.0.0.1:8765/");
+        assert!(!c.live.any_surface());
+        let web = LiveLayerSettings {
+            mode: LiveMode::Browser,
+            ..Default::default()
+        };
+        assert!(web.browser_active() && !web.window_active());
+        assert!(!web.draws_on_desktop(), "浏览器源开着 = 键盘不在桌面上画");
+
+        // ★ 只有表面三选一，不存在"两边都画"：开窗 = 键盘从覆盖层搬进窗里。
+        //   这条互锁是用户口径「画面里只需要出现一次」的落地，写歪一次就看得见两份。
+        let only_live = LiveLayerSettings {
+            mode: LiveMode::Window,
+            ..Default::default()
+        };
+        assert!(only_live.window_active());
+        assert!(
+            !only_live.draws_on_desktop(),
+            "开着直播窗时覆盖层不该再画一遍键盘"
+        );
+        assert_ne!(
+            only_live.window_active(),
+            only_live.draws_on_desktop(),
+            "两个表面必须严格互斥：恰好一边画"
+        );
+        // 下标映射（面板分段控件 ↔ 配置）必须一一对应，越界回桌面。
+        for (i, m) in LiveMode::ALL.iter().enumerate() {
+            assert_eq!(m.index(), i, "index 必须与 ALL 同序");
+            assert_eq!(LiveMode::from_index(i), *m);
+        }
+        assert_eq!(LiveMode::from_index(99), LiveMode::Desktop, "越界回桌面");
+        // 底色兼容：老格式（B6~B9 存的 "blue"/"green"/"magenta" 字符串）与新格式
+        // （数组）都要能读，且**整份配置不能因为这一个字段解不开而失败**——那会让用户
+        // 所有设置一起丢，不是一个字段回默认值的小事。认不出的值回默认黑。
+        for (src, want) in [
+            (r#"{"bg":"blue"}"#, [0u8, 0, 100, 255]),
+            (r#"{"bg":"green"}"#, [0, 255, 0, 255]),
+            (r#"{"bg":"magenta"}"#, [255, 0, 255, 255]),
+            (r#"{"bg":[255,128,0]}"#, [255, 128, 0, 255]),
+            (r#"{"bg":[10,20,30,200]}"#, [10, 20, 30, 200]),
+            (r#"{"bg":"chartreuse"}"#, [0, 0, 0, 255]),
+            (r#"{"bg":12}"#, [0, 0, 0, 255]),
+        ] {
+            let parsed: LiveLayerSettings =
+                serde_json::from_str(src).unwrap_or_else(|e| panic!("{src} 解不开: {e}"));
+            assert_eq!(parsed.bg, want, "{src}");
+        }
+
+        // 模式值：三种写法都认，认不出的（含 B1 时代存的 "hidden"）回桌面而**不报错**。
+        for (src, want) in [
+            (r#"{"mode":"desktop"}"#, LiveMode::Desktop),
+            (r#"{"mode":"window"}"#, LiveMode::Window),
+            (r#"{"mode":"browser"}"#, LiveMode::Browser),
+            (r#"{"mode":"hidden"}"#, LiveMode::Desktop),
+            (r#"{"mode":7}"#, LiveMode::Desktop),
+        ] {
+            let parsed: LiveLayerSettings = serde_json::from_str(src).unwrap();
+            assert_eq!(parsed.mode, want, "{src}");
+        }
+
+        // 位置：默认 [-1,-1] = 没拖过（按键盘包围盒摆）；老配置里缺这个键也必须解得出默认，
+        // 不能整份读失败（丢的不是一个字段，是用户所有设置）。
+        assert_eq!(c.live.pos, [-1, -1]);
+        let no_pos: LiveLayerSettings = serde_json::from_str(r#"{"mode":"window"}"#).unwrap();
+        assert_eq!(no_pos.pos, [-1, -1], "老配置缺 pos 键要回默认");
+        let dragged: LiveLayerSettings =
+            serde_json::from_str(r#"{"mode":"window","pos":[640,180]}"#).unwrap();
+        assert_eq!(dragged.pos, [640, 180]);
+
+        // serde 往返（含非默认值）。
+        let s = serde_json::to_string(&only_live).unwrap();
+        let back: LiveLayerSettings = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, only_live);
+
+        // 历史键（B6 拆掉的三选路由、B2.7 拆掉的摆放模式与底色下拉）只能被静默忽略，
+        // 不许在新旧之间偷偷改语义——老配置不该让键盘突然消失或多出一扇窗。
+        let legacy = r#"{"route_virtual_keyboard":"live","bg_color":"black","offset_x":200}"#;
+        let parsed: LiveLayerSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed, LiveLayerSettings::default(), "老键一律忽略");
+    }
+
+    /// ★ B15 迁移：旧的 `live.enabled` / `live.browser` 两个布尔 → `live.mode`。
+    /// 幂等（有 `mode` 就不再动）、旧键删干净、两个都开时按浏览器源收口。
+    #[test]
+    fn live_mode_migrates_from_booleans() {
+        let mut v: Value = serde_json::json!({"live": {"enabled": false, "browser": true}});
+        assert!(Config::migrate_live_mode(&mut v), "该迁");
+        let live = v.get("live").unwrap();
+        assert_eq!(live["mode"], "browser");
+        assert!(live.get("enabled").is_none() && live.get("browser").is_none());
+
+        let mut v: Value = serde_json::json!({"live": {"enabled": true, "browser": false}});
+        assert!(Config::migrate_live_mode(&mut v));
+        assert_eq!(v["live"]["mode"], "window");
+
+        let mut v: Value = serde_json::json!({"live": {"enabled": false, "browser": false}});
+        assert!(Config::migrate_live_mode(&mut v), "没开任何表面也要落 mode");
+        assert_eq!(v["live"]["mode"], "desktop");
+
+        let mut v: Value = serde_json::json!({"live": {"enabled": true, "browser": true}});
+        assert!(Config::migrate_live_mode(&mut v));
+        assert_eq!(v["live"]["mode"], "browser", "两个都开时按更隐形的浏览器源");
+
+        // 幂等：已有 mode 时不再改，也不重新插入旧键。
+        let mut v: Value = serde_json::json!({"live": {"mode": "window", "enabled": true}});
+        assert!(!Config::migrate_live_mode(&mut v), "有 mode 就不动");
+
+        // 没有 live 段（全新/极老配置）不报错。
+        let mut v: Value = serde_json::json!({});
+        assert!(!Config::migrate_live_mode(&mut v));
+    }
+
     /// ★ 卡片 id 的命名规则：子卡必须叫 `<父卡>.<BUTTON_KEYS 里的键>`。
     /// 面板是用 `format!("ripple.{key}")` 拼 id 去取展开信号的，两边一旦写歪，
     /// 展开态就会静默读不到/写不进（不报错，只是永远还原不了现场）。
@@ -3772,11 +4154,11 @@ mod tests {
         assert!(!cfg.ui.expanded.is_empty(), "作废键应被原样保留");
     }
 
-    /// 键盘页的卡片总数：**2 张功能父卡 + 7 张子卡 = 9**（击键回显 3 张、虚拟键盘 4 张）。
+    /// 键盘页的卡片总数：**2 张功能父卡 + 8 张子卡 = 10**（击键回显 3 张、虚拟键盘 5 张）。
     ///
     /// 单看上面两条用例，漏掉一张卡、或多插一张卡都不会被抓住（它们只断言"该在的在"）。
     /// 这条从**数量与集合**侧收紧：父卡 2 张，子卡数与各自的参数面一一对应 ——「击键回显」三张
-    /// （位置 / 显示 / 颜色）、「虚拟键盘」四张（位置 / 窗口行为 / 显示 / 颜色）。
+    /// （位置 / 显示 / 颜色）、「虚拟键盘」五张（位置 / 窗口行为 / 显示 / 颜色 / 直播捕获）。
     #[test]
     fn keyboard_page_has_two_parents_with_three_and_four_subcards() {
         let mut page: Vec<&str> = CARD_IDS
@@ -3794,13 +4176,14 @@ mod tests {
                 "key_display.pos",
                 "virtual_keyboard",
                 "virtual_keyboard.color",
+                "virtual_keyboard.live",
                 "virtual_keyboard.look",
                 "virtual_keyboard.pos",
                 "virtual_keyboard.window",
             ],
-            "键盘页卡片集合变了：应为 2 张父卡 + 7 张子卡（3 + 4）"
+            "键盘页卡片集合变了：应为 2 张父卡 + 8 张子卡（3 + 5）"
         );
-        for (parent, want) in [("key_display", 3usize), ("virtual_keyboard", 4usize)] {
+        for (parent, want) in [("key_display", 3usize), ("virtual_keyboard", 5usize)] {
             let kids = page
                 .iter()
                 .filter(|id| id.starts_with(&format!("{parent}.")))
@@ -3837,7 +4220,7 @@ mod tests {
                 "record.video.hotkey",
                 "record.video.image",
             ],
-            "抓取录制三卡集合变了：应为 3 张顶层卡，「视频录制」下 3 张子卡"
+            "抓取录制三卡集合变了：应为 3 张顶层卡，「视频录制」下 3 张子卡（仅录音是卡内一行，不是卡——2026-11-16 用户口径）"
         );
         // 三张顶层卡：`record.<name>` 且不再带 `.` 的（子卡是 `record.video.<x>`）。
         let tops = page
@@ -4908,6 +5291,8 @@ mod tests {
     static HOOK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static HOOK_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
     static HOOK_DIR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    /// 这两个用例共用同一组全局钩子；并行跑会把调用计数叠加成 "2 != 1"。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fake_dir_sync(dir: &Path) -> bool {
         HOOK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4920,6 +5305,7 @@ mod tests {
     /// 四步都要真的发生：内容逐字节一致、临时文件不留残骸、父目录被同步过。
     #[test]
     fn durable_write_syncs_file_and_dir() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("curseen_test_durable");
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("config.json");
@@ -4957,6 +5343,7 @@ mod tests {
     /// 目录 fsync 失败**不得**让保存失败——它是锦上添花的一步。
     #[test]
     fn durable_write_survives_dir_sync_failure() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("curseen_test_durable_fail");
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("config.json");

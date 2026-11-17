@@ -255,6 +255,31 @@ pub fn ansi_to_string(bytes: &[u8]) -> String {
     }
 }
 
+/// 进程是否仍然存活（只用于读宿主状态文件；不做权限提升）。
+///
+/// 判据 = `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 成功且退出码为 `STILL_ACTIVE`。
+/// 对同权限/低权限进程通常有效；打不开（已退出或权限不足）一律按"不在"处理——状态文件
+/// 是旁路读数，宁可报 `running:false` 也不猜。
+pub fn pid_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: 句柄成功返回后由本函数关闭；`code` 是栈上有效的 u32。
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code).is_ok();
+        let _ = CloseHandle(h);
+        ok && code == STILL_ACTIVE.0 as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

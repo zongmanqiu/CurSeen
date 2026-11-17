@@ -478,6 +478,9 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
 
     // 把通道交给 Runtime：更新线程要用它把结果送回 UI 线程。
     runtime.borrow_mut().set_ui_tx(ui_tx.clone());
+    // 宿主状态文件（m86）：MCP `host_status` 靠它判断"宿主在不在、上次资产重扫是什么时候"。
+    // 只在启动/资产变化/面板开关时写，不跑心跳。
+    runtime.borrow().write_host_state();
     // ★ 同一份通道再交给**进程级总线**（`core::ui_bus`）：脚本层拿不到 `Runtime`
     //   （分层是 `core ← platform ← scripting ← … ← runtime`），而 `ext:result` / `ext:input`
     //   必须能说"请 UI 线程替我开一扇窗"。总线里存的只是"怎么把一条 UiMsg 送出去"这个闭包
@@ -742,6 +745,72 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
         sync_mouse_mode(ctx, &mouse_rt, &mouse_mode_cell);
     });
 
+    // ★ 直播图层窗（m82）：33ms 轮询只做两件事 —— 开关/置顶对账，以及**排空**覆盖层
+    //   留下的直播帧脏标记（生产侧 = `frame.rs::render()` 真的重算了一遍
+    //   `live_draw_list`）。它**不**再无条件 `mark_dirty_all()`：那样即便键盘一动不动，
+    //   覆盖层与合成窗也按 30fps 各画一整块 1920×1080（零输入窗口实测中位：开着路由
+    //   单核 26%，关掉路由 0%），把「静止零功耗」这条既有语义吃掉了。要不要出帧，
+    //   交回帧门 `frame_demand()` —— 虚拟键盘的按住/淡出本来就在它的续帧名单里。
+    let live_rt = runtime.clone();
+    let live_open: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let live_click: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let live_seen_pos: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((-1, -1)));
+    let live_shape: Rc<Cell<Option<layer::live_window::Shape>>> = Rc::new(Cell::new(None));
+    let live_beat: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+    let app = app.on_interval(
+        std::time::Duration::from_millis(layer::live_window::LIVE_POLL_MS),
+        move |ctx| {
+            layer::live_window::sync(
+                ctx,
+                &live_rt,
+                &live_open,
+                &live_click,
+                &live_shape,
+                &live_beat,
+                &live_seen_pos,
+            );
+            // ★ 浏览器源（m83）：本地服务的开/关/换端口对账，与窗同一个节拍。
+            layer::web_out::sync(&live_rt);
+            // 脏标记排空后再跨窗失效：标记不会因节流而丢，收尾那一帧一定落地。
+            let produced = live_rt.borrow().live_frame_pending.replace(false);
+            if produced {
+                // 浏览器源要的是**像素**：排空这一拍顺手把 live_draw_list 渲成带 alpha
+                // 的位图发布出去（不另开定时器，也绝不在没有帧的时候空转）。
+                let resized = {
+                    let r = live_rt.borrow();
+                    if r.config.live.browser_active() {
+                        layer::web_out::publish_from(&r)
+                    } else {
+                        None
+                    }
+                };
+                if let Some((w, h)) = resized {
+                    live_rt.borrow_mut().panel_set_live_size(w, h);
+                }
+            }
+            // 浏览器源刚打开、但键盘此刻是静止的（没有新帧）⇒ 至少先发一帧出去，
+            // 否则页面会一直白屏到用户第一次敲键。
+            {
+                let resized = {
+                    let r = live_rt.borrow();
+                    if r.config.live.browser_active() && !r.web_frames.has_frame() {
+                        layer::web_out::publish_from(&r)
+                    } else {
+                        None
+                    }
+                };
+                if let Some((w, h)) = resized {
+                    live_rt.borrow_mut().panel_set_live_size(w, h);
+                }
+                // ★ 合成窗必须从外面标脏：App 级 interval 在非常驻模式下由主窗
+                //   UiHost 承载（win32 `create_window` 注释），`mark_dirty_all` 置起的
+                //   `res.repaint` 只会 `InvalidateRect` 主窗 —— 合成窗永远收不到
+                //   WM_PAINT，画面停在第一帧。同 gif_bar 的做法，按标题跨窗失效。
+                crate::platform::win_util::invalidate_by_title(layer::live_window::LIVE_TITLE);
+            }
+        },
+    );
+
     // ★ Esc 永不关闭覆盖层主窗口（修复：标注态按 Esc 退出整个软件）。
     //   windui 对未被消费的 Escape 有「关窗」兜底（`app::on_key`：
     //   `Key::Escape if resolve_close() => close = true`），而覆盖层是主 App 窗口——
@@ -859,6 +928,13 @@ pub fn run_overlay(runtime: Rc<RefCell<Runtime>>, input_rx: Receiver<InputEvent>
     // ★ 显式恢复系统指针，不依赖 `Runtime::drop`。实测 `Rc` 会被 App 的回调闭环留住，
     //   正常退出时 `Drop` 不一定执行；这里在消息循环返回后的第一行恢复，才是可靠边界。
     crate::platform::hide_cursor::ensure_shown();
+
+    // ★★ 退出前收尾进行中的录制（2026-11-16 外审接）：`stop_recording_if_any` 从
+    //   2.1.5 起一直是无调用点的死代码（真实退出路径不走它），录制中的进程退出会让
+    //   产物缺索引/缺 moov。这里就是那个"真实退出边界"：消息循环返回后、进程收尾前，
+    //   停掉视频与录音 —— 音频臂后台收尾不等待；视频臂最多等 35s（限时不挂死，
+    //   卡住的录制宁可放弃产物也不把退出拖住）。
+    runtime.borrow_mut().stop_recording_if_any();
 
     // ★ 收尾：退出时若虚拟键盘上还按着一颗键
     //   注入的"按下"会留在系统键盘状态里 —— 表现为**卡住不放的 Ctrl/Shift**，
@@ -1043,6 +1119,12 @@ fn open_rec_toast(
         .extension()
         .map(|e| e.eq_ignore_ascii_case("mp4"))
         .unwrap_or(false);
+    // ★ M4A 录音（m81 #3）也有「裁剪」：按指定路径开时间裁剪窗（窗口对音频文件
+    //   自适应：无预览画面，时间轴照常）。录音与录屏产物线分开，不吃 last_mp4。
+    let is_m4a = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("m4a"))
+        .unwrap_or(false);
     let rt_trim = rt.clone();
     let mut btns = Element::row()
         .padding_xy(0, 8)
@@ -1058,16 +1140,30 @@ fn open_rec_toast(
                 log::warn!("打开文件夹失败: {e}");
             }
         }));
-    if is_mp4 {
+    if is_m4a {
+        let trim_path = path.clone();
+        btns = btns.child(Element::button("裁剪").on_click(move |_ctx| {
+            rt_trim
+                .borrow_mut()
+                .request_mp4_trim_path(trim_path.clone());
+        }));
+    } else if is_mp4 {
         btns = btns.child(Element::button("裁剪").on_click(move |_ctx| {
             rt_trim.borrow_mut().request_mp4_trim();
         }));
     } else {
-        // ★ 不走 `request_gif_trim`（它按 `sel_kind` 转发，可能被后来的选框改道）：
-        //   提示窗对应的就是刚落盘的这份产物，按产物类型直达。
-        btns = btns.child(Element::button("裁剪").on_click(move |_ctx| {
-            rt_trim.borrow_mut().request_gif_trim_from_toast();
-        }));
+        // ★ GIF 与其它旧格式照旧直达 GIF 裁剪窗——不走 `request_gif_trim`
+        //   （它按 `sel_kind` 转发，可能被后来的选框改道）：提示窗对应的就是
+        //   刚落盘的这份产物，按产物类型直达。
+        let is_gif = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("gif"))
+            .unwrap_or(false);
+        if is_gif {
+            btns = btns.child(Element::button("裁剪").on_click(move |_ctx| {
+                rt_trim.borrow_mut().request_gif_trim_from_toast();
+            }));
+        }
     }
     log::info!("录制成功提示 @ ({x},{y})：{}", path.display());
     // ★ 窗宽固定、文本不换行 → 先按像素预算截断（字号仍用面板正文档，不降档）。

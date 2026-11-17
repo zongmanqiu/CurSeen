@@ -3,6 +3,7 @@
 pub mod ai_chat;
 pub mod audio;
 pub mod audio_capture;
+pub mod audio_record;
 pub mod capture_exclusion;
 pub mod capture_share;
 pub mod clipboard;

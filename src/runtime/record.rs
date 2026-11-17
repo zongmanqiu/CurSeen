@@ -6,7 +6,7 @@ use super::*;
 
 use std::sync::Mutex;
 
-/// 录制开始前的倒计时时长（毫秒）。用户口径：屏幕中央「即将录制 3/2/1」。
+/// 录制开始前的倒计时时长（毫秒）。用户口径：屏幕中央「即将开始 3/2/1」。
 pub(crate) const REC_COUNTDOWN_MS: f32 = 3000.0;
 
 /// 倒计时显示数字：还剩几个整秒（向上取整，3000..=2001 显示 3）。
@@ -58,34 +58,56 @@ pub fn take_finished_recordings() -> Vec<RecFinishNotice> {
         .unwrap_or_default()
 }
 
-/// 画录制倒计时：屏幕中央半透明深底条 + 白字「即将录制 N」（GIF 是「即将录制 GIF N」）。
+/// 纯录音的收尾结论槽位（m81 #3）：与 [`REC_FINISH_NOTICES`] 同一套模式——
+/// 收尾线程碰不到 `Rc<RefCell<Runtime>>`，只能经全局槽位回传，UI 帧循环取走。
+static AUDIO_FINISH_NOTICES: Mutex<Vec<(std::path::PathBuf, Result<(), String>)>> =
+    Mutex::new(Vec::new());
+
+fn push_audio_finish_notice(path: std::path::PathBuf, res: Result<(), String>) {
+    if let Ok(mut v) = AUDIO_FINISH_NOTICES.lock() {
+        v.push((path, res));
+    }
+}
+
+/// 取走全部已完成的录音收尾结论（取过即无）。
+fn take_audio_finishes() -> Vec<(std::path::PathBuf, Result<(), String>)> {
+    AUDIO_FINISH_NOTICES
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
+}
+
+/// 录音产物路径：`temp/record/audio/CurSeen_<本地时间戳>.m4a`（封装只有 m4a 一档）。
+/// `audio/` 子目录刻意与 mp4 分开：裁剪窗的"打开"默认目录互不污染（同 `paths` 模块口径）。
+fn audio_output_path() -> std::path::PathBuf {
+    crate::core::paths::module_temp_dir(crate::core::paths::MODULE_RECORD)
+        .join("audio")
+        .join(format!(
+            "CurSeen_{}.m4a",
+            crate::runtime::snap_flow::timestamp(),
+        ))
+}
+
+/// 画录制倒计时横幅——**全功能唯一入口**（2026-11-16 用户拍板）：录屏 / GIF / 录音、
+/// 以后任何需要倒计时提示的新功能，一律调这一个函数、同一句文案「即将开始 N」。
+/// 历史教训：文案里带功能名（「即将录制 GIF」/「即将录音」）让每加一个功能就多一种
+/// 文案，用户报过“完全不同的录制提示”。统一后天然不可能再分叉；要区分“在录什么”
+/// 是状态灯（托盘红点）与产物后缀的事，不是提示横幅的事。
 ///
-/// ★ 加「GIF」前缀不是装饰：**MP4 与 GIF 共用同一把停止快捷键**，用户必须在这 3 秒里
-///   看出自己刚才按的是哪把开始键 —— 否则录完才发现格式不对，白录一遍。
+/// ★ 开关：`general.show_countdown`（出厂开）——不勾时照常 3 秒等待与可取消，只是
+///   不在桌面画横幅（调用方在 `frame.rs` 拦，本函数不读配置）。
 ///
 /// ★ 2026-09-22 晚：改走 [`DrawList::draw_centered_banner`] —— 与屏幕标注的提示浮字
 ///   （`modules::drawing::notify`）、计时器**同一个底层函数**，底框/内边距/圆角/垂直居中
 ///   全库一致（用户口径："这些提示在底层上应该是使用相同的函数，这样才方便管理"）。
-///   此前它是**第三份独立实现**（方角 `fill_rect` + 自己算文字落点的 padding），
-///   与另外两处的观感对不上；"文字 y 是基线还是排版盒左上角"这个歧义也随之下线
-///   —— 居中由渲染端（`DrawCmd::TextCentered`）保证，模块层不再关心。
-pub(crate) fn draw_rec_countdown(
-    list: &mut DrawList,
-    screen: ScreenRect,
-    remain_ms: f32,
-    kind: crate::platform::recorder::RecKind,
-) {
+pub(crate) fn draw_countdown_banner(list: &mut DrawList, screen: ScreenRect, remain_ms: f32) {
     pub(crate) const FONT_PT: f32 = 40.0;
     let secs = rec_countdown_seconds(remain_ms);
-    let label = match kind {
-        crate::platform::recorder::RecKind::Mp4 => format!("即将录制 {secs}"),
-        crate::platform::recorder::RecKind::Gif => format!("即将录制 GIF {secs}"),
-    };
     // 内边距沿用原值 32×20（字号 40 比提示浮字的 28 大，留白也相应更宽）；
     // 圆角按字号插值取 12（提示浮字 28pt→8、计时器 72pt→16）。
     list.draw_centered_banner(
         screen,
-        &label,
+        &format!("即将开始 {secs}"),
         FONT_PT,
         32.0,
         20.0,
@@ -124,6 +146,80 @@ impl Runtime {
     /// 最近一次成功落盘的 MP4（时间裁剪入口的输入）。`None` = 还没录过。
     pub fn last_mp4(&self) -> Option<std::path::PathBuf> {
         self.last_mp4.clone()
+    }
+
+    /// 录音一键开关（m81 #3；2026-11-16 用户口径：提示与录屏统一——同一只倒计时钟、
+    /// 同一张居中横幅「即将开始 N」（全功能唯一横幅），归零才开录；再按 = 取消倒计时 /
+    /// 停止录音）。音源/降噪沿用 `record.record_mic / record_speaker / mic_denoise`。
+    pub(crate) fn toggle_audio_recording(&mut self) {
+        if let Some(rec) = self.audio_rec.take() {
+            let path = self.audio_rec_path.take().unwrap_or_default();
+            // 托盘红点随停止立刻回常态，但只表达"没有任何录制在跑"：视频与录音是两条
+            // 独立状态机，可能同时在跑（红点只有一颗，归"任一在录"管）。
+            if self.recorder.is_none() {
+                crate::app::tray::set_tray_recording(false);
+            }
+            self.action_notify.show("已停止录音，正在保存…");
+            rec.finish_detached(std::time::Duration::from_secs(20), move |res| {
+                push_audio_finish_notice(path, res);
+            });
+            return;
+        }
+        if self.rec_countdown_ms.take().is_some() {
+            if self.audio_pending {
+                // 录音倒计时中再按 = 取消。
+                self.rec_pending = None;
+                self.pending_crop = None;
+                self.audio_pending = false;
+                log::info!("录音倒计时已取消");
+                return;
+            }
+            // ★ 视频倒计时中按录音键 = **换过去**（与录屏"换格式"同语义，2026-11-16 外审
+            //   揪出：旧实现一律取消并 return，注释却写"换过去"，两相矛盾）：取消视频
+            //   倒计时后落到下方上膛录音，用户一次按键完成换道。
+            self.rec_pending = None;
+            self.pending_crop = None;
+        }
+        let opts = crate::platform::audio_record::AudioRecOptions {
+            path: audio_output_path(),
+            mic: self.config.record.mic_source().map(str::to_string),
+            speaker: self.config.record.speaker_source().map(str::to_string),
+            mic_denoise: self.config.record.mic_denoise.clone(),
+        };
+        self.audio_rec_opts = Some(opts);
+        self.audio_pending = true;
+        self.arm_countdown(REC_COUNTDOWN_MS);
+        log::info!("录音倒计时开始（{} ms）", REC_COUNTDOWN_MS as u32);
+    }
+
+    /// 倒计时上膛唯一入口（2026-11-16 晚）：记锚点与总时长，remain 由帧循环按真实
+    /// 流逝时间重算 —— 见 `rec_countdown_anchor` 字段注释（park 唤醒帧不再吞倒计时）。
+    pub(crate) fn arm_countdown(&mut self, total_ms: f32) {
+        self.rec_countdown_ms = Some(total_ms);
+        self.rec_countdown_anchor = std::time::Instant::now();
+        self.rec_countdown_total_ms = total_ms;
+    }
+
+    /// 倒计时归零后真正开录音（frame 帧循环触发；`toggle_audio_recording` 只上膛）。
+    pub(crate) fn start_audio_recording_now(&mut self) {
+        let Some(opts) = self.audio_rec_opts.take() else {
+            return;
+        };
+        let path = opts.path.clone();
+        match crate::platform::audio_record::AudioRecorder::start(opts) {
+            Ok(rec) => {
+                self.audio_rec = Some(rec);
+                self.audio_rec_path = Some(path);
+                crate::app::tray::set_tray_recording(true);
+                // ★ 与录屏开录同口径（2026-11-16 晚清理）：不加浮字——托盘红点就是
+                //   "正在录"的常驻状态灯，屏幕上不再多冒一句与录屏不一样的提示。
+                log::info!("开始录音");
+            }
+            Err(e) => {
+                log::warn!("录音启动失败: {e}");
+                self.action_notify.show(&format!("录音启动失败：{e}"));
+            }
+        }
     }
 
     /// 录制中按下**另一把键**时的动作：停掉当前这段，收尾完成后自动开新格式。
@@ -166,8 +262,10 @@ impl Runtime {
         }
         if self.rec_countdown_ms.take().is_some() {
             // 倒计时中 = 取消（原「停止快捷键」在倒计时里的行为，随快捷键合并搬到这里）。
+            // ★ 录音与视频共用这只钟（m81 #3）：取消视频倒计时时把音频待录标记一并清掉。
             self.rec_pending = None;
             self.pending_crop = None;
+            self.audio_pending = false;
             log::info!("录制倒计时已取消");
         } else if self.recorder.is_some() {
             // 正在录：同格式 = 停止，异格式 = 换过去。
@@ -190,7 +288,7 @@ impl Runtime {
         } else {
             self.rec_pending = Some(kind);
             self.pending_crop = crop;
-            self.rec_countdown_ms = Some(REC_COUNTDOWN_MS);
+            self.arm_countdown(REC_COUNTDOWN_MS);
             log::info!(
                 "{}录制倒计时开始（{} ms）",
                 match kind {
@@ -247,6 +345,13 @@ impl Runtime {
             // ★ MP4 时间裁剪快捷键同理：park 期间它是唯一入口，漏了 = "空闲时按了没反应"。
             || (!self.config.record.trim_hotkey.is_empty()
                 && hk_matches(&self.config.record.trim_hotkey, key, mods))
+            // ★ 纯录音快捷键同理：park 期间它是唯一入口，漏了 = "空闲时按录音键毫无反应"。
+            //   ★★ 不受 `record.enabled` 管辖（2026-11-16 晚用户实测拍板）：仅录音是独立
+            //   功能——自己的 WASAPI 通道，不占桌面复制单例；用户关掉「视频录制」卡只
+            //   该关录屏，不该把录音一起哑掉（生产实测：record.enabled=false + F4 配好，
+            //   按键全无反应，连倒计时横幅都没有）。要停用就清空热键。
+            || (!self.config.record.audio.hotkey.is_empty()
+                && hk_matches(&self.config.record.audio.hotkey, key, mods))
             // ★ GIF 快捷键也走同一条倒计时通道，不在这里列上的话覆盖层 park 期间它按不动。
             || (!self.config.gif.hotkey.is_empty()
                 && hk_matches(&self.config.gif.hotkey, key, mods))
@@ -296,7 +401,18 @@ impl Runtime {
     ///
     /// ★ 2026-10-02 起经 [`Recorder::finish_detached`] + 通道**有限等待**（正常收尾
     ///   亚秒级；上限给足 35s）：等不到就放弃——宁可产物缺索引，也不让退出挂死。
+    /// ★★ 2026-11-16 外审接线：本函数从 2.1.5 起一直是无调用点的死代码（退出路径
+    ///   不走它），现接进 `run_overlay` 消息循环返回后的真实退出边界。音频臂
+    ///   `finish_detached(20s, |_| {})` 不等待（视频臂等 35s）：录音收尾亚秒级且
+    ///   `AudioRecorder::drop` 会 join 兑底，退出不挂、文件能收完。
     pub fn stop_recording_if_any(&mut self) {
+        // 纯录音退出前同样要收尾（AAC 编码器 flush 才有完整 moov）。
+        if let Some(rec) = self.audio_rec.take() {
+            crate::app::tray::set_tray_recording(false);
+            rec.finish_detached(std::time::Duration::from_secs(20), |_| {});
+        }
+        // 待录音的倒计时随退出取消。
+        self.audio_pending = false;
         if let Some(rec) = self.recorder.take() {
             // 托盘图标不管收尾结局都切回常态——录制已经停了，红点就是谎报。
             crate::app::tray::set_tray_recording(false);
@@ -422,7 +538,11 @@ impl Runtime {
                 log::warn!("无法开始录制: {e}");
                 // ★ 起录失败也要把托盘红点按回去：失败前"在录"这件事从未成立，
                 //   而托盘是录制状态唯一常驻可见的灯 —— 留着红点就是谎报。
-                crate::app::tray::set_tray_recording(false);
+                //   ★ 但只表达"视频这一路不在录"：录音是独立状态机可能还在跑
+                //   （2026-11-16 外审二轮补：与停止路径同口径，红点归"任一在录"管）。
+                if self.audio_rec.is_none() {
+                    crate::app::tray::set_tray_recording(false);
+                }
                 // ★★ 桌面复制建不起来 ≠ 要重启（2026-10-03 改）。它是"上一段的复制对象
                 //   还没释放"，等上一段收尾完就好（旧文案让用户重启程序，重启并没有用，
                 //   而真正要做的是"等一下"）。措辞按成因分：仍在收尾 → 等；其它 → 重启。
@@ -453,9 +573,11 @@ impl Runtime {
         };
         // 选区录制的那块裁剪矩形随录制终结一并作废。
         self.pending_crop = None;
-        // 录制已停，托盘红点立刻切回常态——不等 finish 的结局（哪怕收尾失败，
-        // "没有在录"这个事实已经成立）。
-        crate::app::tray::set_tray_recording(false);
+        // 录制已停，托盘红点立刻切回常态——但不代表"没有任何录制"：录音是独立状态机
+        // 可能还在跑，红点归"任一在录"管（2026-11-16 外审补）。
+        if self.audio_rec.is_none() {
+            crate::app::tray::set_tray_recording(false);
+        }
         // 收尾结论（路径/格式/硬件结论）先摘出来，随后台线程入槽。
         // ★ 置"收尾中"：录制线程这会儿可能还卡在某次 OS 调用里（见过卡在
         //   `AcquireNextFrame`），`recorder` 已经没了但线程没死。没有这个标记的话，
@@ -490,9 +612,25 @@ impl Runtime {
     /// 三种结局的口径与旧同步版逐字一致：干净收尾 →「录制完成」+ 桌面提示窗；
     /// 有产物但中途断过 →「录制中断，已保存前段」+ 仍登记提示窗；没有产物 →「录制失败」。
     pub fn consume_finished_recordings(&mut self) -> bool {
+        // 录音收尾（m81 #3）与录屏收尾同拍消费：成功 → 记产物 + 登记提示窗；
+        // 失败 → 浮字说明。录音没有"中断保存前段"那种部分成功态。
+        let mut audio_done = false;
+        for (path, res) in take_audio_finishes() {
+            audio_done = true;
+            match res {
+                Ok(()) => {
+                    self.last_audio = Some(path.clone());
+                    self.rec_toast = Some(path);
+                }
+                Err(e) => {
+                    log::warn!("录音收尾失败: {e}");
+                    self.action_notify.show(&format!("录音保存失败：{e}"));
+                }
+            }
+        }
         let notices = take_finished_recordings();
         if notices.is_empty() {
-            return false;
+            return audio_done;
         }
         // ★ 收尾结论回来了 —— 无论干净/中断/失败，"上一次录制"这件事到此结束，
         //   快捷键重新可用（`finish_detached` 保证回调一定被触发，含超时弃子那条路）。
@@ -593,7 +731,7 @@ impl Runtime {
             RecKind::Mp4 => {
                 self.rec_pending = Some(RecKind::Mp4);
                 self.pending_crop = crop;
-                self.rec_countdown_ms = Some(REC_COUNTDOWN_MS);
+                self.arm_countdown(REC_COUNTDOWN_MS);
             }
         }
     }
@@ -602,6 +740,161 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ 录音产物路径契约（m81 #3）：进 `record/audio/` 子目录（与 mp4 分开，裁剪窗
+    ///   "打开"默认目录互不污染），文件名 `CurSeen_<时间戳>.m4a`（封装只有 m4a 一档）。
+    #[test]
+    fn audio_output_path_goes_to_record_audio_with_m4a_name() {
+        let p = audio_output_path();
+        let s = p.to_string_lossy().replace('/', "\\");
+        assert!(
+            s.contains("\\record\\audio\\"),
+            "应在 record/audio 子目录：{s}"
+        );
+        assert!(s.ends_with(".m4a"), "扩展名必须是 m4a：{s}");
+        assert!(s.contains("CurSeen_"), "命名沿用 CurSeen_ 前缀：{s}");
+    }
+
+    /// ★ 两路音源都没开时启动必须当场报错（而不是开出一个 0 字节空壳让用户猜）。
+    #[test]
+    fn audio_recorder_rejects_silent_source_config() {
+        let opts = crate::platform::audio_record::AudioRecOptions {
+            path: std::env::temp_dir().join("curseen_audio_test.m4a"),
+            mic: None,
+            speaker: None,
+            mic_denoise: "off".into(),
+        };
+        let err = match crate::platform::audio_record::AudioRecorder::start(opts) {
+            Err(e) => e,
+            Ok(_started) => panic!("双路关闭必须报错，却启动成功了"),
+        };
+        assert!(err.contains("至少开一路"), "报错要指路：{err}");
+    }
+
+    /// ★★ 仅录音快捷键不受 `record.enabled` 管辖（2026-11-16 晚用户实测拍板）：
+    /// 生产现场 `record.enabled=false` + F4 配好，按键全无反应、连倒计时横幅都没有——
+    /// 仅录音是独立功能（自有 WASAPI 通道，不占桌面复制单例），关「视频录制」卡只
+    /// 关录屏。这条钉 **park 唤醒**：热键非空就必须能唤醒覆盖层。
+    #[test]
+    fn the_audio_hotkey_wakes_even_when_video_recording_is_off() {
+        let mut cfg = Config::default();
+        cfg.record.enabled = false; // 关键前提：视频录制卡整个是关的
+        cfg.record.audio.hotkey = "F4".into();
+        let rt = Runtime::new(cfg.clone());
+        let ev = || InputEvent::KeyDown {
+            key: KeyCode::F(4),
+            mods: Modifiers::default(),
+            repeated: false,
+            time_ms: 0,
+        };
+        assert!(
+            crate::core::hotkeys::matches(
+                &cfg.record.audio.hotkey,
+                KeyCode::F(4),
+                Modifiers::default()
+            ),
+            "测试事件与配置串必须对得上"
+        );
+        assert!(
+            rt.action_hotkey_wakes(&ev()),
+            "仅录音热键必须能唤醒覆盖层（与 record.enabled 无关）"
+        );
+        // 热键清空 = 停用（唯一闸门）。
+        let mut off = cfg.clone();
+        off.record.audio.hotkey = String::new();
+        assert!(!Runtime::new(off).action_hotkey_wakes(&ev()));
+    }
+
+    /// 同口径钉 **派发**：record.enabled=false 时按录音键也要上膛倒计时
+    /// （audio_pending + 共用钟）——旧代码在这里被 `record.enabled` 拦死，用户按 F4
+    /// 毫无反应，正是本轮“没有屏幕提示”的根因。
+    #[test]
+    fn the_audio_hotkey_arms_countdown_even_when_video_recording_is_off() {
+        let mut cfg = Config::default();
+        cfg.record.enabled = false;
+        cfg.record.audio.hotkey = "F4".into();
+        let mut rt = Runtime::new(cfg);
+        rt.handle_action_key(&InputEvent::KeyDown {
+            key: KeyCode::F(4),
+            mods: Modifiers::default(),
+            repeated: false,
+            time_ms: 0,
+        });
+        assert!(rt.audio_pending, "仅录音倒计时必须上膛");
+        assert!(
+            rt.rec_countdown_ms.is_some(),
+            "与录屏/GIF 共用同一只倒计时钟"
+        );
+        assert!(rt.audio_rec_opts.is_some(), "录音参数随倒计时暂存");
+    }
+
+    /// ★★ 换过去语义（2026-11-16 外审揪出后修复）：视频倒计时中按录音键 = 取消视频
+    /// 倒计时并上膛录音，一次按键完成换道；仅录音倒计时中再按才是取消。旧实现
+    /// 对任何在跑的倒计时一律取消并 return，与自己的注释矛盾。
+    #[test]
+    fn pressing_audio_during_video_countdown_switches_over() {
+        let mut cfg = Config::default();
+        cfg.record.audio.hotkey = "F4".into();
+        let mut rt = Runtime::new(cfg);
+        // 先上膛视频倒计时（等价于按过录屏键）。
+        rt.toggle_recording(RecKind::Mp4, None);
+        assert_eq!(rt.rec_pending, Some(RecKind::Mp4));
+        assert!(rt.rec_countdown_ms.is_some() && !rt.audio_pending);
+        // 视频倒计时中按录音键 → 换过去。
+        rt.handle_action_key(&InputEvent::KeyDown {
+            key: KeyCode::F(4),
+            mods: Modifiers::default(),
+            repeated: false,
+            time_ms: 0,
+        });
+        assert!(rt.rec_pending.is_none(), "视频待录被清（不残留）");
+        assert!(rt.audio_pending, "录音倒计时上膛");
+        assert!(rt.audio_rec_opts.is_some(), "录音参数暂存");
+        assert!(rt.rec_countdown_ms.is_some(), "共用钟重新计时");
+        // 录音倒计时中再按 = 取消（回归另一半）。
+        rt.handle_action_key(&InputEvent::KeyDown {
+            key: KeyCode::F(4),
+            mods: Modifiers::default(),
+            repeated: false,
+            time_ms: 0,
+        });
+        assert!(
+            !rt.audio_pending && rt.rec_countdown_ms.is_none(),
+            "录音倒计时被取消"
+        );
+    }
+
+    /// ★★ 倒计时按**真实时间**走（锚点语义，2026-11-16 晚"没有屏幕提示"的真正根因）：
+    /// park 长眠后帧停跑，旧逐帧扣 raw_ms 的写法会把 3000ms 倒计时在唤醒帧一口气
+    /// 扣完 —— 横幅一帧都没画就开录。锚点语义：remain = 总时长 - 锚点以来真实流逝，
+    /// 帧节奏/停帧天然免疫；真实时间没到 3s 就绝不开录。
+    #[test]
+    fn the_countdown_runs_on_real_time_and_fires_on_deadline() {
+        let mut cfg = Config::default();
+        cfg.record.audio.hotkey = "F4".into();
+        let mut rt = Runtime::new(cfg);
+        rt.handle_action_key(&InputEvent::KeyDown {
+            key: KeyCode::F(4),
+            mods: Modifiers::default(),
+            repeated: false,
+            time_ms: 0,
+        });
+        assert_eq!(rt.rec_countdown_ms, Some(REC_COUNTDOWN_MS));
+        // 真实时间只过了 1s 就来下一帧：倒计时必须还在（旧实现在这帧扣掉整段空闲）。
+        rt.rec_countdown_anchor -= std::time::Duration::from_millis(1000);
+        rt.frame();
+        assert!(
+            rt.rec_countdown_ms.is_some(),
+            "真实时间未到 3s，倒计时必须还在"
+        );
+        assert!(rt.audio_rec.is_none(), "录音还没开");
+        // 真实时间过完 3s → 归零开录（参数被消费；默认配置双音源关，start 会报错，
+        // 但上膛参数照样被取走 —— 消费动作本身就是这条断言的靶心）。
+        rt.rec_countdown_anchor -= std::time::Duration::from_millis(2500);
+        rt.frame();
+        assert!(rt.rec_countdown_ms.is_none(), "倒计时归零取走");
+        assert!(rt.audio_rec_opts.is_none(), "上膛参数被消费");
+    }
 
     /// ★ 后台收尾结论的槽位（2026-10-02）：push → take 取走即无、再取为空。
     /// 收尾线程与 UI 帧循环就靠这条通路衔接（`stop_recording_now` 不再同步等收尾）。
@@ -709,12 +1002,9 @@ mod tests {
     /// ★ 录制倒计时走**共享横幅函数**（`DrawList::draw_centered_banner`）：断言它产出
     /// 「圆角底框 + 居中的 `TextCentered`」，而不是自己那套方角 `fill_rect` + 手算 padding。
     ///
-    /// 为什么需要这条：2026-09-22 晚做「屏幕中央提示统一」时，标注浮字与计时器都迁到了共享
-    /// 函数，**倒计时漏了**（它是第三份独立实现）。真机像素判据
-    /// （`temp/check_countdown_banner.py`）+ 日志只能覆盖 MP4 分支 —— GIF 分支要先按 F4 进
-    /// 「截图区域选择」，那层暗幕会把白底判据污染掉。所以两种 kind 的 label 与几何在这里钉死。
-    ///
-    /// 判据取**命令形态**而不是像素：模块层能保证的就是"画成什么样"，像素归渲染端。
+    /// ★★ 2026-11-16 用户拍板：全功能统一成唯一横幅 `draw_countdown_banner`（文案一律
+    /// 「即将开始 N」）——旧的按 kind 分文案（「即将录制 GIF」/「即将录音」）已删，
+    /// 不可能出现第二种倒计时提示；这条同时就是唯一性钉子。
     #[test]
     fn rec_countdown_draws_the_shared_centered_banner() {
         let screen = ScreenRect {
@@ -724,12 +1014,9 @@ mod tests {
             h: 1080,
         };
         let center = Point::new(960.0, 540.0);
-        for (kind, prefix) in [
-            (crate::platform::recorder::RecKind::Mp4, "即将录制 "),
-            (crate::platform::recorder::RecKind::Gif, "即将录制 GIF "),
-        ] {
+        {
             let mut list = DrawList::new();
-            draw_rec_countdown(&mut list, screen, 2500.0, kind);
+            draw_countdown_banner(&mut list, screen, 2500.0);
 
             let mut box_ = None;
             let mut text = None;
@@ -759,10 +1046,7 @@ mod tests {
             );
             let (tc, t) = text.expect("倒计时应画文字");
             assert_eq!(tc, center, "文字中心应与屏幕中心重合（垂直居中交给渲染端）");
-            assert!(
-                t.starts_with(prefix),
-                "label 应以「{prefix}」开头，得到 {t:?}"
-            );
+            assert_eq!(t, "即将开始 3", "全功能统一文案：2500ms 向上取整显示 3");
         }
     }
 

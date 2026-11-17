@@ -211,7 +211,7 @@ impl Runtime {
             h: 240,
         });
         self.rec_pending = Some(RecKind::Gif);
-        self.rec_countdown_ms = Some(1000.0);
+        self.arm_countdown(1000.0);
     }
 
     /// 测试用：把状态摆成"GIF 选框就绪未上膛"（可交互、可拖拽）。
@@ -252,6 +252,8 @@ impl Runtime {
             self.rec_pending = None;
             self.rec_countdown_ms = None;
             self.pending_crop = None;
+            // ★ 录音与视频共用这只钟（m81 #3）：取消时把音频待录标记一并清掉。
+            self.audio_pending = false;
             log::info!("录制倒计时已取消");
             return;
         }
@@ -273,7 +275,7 @@ impl Runtime {
             self.pending_crop = Some(sel);
         }
         self.rec_pending = Some(kind);
-        self.rec_countdown_ms = Some(REC_COUNTDOWN_MS);
+        self.arm_countdown(REC_COUNTDOWN_MS);
         log::info!("{kind:?} 录制倒计时开始（{} ms）", REC_COUNTDOWN_MS as u32);
     }
 
@@ -294,6 +296,7 @@ impl Runtime {
             self.rec_pending = None;
             self.rec_countdown_ms = None;
             self.pending_crop = None;
+            self.audio_pending = false; // ★ 录音待录标记同清（共用倒计时钟，m81 #3）
             log::info!("倒计时中点 ✕：取消本次录制");
         } else if self.recorder.as_ref().map(|r| r.kind()) == Some(self.sel_kind) {
             self.stop_recording_now();
@@ -367,6 +370,17 @@ impl Runtime {
         } else {
             self.queue_trim(TrimRequest::Blank(TrimKind::Mp4));
         }
+    }
+
+    /// M4A 录音的裁剪入口（提示窗「裁剪」，m81 #3）：按**指定路径**开时间裁剪窗。
+    /// 走 [`TrimRequest::Path`]（TrimKind::Mp4 只是路由标记，窗口按扩展名自适应音频），
+    /// 不吃 `last_mp4`——录音与录屏是两条产物线。
+    pub fn request_mp4_trim_path(&mut self, path: std::path::PathBuf) {
+        if crate::platform::win_util::focus_window_by_title(layer::mp4_trim::TITLE) {
+            log::info!("裁剪：窗口已开着，聚焦它");
+            return;
+        }
+        self.queue_trim(TrimRequest::Path(TrimKind::Mp4, path));
     }
 
     /// MP4 时间裁剪快捷键：独立打开裁剪器，不依赖刚录过什么。

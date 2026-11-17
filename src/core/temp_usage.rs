@@ -305,6 +305,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// ★ m81（用户口径 #5）：「文件夹很旧、里面有这两天的新文件」不许按文件夹清：
+    /// 判据只看**每个文件**的 mtime——旧文件删、新文件留、仍非空的文件夹必留。
+    /// 这一条钉住的是"清理永远不是按文件夹为单位"的语义（用户 2026-11-16 重申）。
+    #[test]
+    fn cleanup_keeps_old_folder_that_still_has_a_fresh_file() {
+        let root = scratch("cleanup_mixed_folder");
+        write(&root.join("mixed/old.mp4"), 300);
+        write(&root.join("mixed/new.png"), 20);
+        age_file(&root.join("mixed/old.mp4"), 40 * 24 * 60 * 60); // 40 天前
+        age_file(&root.join("mixed/new.png"), 2 * 24 * 60 * 60); // 2 天前
+
+        let r = cleanup_older_than(&root, 30).expect("清理不应失败");
+        assert_eq!(
+            (r.files, r.bytes, r.dirs),
+            (1, 300, 0),
+            "报告要对账；一个文件夹都不该动"
+        );
+        assert!(!root.join("mixed/old.mp4").exists(), "旧文件必须被删");
+        assert!(
+            root.join("mixed/new.png").exists(),
+            "两天内的新文件必须留下"
+        );
+        assert!(root.join("mixed").is_dir(), "只清了部分文件的文件夹不许删");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 拿不到 mtime / 删不掉的文件：跳过，不失败、不误删别的东西。
     #[test]
     fn cleanup_survives_undeletable_entries() {

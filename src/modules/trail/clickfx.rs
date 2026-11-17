@@ -101,6 +101,11 @@ impl ScriptedClick {
         Ok(Self { core })
     }
 
+    /// 资产变化时检查脚本文件；实例继续用旧 VM 直到文件真的变过。
+    pub fn reload_script(&mut self) -> bool {
+        self.core.ensure_fresh()
+    }
+
     /// 脚本是否实现了 `on_move`（轨迹语义判据：写它就享受常驻待遇）。
     pub fn wants_trail(&self) -> bool {
         self.core.has_on_move()

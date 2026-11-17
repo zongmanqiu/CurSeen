@@ -635,6 +635,87 @@ mod tests {
         make_zip(&refs)
     }
 
+    /// #6 三类内容卸载的端到端（m81 批次一遗留的真机级点验，无头版）：
+    /// 官方特效包 / 工具脚本包 / AI 包在真实 v2 契约下安装 → 逐一卸载 →
+    /// 只删记录里登记的文件、安装记录一并消失、用户与出厂脚本一个不动、
+    /// 包目录自底向上清空。GUI 两段式确认已有 ui/pages/store.rs 的测试锁，
+    /// 本条锁的是文件系统那半（m81 §6 验收的磁盘残留核对）。
+    #[test]
+    fn uninstall_removes_only_recorded_files_across_three_pack_shapes() {
+        let root = tmpdir("uninstall3");
+        let assets = root.join("assets");
+        std::fs::create_dir_all(assets.join("scripts")).unwrap();
+        std::fs::write(assets.join("scripts/keep.lua"), b"-- user").unwrap();
+        std::fs::write(assets.join("scripts/builtin.lua"), b"-- builtin").unwrap();
+
+        let mk = |id: &str| {
+            let z = root.join(format!("{id}.zip"));
+            std::fs::write(
+                &z,
+                make_v2_pack(
+                    id,
+                    "1.0.0",
+                    &[
+                        ("main.lua", b"-- main".as_slice()),
+                        ("lib/util.lua", b"-- util".as_slice()),
+                    ],
+                ),
+            )
+            .unwrap();
+            z
+        };
+        let zips: Vec<(&str, PathBuf)> = vec![
+            ("CursorFX", mk("CursorFX")), // 官方特效包形态
+            ("OCR", mk("OCR")),           // 工具脚本包形态
+            ("AI", mk("AI")),             // AI 包形态
+        ];
+        for (id, z) in &zips {
+            install_zip(z, &assets).unwrap_or_else(|e| panic!("{id} 该装得上: {e}"));
+        }
+        for (id, _) in &zips {
+            assert!(
+                assets
+                    .join(format!("scripts/{id}/.curseen-pack.json"))
+                    .is_file(),
+                "{id} 该有安装记录"
+            );
+        }
+
+        // 逐个卸载：本包目录整体消失、记录消失；其余包与用户/出厂脚本不受影响。
+        for (i, (id, _)) in zips.iter().enumerate() {
+            let removed = uninstall(id, &assets).unwrap_or_else(|e| panic!("卸载 {id} 失败: {e}"));
+            assert!(
+                removed >= 5,
+                "{id} 应删掉记录登记的全部文件（≥5），实际 {removed}"
+            );
+            assert!(
+                !assets.join(format!("scripts/{id}")).exists(),
+                "{id} 目录应被清空删除"
+            );
+            assert!(
+                !assets
+                    .join(format!("scripts/{id}/.curseen-pack.json"))
+                    .exists(),
+                "{id} 安装记录应消失"
+            );
+            assert!(assets.join("scripts/keep.lua").is_file(), "用户脚本不许动");
+            assert!(
+                assets.join("scripts/builtin.lua").is_file(),
+                "出厂脚本不许动"
+            );
+            // 还没卸的那些包必须健在。
+            for (other, _) in zips.iter().skip(i + 1) {
+                assert!(
+                    assets.join(format!("scripts/{other}/pack.json")).is_file(),
+                    "{other} 不该被 {id} 的卸载波及"
+                );
+            }
+        }
+        // 没有记录的 id → 明确报错，而不是静默“成功”。
+        let e = uninstall("NoSuch", &assets).unwrap_err();
+        assert!(e.contains("没有"), "报错要指明没有安装记录：{e}");
+    }
+
     #[test]
     fn catalog_parses_and_skips_bad_entries() {
         let text = r#"[

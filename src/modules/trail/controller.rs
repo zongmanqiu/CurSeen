@@ -517,6 +517,36 @@ impl TrailModule {
             .collect()
     }
 
+    /// `assets/` 变化后的实例热重载（m86）：拖尾 / 悬浮标 / 点击效果（含常驻通道）/
+    /// 复合脚本一起按文件戳重载，**不碰配置与启用列表**。
+    ///
+    /// 由 `Runtime::refresh_assets_if_changed` 在 UI 线程调用（面板没开也照跑——用户
+    /// 关着面板看效果时，AI 改脚本也该立刻生效）。返回真重载的实例数。
+    pub fn reload_assets(&mut self) -> usize {
+        let mut n = 0;
+        if let Some(e) = self.effect.as_mut() {
+            if e.reload_script() {
+                n += 1;
+            }
+        }
+        n += self.hover.reload_scripts();
+        for fx in &mut self.click_fx {
+            if fx.reload_script() {
+                n += 1;
+            }
+        }
+        for fx in &mut self.persistent_fx {
+            if fx.reload_script() {
+                n += 1;
+            }
+        }
+        n += self.companions.ensure_fresh();
+        if n > 0 {
+            log::info!("assets 变化 → 热重载 {n} 个特效/悬浮标/点击脚本实例");
+        }
+        n
+    }
+
     pub fn tick(&mut self, tick: &Tick, config: &Config, config_version: u64) {
         let dt_ms = tick.dt_ms;
         let dt_s = dt_ms / 1000.0;
@@ -841,14 +871,6 @@ impl TrailModule {
 
     // `&mut self`：Lua 特效的 draw 需要写 active 标记（决定续帧），故整个控制器要可变借用。
     pub fn draw(&mut self, list: &mut DrawList) {
-        if self.ripples.active() > 0 {
-            log::info!(
-                "[diag] draw: ripples active={} trail_on={} cmds_before={}",
-                self.ripples.active(),
-                self.settings.trail_enabled,
-                list.cmds().len()
-            );
-        }
         // ★ 卡片式开关语义（2.0）：三样东西各听各的卡片开关，不再共用 trail_enabled
         // 总门（overlay.py:58-69 的单总开关早退已随「功能总开关」一起废除）。
 

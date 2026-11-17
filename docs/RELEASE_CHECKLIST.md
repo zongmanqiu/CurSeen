@@ -56,10 +56,9 @@
 - [ ] `README.md` —— 顶层目录树 / 构建方式 / 技术栈
 - [ ] `THIRD-PARTY-NOTICES.md` —— 依赖版本变化（下载地址同步 `build/deps.txt`）
 - [ ] `HISTORY.md` —— 顶部追加本版本小节
-- [ ] Lua 文档 —— 改了脚本 API / 包格式：同步 `assets/lua/API.md` 后跑
-      `python build/gen_manual_tables.py`（把三张接口表镜像进 `assets/lua/Lua脚本手册.html`）；
-      作者指南里的目录 / 热重载 / v2 包规则同步更新
-- [ ] 隐藏快捷键手册 —— 改了固定键 / 脚本窗按键：`assets/docs/隐藏快捷键手册.md` 与 `.html` 两份同改
+- [ ] Lua 文档 —— 改了脚本 API / 包格式：同步 `assets/lua/API.md`、`assets/docs/Lua开发指南.md`
+      与主题文档里的挂载点 / 热重载 / v2 包规则
+- [ ] 操作手册 —— 改了固定键 / 页面版图 / 产物位置：同步 `assets/docs/操作手册.html`（唯一一份人读手册）
 - [ ] `patches/wind-ui-rust-0.30.0/PATCHES.md` —— 本版本动过 windui 就补章节（同步归档改后完整文件）
 
 ## 四、打包
@@ -146,11 +145,16 @@
 ## 六、上传与发行
 
 - [ ] 仓库只提交 `main/`（`.3rdParty/` `temp/` `build/` 都在仓库外）
+- [ ] **源码只推 Gitee**（`origin`）；GitHub 不作为源码提交目标
+- [ ] 在 `HISTORY.md` 当版本小节已定稿的前提下，直接用它作 Release 正文：
+      标题 = 版本号，正文 = `## <版本>（日期）` 到下一节之前的原文（不另写摘要）
+- [ ] 发行附件 `CurSeen_<版本>.zip` 同时上传 **Gitee 与 GitHub** 的 Release
+      （只传 zip；包外清单与源码压缩包不上传）
+- [ ] tag 用裸版本号（与附件文件名一致）
 - [ ] **先上传 zip，再推送 `update.json`**：清单里的两个下载地址在资产上传前是 404，
       提前推送会让更新按钮必然失败
 - [ ] **上传后必须跑 `python build/check_update_asset.py`**：两个镜像都 `[ok]` 才算发布完成；
       手工包 / 传错文件 / 镜像未同步都会被它当场拦下
-- [ ] 打 tag / 上传发行包
 - [ ] 自动更新地址与实际下载地址一致
 
 > 红线：本清单只负责检查。本仓已接入 git（主仓 Gitee）；`commit` / `push` 必须先取得用户明确许可。

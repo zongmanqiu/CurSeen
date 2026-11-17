@@ -29,6 +29,12 @@ impl FrameClock {
         }
     }
 
+    /// 【仅测试】把上一帧时间倒拨 ms 毫秒，制造一次“park 长眠后唤醒”的巨大 raw_ms。
+    #[cfg(test)]
+    pub fn rewind_for_test(&mut self, ms: u64) {
+        self.last = Instant::now() - std::time::Duration::from_millis(ms);
+    }
+
     /// 推进一帧，返回 Tick。
     /// capped_dt_ms = clamp(raw, 0.5, 50.0)——夹住长暂停造成的巨大 dt。
     pub fn tick(&mut self) -> Tick {

@@ -96,11 +96,10 @@ impl Host {
 
     /// 该目录是否支持热重载（改文件即时生效，无需重开面板/重启）。
     ///
-    /// ★ 只有 `scripts/` 有（`Companion::ensure_fresh` 每帧 stat）。
-    ///   三个特效目录的实例在 id 不变时**保住旧 VM**，改文件不生效——这是"AI 写完看不到
-    ///   变化"的头号坑，所以必须作为事实输出，别让调用方猜。
+    /// m86 起五个挂载全支持：特效/悬浮标/点击/复合脚本按文件戳重建 VM，
+    /// `KeySound` 的下一次按键生效（`EngineCache` 每次按键 stat）。
     pub fn hot_reload(self) -> bool {
-        matches!(self, Self::Composite)
+        true
     }
 
     /// 收敛判据用哪个信号（写进 JSON，让调用方知道该看哪一列）。

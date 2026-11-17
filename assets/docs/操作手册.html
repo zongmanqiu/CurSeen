@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CurSeen 操作手册</title>
+<style>
+body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;
+     max-width:min(880px,calc(100vw - 380px));margin:0;
+     padding:32px 40px 64px;color:#1f2329;background:#fdfdfc;line-height:1.75;font-size:15px}
+h1{font-size:26px;border-bottom:2px solid #d8d5cf;padding-bottom:10px;margin-top:4px}
+h2{font-size:20px;border-bottom:1px solid #e3e0da;padding-bottom:6px;margin-top:40px}
+h3{font-size:16px;margin-top:24px}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid #d9d6d0;padding:7px 11px;text-align:left;vertical-align:top}
+/* 首列都是“页面 / 快捷键”这类短词，不允许被挤成竖排 */
+th:first-child,td:first-child{white-space:nowrap}
+th{background:#f0eee9;font-weight:600}
+tr:nth-child(even) td{background:#faf9f6}
+code{background:#f2f0ec;border:1px solid #e6e3dd;border-radius:3px;padding:1px 5px;
+     font-family:Consolas,monospace;font-size:13px;color:#8a3b12}
+pre{background:#f6f5f1;border:1px solid #e3e0da;border-radius:6px;padding:12px 14px;overflow-x:auto;
+    white-space:pre-wrap;word-break:break-word;font:13px/1.75 Consolas,"Microsoft YaHei",monospace}
+pre code{background:none;border:none;padding:0;color:#1f2328}
+blockquote{border-left:4px solid #d9b13b;background:#fdf8ea;margin:14px 0;padding:10px 16px;color:#5c5648}
+hr{border:none;border-top:1px solid #e3e0da;margin:28px 0}
+a{color:#0b62c4;text-decoration:none}
+.note{background:#eef5ff;border-left:4px solid #0b62c4;padding:10px 16px;margin:14px 0}
+/* 常见问题：问题带“问”徽标，答案缩进——扫一眼就能分出问答 */
+.faq-q{position:relative;margin:26px 0 8px;padding-left:32px;font-size:16px;font-weight:600}
+.faq-q::before{content:"问";position:absolute;left:0;top:1px;width:21px;height:21px;
+     line-height:21px;text-align:center;border-radius:4px;background:#eef5ff;color:#0b62c4;
+     font-size:12px;font-weight:700}
+.faq-a{margin:0 0 20px 32px;color:#3a3f45}
+/* 需要用户按自己情况替换的占位：一眼可见 */
+.ph{color:#c62828;font-weight:600}
+/* 可复制的块 */
+.copyhead{display:flex;align-items:center;justify-content:space-between;gap:12px;
+          margin:18px 0 0;padding:9px 14px;background:#f1efe8;border:1px solid #e3e0da;border-bottom:0;
+          border-radius:6px 6px 0 0;font-size:14px}
+.copyhead button{font:inherit;font-size:13px;color:#fff;background:#0b62c4;border:1px solid #0b62c4;
+          border-radius:4px;padding:5px 14px;cursor:pointer}
+.copyhead button:hover{background:#0a4f9e}
+.copyhead + pre{border-radius:0 0 6px 6px;margin-top:0}
+</style>
+<style>
+html{scroll-behavior:smooth}
+/* 正文与左侧目录之间留出清楚的空白，不贴着分界线 */
+body{padding-left:340px}
+.toc{position:fixed;top:0;left:0;width:268px;height:100vh;overflow-y:auto;
+     padding:24px 12px 24px 18px;background:#fbfbfa;border-right:1px solid #e7e4de;
+     font-size:13px;line-height:1.5;z-index:50}
+.toc-title{font-weight:700;color:#827c72;font-size:11.5px;letter-spacing:1.5px;
+     text-transform:uppercase;margin:2px 0 12px 6px}
+.toc ul{list-style:none;margin:0;padding:0}
+.toc li{margin:0}
+.toc a{display:block;padding:5px 9px;border-radius:6px;color:#3b3a37;text-decoration:none;
+     border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.toc a:hover{background:#eef0f3;color:#1f2328}
+.toc a.active{background:#eaf1ff;color:#0b62c4;border-left-color:#0b62c4;font-weight:600}
+.toc .toc-l2 a{padding-left:20px}
+.toc .toc-l3 a{padding-left:34px;font-size:12.5px;color:#6b6760}
+.toc a.star{color:#0b62c4;font-weight:600}
+/* 可折叠的分组：箭头绝对定位在左侧槽位，标题的缩进与普通章节完全一致 */
+.toc li.group>.row{display:block;position:relative}
+.toc-toggle{position:absolute;left:2px;top:4px;width:20px;height:22px;padding:0;
+     border:0;background:none;color:#9a958c;cursor:pointer;font-size:12px;
+     line-height:22px;text-align:center;border-radius:4px}
+.toc-toggle:hover{color:#0b62c4;background:#eef0f3}
+.toc li.group.collapsed>ul{display:none}
+/* 子项缩进一格，并加一条很淡的竖线，层级一眼可见 */
+.toc li.group>ul{margin:0 0 0 26px;border-left:1px solid #ece9e3}
+.toc li.group>ul a{padding-left:12px;font-size:12.5px;color:#6b6760}
+/* 目录根节点自身留一点左内边距，避免贴边 */
+.toc>ul{padding-left:2px}
+@media (max-width:1080px){
+  .toc{display:none}
+  body{padding-left:40px;padding-right:40px;max-width:960px;margin:0 auto}
+}
+</style>
+</head>
+<body>
+<h1 id="CurSeen-操作手册">CurSeen 操作手册</h1>
+<blockquote>
+<p>这份手册讲<strong>怎么用</strong>：默认快捷键、每个功能的用法、产物放在哪，以及怎么把程序接到 AI 上让它帮你写脚本。<br />
+适用版本：随本手册同包的 CurSeen（AGPL-3.0）。不同版本若调整了操作，以程序实际行为为准。</p>
+</blockquote>
+
+<h2 id="一-快速开始">一、快速开始</h2>
+<ul>
+<li>CurSeen 是<strong>便携程序</strong>：解压即用，配置、日志、缓存、临时产物都在程序目录里，
+  不写 <code>%APPDATA%</code>；卸载 = 删除整个目录。</li>
+<li><strong>默认按 <code>Ctrl + Shift + D</code> 呼出 / 收起控制面板</strong>。按了没反应，
+  多半是这把键被改过或与别的软件冲突，去「设置 → 快捷键」重绑一把。</li>
+<li>大多数功能出厂是<strong>关着</strong>的：在对应卡片<strong>标题栏左侧的开关</strong>打开它。</li>
+<li>各功能的<strong>快捷键出厂大多留空</strong>（空框 = 停用且看得见），需要什么自己绑一把，
+  不会预占你的全局键位。</li>
+<li>遇到固定键（界面里没写、也不能改的那些），都写在对应功能章节里。</li>
+</ul>
+
+<h2 id="二-界面总览">二、界面总览</h2>
+<table>
+<thead>
+<tr><th>页面</th><th>管什么</th><th>产物 / 去处</th></tr>
+</thead>
+<tbody>
+<tr><td>鼠标</td><td>拖尾、悬浮标、点击效果、点击声音</td><td>画在屏幕上，不落盘（悬浮标图片素材在 <code>assets/lua/HoverDot/</code>）</td></tr>
+<tr><td>键盘</td><td>击键回显、击键音效、虚拟键盘、直播捕获</td><td>屏幕叠加；直播捕获可选桌面 / 独立窗口 / 浏览器源</td></tr>
+<tr><td>屏幕</td><td>屏幕标注、画中画 / 全屏放大、截图与贴图、GIF 录制、视频录制</td><td><code>temp/annotation</code> / <code>temp/screenshot</code> / <code>temp/gif</code> / <code>temp/record</code></td></tr>
+<tr><td>工具</td><td>便签、剪贴板历史、计时器</td><td>剪贴板历史在 <code>temp/clipboard</code>；便签不落盘</td></tr>
+<tr><td>脚本</td><td>在线资源下载（第一张卡）、已安装脚本的卡片与参数</td><td><code>assets/lua/scripts/</code></td></tr>
+<tr><td>设置</td><td>全局快捷键、功能开关、下载源、工作文件夹清理、系统项、帮助</td><td><code>config.json</code></td></tr>
+<tr><td>关于</td><td>版本、更新检查、许可与仓库入口</td><td>—</td></tr>
+</tbody>
+</table>
+<p>程序自己产生、用户没有指定位置的产物都在 <code>&lt;程序目录&gt;/temp/</code> 下按功能分目录。<br />
+「设置 → 高级 → 工作文件夹」可选启动时清理（永不 / 7 / 30 / 180 天）。要长期保存的东西<br />
+走各功能的「另存为」，不要指望工作文件夹长期保留。</p>
+
+<hr />
+<h2 id="三-鼠标特效">三、鼠标特效</h2>
+<p>鼠标页四张卡，每张卡标题栏的开关就是该功能的唯一开关。</p>
+
+<h3 id="拖尾">拖尾</h3>
+<ul>
+<li>在「拖尾」卡选特效（下拉），下面的参数行随特效变化；改完即时生效。</li>
+<li>颜色、密度、淡出速度、粒子大小等都由特效自己声明；不同特效的可调项不一样。</li>
+<li>拖尾是连续动画：指针移动时持续绘制，静止后自动停笔；停住不动不占 CPU。</li>
+</ul>
+
+<h3 id="悬浮标">悬浮标</h3>
+<ul>
+<li>「类型」下拉选样式（实心圆 / 圆环 / 图片 / 激光笔 / 聚光灯 / 标尺 / 眼睛跟随 / 弹簧挂件…）。</li>
+<li>选「图片」时，在「图片」行点「浏览…」导入 PNG / GIF；素材会复制进
+  <code>assets/lua/HoverDot/</code>，换电脑或搬目录不会失效。</li>
+<li>悬浮标是指针的常驻挂件：指针不动就不出帧；淡出、弹簧回摆这类动画会自己续帧，收敛后回到静止零功耗。</li>
+</ul>
+
+<h3 id="点击效果">点击效果</h3>
+<ul>
+<li>父卡开关控制整个功能；下面按鼠标键（左 / 右 / 中 / X1 / X2）各一张子卡。</li>
+<li>每个键的下拉第一项是「关闭」——这一键停用；选具体效果后，下面的参数只影响该键。</li>
+<li>点击效果是一次性动画：触发一次、自己淡出消失，不会常驻。</li>
+</ul>
+
+<h3 id="点击声音">点击声音</h3>
+<ul>
+<li>按鼠标键分别选「关闭 / 音频文件」；音量单独可调。</li>
+<li>声音素材默认取自程序目录的 <code>assets/Sounds/</code>；丢一个音频文件进去就能在下拉里选到。</li>
+<li>想同时有「点击效果 + 点击声音」，两张卡都打开即可，它们互不影响。</li>
+</ul>
+
+<hr />
+<h2 id="四-键盘与虚拟键盘">四、键盘与虚拟键盘</h2>
+
+<h3 id="击键回显">击键回显</h3>
+<ul>
+<li>标题栏下拉选显示哪些键：全部 / 排除鼠标 / 组合键 + 功能键 / 只看组合键。</li>
+<li>「位置」选四个角落之一并微调偏移；「显示」调宽度、不透明度、停留时长、字号、合并间隔；<br />
+  「颜色」调背景、普通键、功能键、符号键四色。</li>
+<li>想改按键在弹窗里的<strong>文字</strong>：编辑 <code>assets/KeyDisplay/keynames.ini</code>，
+  保存后按一次键即生效，不用重启（格式与键名清单在文件头）。</li>
+</ul>
+
+<h3 id="击键音效">击键音效</h3>
+<ul>
+<li>「脚本」下拉选音效方案（出厂有统一音效 / 分类音效两种），音量单独可调。</li>
+<li>音效文件同样可以放到 <code>assets/Sounds/</code> 后在下拉里选。</li>
+</ul>
+
+<h3 id="虚拟键盘">虚拟键盘</h3>
+<ul>
+<li>标题栏的「方案」下拉选键盘布局；「位置 / 窗口行为 / 显示 / 颜色」四张子卡调位置、<br />
+  鼠标穿透、键帽尺寸、圆角、不透明度、高亮保持、字号与各命名样式的颜色。</li>
+<li>方案来自 <code>assets/VirtualKeyboards/*.json</code>：一个文件一套方案，文件名即方案名。<br />
+  换方案或改面板参数后，键盘会按新尺寸重排。</li>
+<li>勾选「鼠标穿透」后，键盘不拦鼠标，点击会落到下面的窗口——想正常操作就取消它。</li>
+</ul>
+
+<h3 id="直播捕获">直播捕获</h3>
+<p>在「虚拟键盘 → 直播捕获 → 画面来源」三选一：</p>
+<table>
+<thead>
+<tr><th>来源</th><th>怎么用</th><th>注意</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>桌面</td>
+<td>出厂选择；直播软件里加「显示器捕获」即可</td>
+<td>不需要额外设置</td>
+</tr>
+<tr>
+<td>独立窗口</td>
+<td>多出一扇 <code>CurSeen 虚拟键盘</code> 窗口，直播软件里加「窗口捕获」</td>
+<td>窗口可拖、可关、可最小化；关窗 = 取消这一选择；最小化时抓不到；需要加色键抠底</td>
+</tr>
+<tr>
+<td>浏览器源</td>
+<td>点「复制地址」，粘到 OBS / 直播姬的「浏览器」来源</td>
+<td>地址必须带完整 <code>http://</code>；只适用于 OBS 家族；画面自带透明通道，不用色键</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>窗口嫌糊就调「窗口缩放」（0.5–3×）：它是<strong>重新矢量渲染</strong>，不是把像素拉大；
+  在直播软件里把来源拉大只会更糊。</li>
+<li>浏览器源照「来源尺寸」填宽高，键盘正好铺满，不会留黑边。</li>
+<li>抠图底色与键帽撞色时，色键会把键帽一起抠穿；撞了就换一色。</li>
+</ul>
+
+<hr />
+<h2 id="五-屏幕">五、屏幕</h2>
+
+<h3 id="屏幕标注">屏幕标注</h3>
+<ul>
+<li>父卡「屏幕标注」的开关是唯一开关；「画笔」调三支笔的颜色 / 粗细 / 线型；
+  「快捷键」可绑定各工具与屏幕标注 / 白板的启停键。</li>
+<li>导出的是带标注的 PNG，落在 <code>temp/annotation/</code>；需要留存就另存到别处。</li>
+<li>固定编辑键：<code>Ctrl+Z</code> 撤销、<code>Ctrl+Shift+Z</code> 或 <code>Ctrl+Y</code> 重做、
+  <code>Backspace</code> 撤销、<code>Delete</code> 清空画布、<code>Esc</code> 退出标注（保留内容）。<br />
+  截图编辑态下 <code>Esc</code> = 放弃本次编辑，完成只走工具栏「保存」。</li>
+</ul>
+
+<h3 id="放大镜">放大镜</h3>
+<ul>
+<li>画中画：调面板宽高、倍率、锚点（含跟随鼠标）与描边色；启停键可绑。</li>
+<li>全屏放大：倍率 1–5；<code>Esc</code> 永远能退出（不依赖快捷键是否绑定）。</li>
+<li>固定键：<code>Ctrl + Win + 滚轮</code> 调倍率（上滚放大 / 下滚缩小，步进 ±1），
+  仅在放大镜在屏上时拦截滚轮。</li>
+</ul>
+
+<h3 id="截图与贴图">截图与贴图</h3>
+<ul>
+<li>四把键（都可绑）：截图（区域 → 剪贴板 + 留档）、截图后贴图（区域 → 剪贴板 + 钉到桌面）、<br />
+  贴图（从剪贴板历史取图文钉到桌面）、长截图（开始 / 结束一键开关）。</li>
+<li>截图默认不弹保存框：临时留档在 <code>temp/screenshot/</code>；要留的文件用贴图右键「另存为」。</li>
+<li>贴图素材来自剪贴板历史：图片按原件、纯文字栅格化成图、文件条目不参与；连按贴图键沿历史往前翻。</li>
+<li>固定键：<code>Ctrl+S</code> 把选中的贴图另存为 PNG（没有选中时原样透传，不会误吞前台程序的保存）；
+  <code>Esc</code> 关闭选中的贴图；截图时按住 <code>Ctrl</code> 进入编辑态。</li>
+<li>贴图选中后可拖动移动、滚轮缩放（若开启对应开关）；被脚本换过图时，右键有「恢复原图」。</li>
+</ul>
+
+<h3 id="GIF录制">GIF 录制</h3>
+<ul>
+<li>「录制」是一键开关：按下开始框选，再按一次停止落盘；「裁剪」键可单独打开裁剪窗。</li>
+<li>可调帧率与「录制鼠标」；选框即输出尺寸，循环恒定开启。</li>
+<li>产物在 <code>temp/gif/</code>；裁剪窗「打开…」默认也从这个目录开始。</li>
+</ul>
+
+<h3 id="视频录制">视频录制</h3>
+<ul>
+<li>「录屏」是一键开关：按下开始、再按一次停止；区域与裁剪各有自己的键。</li>
+<li>画面：帧率 / 分辨率 / 码率 / 硬件加速 / 录制鼠标；声音：系统声音、麦克风（三态来源：关闭 / 默认 / 指定设备）+ 降噪。</li>
+<li>没有暂停：要分段就停掉再开。产物在 <code>temp/record/</code>。</li>
+<li>录完没声音，先查两路音频来源是否指向「关闭」。</li>
+</ul>
+
+<hr />
+<h2 id="六-工具">六、工具</h2>
+
+<h3 id="便签">便签</h3>
+<ul>
+<li>快捷键呼出一张新便签，可同时开多张；可拖动、置顶锁定、收起编辑区。</li>
+<li>可调背景色 / 文字色 / 编辑区色、不透明度、字号。</li>
+<li><strong>便签内容不落盘</strong>：关掉窗口或重启程序就没了；长期保存请用别的工具。</li>
+<li>固定键：<code>Esc</code> / <code>Enter</code> 关闭「透明度」小弹窗。</li>
+</ul>
+
+<h3 id="剪贴板历史">剪贴板历史</h3>
+<ul>
+<li>快捷键呼出面板；后台自动记录复制内容，支持类型过滤、搜索、收藏、悬停预览、点击粘贴。</li>
+<li>条目优先级：文件 &gt; 图片 &gt; 文本。图片会落盘到 <code>temp/clipboard/</code>，历史记录重启后仍在。</li>
+<li>历史条数上限在面板里设；超限时旧的先淘汰。</li>
+<li>面板导航键：<code>↑</code> / <code>↓</code> 移动选中、<code>Enter</code> 粘贴、<code>Esc</code> 收起。
+  打开面板本身的快捷键在「设置 → 快捷键」里绑。</li>
+</ul>
+
+<h3 id="计时器">计时器</h3>
+<ul>
+<li>模式：正计时 / 倒计时；倒计时可设时长。</li>
+<li>横幅位置可选中央、顶部/底部居中或四角；贴边时才有水平 / 垂直偏移；字号决定整体大小。</li>
+<li>快捷键是一键开关：按开始，再按停止并清零。</li>
+</ul>
+
+<hr />
+<h2 id="七-脚本与资源包">七、脚本与资源包</h2>
+<ul>
+<li>脚本页<strong>第一张卡是在线资源下载</strong>：搜索、下载、升级、卸载官方脚本包
+  （鼠标特效、AI 写脚本、图片体检、OCR、条码等）。下载源在「设置 → 高级」。</li>
+<li>装好的脚本在脚本页各有<strong>一张卡片</strong>：标题栏的开关决定它是否运行 / 是否出现在菜单，
+  正文是脚本自己声明的参数。</li>
+<li>脚本也可以直接放进 <code>assets/lua/</code> 的对应目录。五个挂载目录的脚本文件改完都会热重载
+  （击键音效在下一次按键生效）；启用开关、参数这类配置仍要重启一次程序才完全生效。</li>
+<li>脚本的结果窗口可以直接选中复制。</li>
+<li>想自己写脚本：交给 AI 就行，见下一节。</li>
+</ul>
+
+<hr />
+<h2 id="八-设置">八、设置</h2>
+<ul>
+<li><strong>快捷键</strong>：所有可配置热键集中在这里。点一行进入捕获态，按下想要的键即完成绑定；
+  清空即停用。面板、截图、录屏、放大镜、便签、剪贴板都在这里改。</li>
+<li><strong>功能开关</strong>：各页面卡片标题栏的开关在这里有一份镜像，勾一处两边同步。</li>
+<li><strong>高级</strong>：下载源、覆盖层置顶 / 全屏避让、工作文件夹自动清理、管理员启动等。</li>
+<li><strong>帮助</strong>：打开本手册。</li>
+</ul>
+
+<hr />
+<h2 id="九-让-AI-帮你写脚本">九、★ 让 AI 帮你写脚本</h2>
+<p><strong>你不需要配置 MCP，也不用记任何命令。</strong>把下面这段话发给一个能读写本机文件、
+能运行命令的 AI（Qoder、WorkBuddy、Claude Code、Cursor 等），它会先读随包文档，
+自己把 CurSeen 接到 MCP，再按你的描述把脚本写出来、跑通、启用。</p>
+<div class="copyhead">
+  <strong>可直接复制发给 AI 的话</strong>
+  <button id="copyPrompt" type="button">复制这段话</button>
+</div>
+<pre id="aiPrompt">我有一个 CurSeen 项目，程序在 <span class="ph">&lt;换成程序所在文件夹，例如 D:\Apps\CurSeen&gt;</span>。
+
+请先做两件事：
+1. 打开程序目录下的 assets/docs 文件夹，读 README.md、接入指南.md、MCP说明.md。
+   接入指南里有把 CurSeen 接到 MCP 客户端的完整步骤，请照着帮我接好；需要我重启客户端、
+   点确认或提供路径的地方，直接告诉我。
+2. 接好之后，先告诉我你看到了哪些工具、脚本准备放在哪个目录、打算怎么做，等我确认再动手。
+
+然后实现我要的效果：<span class="ph">&lt;用大白话描述，越具体越好，例如「鼠标移动时留一条彩虹拖尾，停住后 0.5 秒内淡出」&gt;</span>。
+
+实现时遵守：先 write_script，再 lua_check（warnings 要为空），再 lua_trace，直到 verdict=pass；
+judged=false 的明确告诉我需要真机验收；最后 set_active 启用，并告诉我用户在哪里能看到。
+不要覆盖已有脚本；不要改 assets/ 以外的文件；不要自己发明不存在的接口。</pre>
+<div class="note"><strong>红色 &lt;...&gt; 是你要改的两处</strong>：程序文件夹、效果描述，其余原样发给 AI。
+如果 MCP 没接上，把 AI 报的错原样发回给它，它会按接入指南排查；你不需要自己看配置。</div>
+
+<hr />
+<h2 id="十-常见问题">十、常见问题</h2>
+<h3 class="faq-q">按快捷键没反应？</h3>
+<p class="faq-a">先看对应功能卡片的开关是否打开、快捷键是否为空；再确认是否与别的软件冲突。
+绑定 / 修改都在「设置 → 快捷键」。</p>
+<h3 class="faq-q">找不到截图 / 录屏文件？</h3>
+<p class="faq-a">它们默认落在 <code>temp</code> 下按功能分的目录（截图 / Gif / record / annotation），
+截图本身还同时进了剪贴板。要留存就用「另存为」。</p>
+<h3 class="faq-q">特效 / 键盘不出现？</h3>
+<p class="faq-a">看该功能的开关与方案是否选中；直播捕获还要看直播软件里加的是不是对应的来源类型。</p>
+<h3 class="faq-q">关闭面板后特效还在吗？</h3>
+<p class="faq-a">在。控制面板只是设置界面，功能按自己的开关运行；要停就关对应功能卡片的开关。</p>
+<h3 class="faq-q">全屏游戏里看不见特效？</h3>
+<p class="faq-a">看「设置 → 高级 → 覆盖层」：「总在最上」默认开；勾了「全屏避让」时前台全屏应用会让位。</p>
+<h3 class="faq-q">能离线用吗？</h3>
+<p class="faq-a">可以。程序本身不联网；只有下载脚本包、检查更新时才需要网络。</p>
+<h3 class="faq-q">卸载要删什么？</h3>
+<p class="faq-a">删除整个程序目录即可。配置、日志、缓存、临时产物都在里面，不写注册表和 AppData。</p>
+
+<nav class="toc" aria-label="目录">
+<div class="toc-title">目录</div>
+<ul>
+<li class="toc-l1"><a href="#CurSeen-操作手册">CurSeen 操作手册</a></li>
+<li class="toc-l2"><a href="#一-快速开始">一、快速开始</a></li>
+<li class="toc-l2"><a href="#二-界面总览">二、界面总览</a></li>
+<li class="toc-l2 group">
+  <div class="row"><button class="toc-toggle" type="button" aria-expanded="true" aria-label="折叠或展开本章">▾</button><a href="#三-鼠标特效">三、鼠标特效</a></div>
+  <ul>
+    <li><a href="#拖尾">拖尾</a></li>
+    <li><a href="#悬浮标">悬浮标</a></li>
+    <li><a href="#点击效果">点击效果</a></li>
+    <li><a href="#点击声音">点击声音</a></li>
+  </ul>
+</li>
+<li class="toc-l2 group">
+  <div class="row"><button class="toc-toggle" type="button" aria-expanded="true" aria-label="折叠或展开本章">▾</button><a href="#四-键盘与虚拟键盘">四、键盘与虚拟键盘</a></div>
+  <ul>
+    <li><a href="#击键回显">击键回显</a></li>
+    <li><a href="#击键音效">击键音效</a></li>
+    <li><a href="#虚拟键盘">虚拟键盘</a></li>
+    <li><a href="#直播捕获">直播捕获</a></li>
+  </ul>
+</li>
+<li class="toc-l2 group">
+  <div class="row"><button class="toc-toggle" type="button" aria-expanded="true" aria-label="折叠或展开本章">▾</button><a href="#五-屏幕">五、屏幕</a></div>
+  <ul>
+    <li><a href="#屏幕标注">屏幕标注</a></li>
+    <li><a href="#放大镜">放大镜</a></li>
+    <li><a href="#截图与贴图">截图与贴图</a></li>
+    <li><a href="#GIF录制">GIF 录制</a></li>
+    <li><a href="#视频录制">视频录制</a></li>
+  </ul>
+</li>
+<li class="toc-l2 group">
+  <div class="row"><button class="toc-toggle" type="button" aria-expanded="true" aria-label="折叠或展开本章">▾</button><a href="#六-工具">六、工具</a></div>
+  <ul>
+    <li><a href="#便签">便签</a></li>
+    <li><a href="#剪贴板历史">剪贴板历史</a></li>
+    <li><a href="#计时器">计时器</a></li>
+  </ul>
+</li>
+<li class="toc-l2"><a href="#七-脚本与资源包">七、脚本与资源包</a></li>
+<li class="toc-l2"><a href="#八-设置">八、设置</a></li>
+<li class="toc-l2"><a href="#九-让-AI-帮你写脚本" class="star">★ 九、让 AI 帮你写脚本</a></li>
+<li class="toc-l2"><a href="#十-常见问题">十、常见问题</a></li>
+</ul>
+</nav>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var map = {}; links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var heads = Array.prototype.slice.call(document.querySelectorAll('h1[id],h2[id],h3[id]'));
+  function onScroll(){
+    var cur = heads.length ? heads[0].id : null;
+    for (var i=0;i<heads.length;i++){
+      if (heads[i].getBoundingClientRect().top <= 90) cur = heads[i].id; else break;
+    }
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if (cur && map[cur]) map[cur].classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  window.addEventListener('resize', onScroll, {passive:true});
+  onScroll();
+})();
+/* 一键复制：file:// 下 clipboard API 未必可用，保留 execCommand 兜底 */
+(function(){
+  function wire(btnId, srcId){
+    var btn = document.getElementById(btnId), src = document.getElementById(srcId);
+    if (!btn || !src) return;
+    btn.addEventListener('click', function(){
+      var text = src.textContent;
+      function done(ok){
+        var old = btn.textContent;
+        btn.textContent = ok ? '已复制' : '请手动选中复制';
+        setTimeout(function(){ btn.textContent = old; }, 1800);
+      }
+      function fallback(){
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch(e) {}
+        document.body.removeChild(ta);
+        done(ok);
+      }
+      if (navigator.clipboard && window.isSecureContext)
+        navigator.clipboard.writeText(text).then(function(){ done(true); }, fallback);
+      else
+        fallback();
+    });
+  }
+  wire('copyPrompt', 'aiPrompt');
+})();
+/* 目录折叠：只有带子项的一级章节才有切换按钮；默认全展开 */
+(function(){
+  var btns = Array.prototype.slice.call(document.querySelectorAll('.toc li.group > .row > .toc-toggle'));
+  btns.forEach(function(btn){
+    btn.addEventListener('click', function(ev){
+      ev.preventDefault();
+      ev.stopPropagation();
+      var li = btn.closest('li.group');
+      var collapsed = li.classList.toggle('collapsed');
+      btn.textContent = collapsed ? '▸' : '▾';
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  });
+})();
+</script>
+</body>
+</html>

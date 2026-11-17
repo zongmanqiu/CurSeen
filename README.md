@@ -2,18 +2,21 @@
 
 > 小而美的教学演示辅助工具 (Win10 2004+)
 
-**[⬇️ 下载 2.1.5 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.1.5/CurSeen_2.1.5.zip)**
- ｜ **[⬇️ 下载 2.1.5 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.1.5/CurSeen_2.1.5.zip)**
+**[⬇️ 下载 2.2.0 (Gitee)](https://gitee.com/qiuzongman/curseen/releases/download/2.2.0/CurSeen_2.2.0.zip)**
+ ｜ **[⬇️ 下载 2.2.0 (GitHub)](https://github.com/zongmanqiu/CurSeen/releases/download/2.2.0/CurSeen_2.2.0.zip)**
  ｜ [Gitee主仓](https://gitee.com/qiuzongman/curseen)
  ｜ [GitHub镜像](https://github.com/zongmanqiu/CurSeen)
  ｜ [B站视频演示](https://www.bilibili.com/video/BV18pp46QEkk/)
 
 ## 功能一览
 - **鼠标轨迹**：鼠标拖尾、悬浮标（跟随光标，含聚光灯 / 激光笔等脚本）、点击波纹与特效。
-- **键盘呈现**：点击声音、击键回显（屏幕显示你按下的键）、虚拟键盘（主播向布局 + 高亮注入）。
+- **键盘呈现**：点击声音、击键回显（屏幕显示你按下的键）、虚拟键盘（主播向布局 + 高亮注入；
+  「直播捕获」里三选一：桌面 / 独立窗口（`CurSeen 虚拟键盘` 小窗，任意直播软件「窗口捕获」+ 色键）/
+  浏览器源（本机端口，桌面不出窗、透明底，地址一键复制））。
 - **屏幕标注**：透明 / 白板画笔，支持撤销 / 重做 / 清空；截图后可进编辑态标注。
 - **截图与贴图**：截图进剪贴板或钉到桌面；贴图按「剪贴板」历史顺序取图文（图片 1:1、文字转图片、文件跳过），自己截的图贴回截图时的位置；贴图可移动 / 缩放 / 另存为（`Ctrl+S` 存当前画面）。
-- **录制**：MP4 视频录制（分辨率 / 帧率 / 硬件加速回退）+ GIF 录制（选区 / 帧间差量 / 裁剪另存）。
+- **录制**：MP4 视频录制（分辨率 / 帧率 / 硬件加速回退）+ GIF 录制（选区 / 帧间差量 / 裁剪另存）
+  + 仅录音（M4A，一键开关，音源与降噪与录屏同一套，完成后同样能裁剪）。
 - **辅助**：放大镜（画中画 / 全屏，滚轮调倍率）、计时器（正 / 倒计时，可调锚点与字号）、
   便签、剪贴板历史（粘贴板回顾）。
 - **可扩展**：鼠标 / 点击 / 悬浮标 / 击键音效 / 通用扩展几乎都是 **Lua 脚本**，丢文件即生效、
@@ -25,7 +28,7 @@
   `assets/docs/接入指南.md`、`assets/docs/MCP说明.md`。
 - **轻量**：CPU 软渲染、无外部运行时依赖，单可执行文件即装即用；空闲零功耗、关闭即释放资源。
 
-> 更完整的隐藏快捷键与技巧见随包分发的 **`assets/docs/隐藏快捷键手册.html`**（安装目录 `assets/docs/` 内）。
+> 操作方式、产物位置与固定快捷键见随包分发的 **`assets/docs/操作手册.html`**（安装目录 `assets/docs/` 内，也可从设置页「帮助」打开）。
 
 ## 快速开始
 
@@ -182,7 +185,7 @@ main/                              ← 上传单位（源码 + 现行文档 + �
 | Win32 实测结论 | `docs/PLATFORM_NOTES.md` |
 | 发版流程 | `docs/RELEASE_CHECKLIST.md` |
 | 面板组件库 / UI·Lua API 参考 | `docs/UI_COMPONENTS.md` |
-| 写 Lua 脚本（脚本作者向，随程序分发） | `assets/lua/Lua脚本手册.html`（`API.md` 为完整 API 参考） |
+| 写 Lua 脚本（AI 接入） | `assets/docs/接入指南.md` + `assets/docs/Lua开发指南.md`（`assets/lua/API.md` 为完整 API 参考） |
 | 第三方改动 | `patches/wind-ui-rust-0.30.0/PATCHES.md` |
 | 版本历史 | `HISTORY.md` |
 | 踩坑与教训（现象 / 根因 / 判据） | `docs/踩坑记录*.md`（分册，按 §N 编号查） |

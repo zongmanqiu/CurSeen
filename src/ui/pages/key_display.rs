@@ -49,6 +49,7 @@ use crate::ui::card::{self, FeatureCard};
 use crate::ui::model::{self, PanelModel, VkControlSignal, VkSchemeControls};
 
 use super::trail::build_param_cell;
+use crate::ui::tokens::{self, to_color};
 
 // 数值滑块行已收拢进 `card::slider_row`（2026-09-25 §35 起为「滑条 + 数值框」
 // 三件套唯一正本：全软件所有数值条同一样式）。
@@ -398,6 +399,76 @@ pub fn build_key_display_page(m: &PanelModel) -> Element {
                 .body(Element::host_signal(m.vk_controls, move |sc| {
                     control_rows(&sc, color_layout, ControlGroup::Color, col1_w)
                 }))
+                .build_title_row(col1_w, 0);
+            col = col
+                .child(sub_title)
+                .child(sub_body.visible_when(move || sub_exp.get()));
+            // ── 直播捕获（子卡，m82 B6 / B17/B19）：画面来源 + 所有参数**恒显示**。
+            //    桌面 = 与从前一致；独立窗口 = 键盘搬进 `CurSeen 虚拟键盘` 小窗（窗口捕获 +
+            //    色键，窗口可按倍数等比放大、矢量重绘所以不糊）；浏览器源 = 本机 HTTP 服务，
+            //    桌面不出窗、透明底不用色键。同一时刻只有一个表面。
+            //    ★ 所有行常显（用户口径）：不按来源隐藏，扫一眼就知道有哪些可调项。
+            let vk_live_expanded = m.expand("virtual_keyboard.live");
+            // 复制按钮的判据是**读回剪贴板**：`copy_text` 失败只落日志、不报错，单看调用
+            // 结果会把"没复制上"报成成功（剪贴板被别的程序占着就会这样）。
+            // ★ 地址读的是信号（不是构建时的字符串）：首选端口被占、服务顺延后，
+            //   信号里是**实际**在用的地址，复制出去的才不会指错端口。
+            let copy_url = m.live_url;
+            let copy_btn = Element::button("复制地址").on_click(move |ctx| {
+                let url = copy_url.get();
+                crate::platform::clipboard_history::copy_text(&url);
+                let ok = crate::platform::clipboard::get_text().as_deref() == Some(url.as_str());
+                if ok {
+                    ctx.toast_ok("地址已复制，粘贴到直播软件的「浏览器源」即可");
+                } else {
+                    ctx.toast_err("复制失败：剪贴板被占用，请重试");
+                }
+            });
+            let (sub_title, sub_body, sub_exp) = FeatureCard::new("直播捕获", vk_live_expanded)
+                .body(
+                    Element::col()
+                        // 三选一用下拉（复用全项目同款「标签 + 下拉」，与它处控件列对齐）。
+                        .child(card::choice_row(
+                            "画面来源",
+                            vec![
+                                "桌面".to_string(),
+                                "独立窗口".to_string(),
+                                "浏览器源".to_string(),
+                            ],
+                            m.live_mode,
+                            col1_w,
+                        ))
+                        // 窗口等比放大：窗口本身变大、内容重新矢量渲染，窗口捕获抓到的
+                        // 就是大尺寸原图——在直播软件里拉大只会放大像素（用户实测没改善）。
+                        .child(card::slider_row(
+                            "窗口缩放",
+                            m.live_win_scale,
+                            m.live_win_scale_text,
+                            crate::core::config::LIVE_WINDOW_SCALE_MIN,
+                            crate::core::config::LIVE_WINDOW_SCALE_MAX,
+                            2,
+                            col1_w,
+                        ))
+                        .child(card::option_row(
+                            "抠图底色",
+                            Element::color_picker_opts(
+                                m.live_bg,
+                                ColorPickerOpts::default().alpha(false),
+                            ),
+                            col1_w,
+                        ))
+                        // 浏览器源地址**不展示明文**，只留复制按钮（用户口径）：省得手打，
+                        // 也避免有人照着屏幕抄错协议（直播姬会把裸地址补成 https，画面全空）。
+                        .child(card::option_row("浏览器源地址", copy_btn, col1_w))
+                        // 「来源尺寸」= 直播软件里浏览器源该填的宽高（2× 像素），随键盘方案变。
+                        .child(card::option_row(
+                            "来源尺寸",
+                            Element::label_signal(m.live_out_size)
+                                .font_size(tokens::FONT_MD)
+                                .fg(to_color(tokens::TEXT)),
+                            col1_w,
+                        )),
+                )
                 .build_title_row(col1_w, 0);
             col = col
                 .child(sub_title)

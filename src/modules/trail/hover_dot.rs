@@ -22,7 +22,7 @@
 //! ★ `elapsed` 单位**秒**（此前是毫秒，与另外三类宿主差 1000 倍）。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use serde_json::Value as Json;
@@ -43,6 +43,8 @@ use super::fx_core::FxCore;
 pub struct HoverDotInstance {
     /// 脚本 id = 相对 `assets/lua` 的路径 stem（`HoverDot/solid`、`scripts/my_dot`）。
     pub id: String,
+    /// 加载时的引擎根（热重载按同一根重读）。
+    root: PathBuf,
     /// 统一实例核心（`None` = 脚本加载失败，退化成内建 blit 兜底）。
     core: Option<FxCore>,
     /// ★ 宿主留一份参数副本：脚本核心为 `None` 时（加载失败），内建 blit 兜底仍要读
@@ -105,12 +107,33 @@ impl HoverDotInstance {
         };
         Self {
             id: id.to_string(),
+            root: root.to_path_buf(),
             core,
             params: HashMap::new(),
             image: None,
             anim: None,
             anim_acc_ms: 0.0,
             next_frame_ms: None,
+        }
+    }
+
+    /// 资产变化时检查脚本；原先加载失败的实例也会重试（修好即自愈）。
+    ///
+    /// 返回 `true` = 文件变过。保留参数（内建 blit 兜底仍要读 `scale`/`opacity`）。
+    pub fn refresh_script(&mut self) -> bool {
+        if let Some(core) = self.core.as_mut() {
+            return core.ensure_fresh();
+        }
+        match FxCore::load(&self.root, &self.id, HOST) {
+            Ok(core) => {
+                self.core = Some(core);
+                log::info!("悬浮标脚本 {} 已恢复（文件改动生效）", self.id);
+                true
+            }
+            Err(e) => {
+                log::warn!("悬浮标脚本 {}.lua 仍加载失败：{e}", self.id);
+                false
+            }
         }
     }
 
@@ -330,6 +353,17 @@ impl HoverDot {
                 }
             })
             .collect();
+    }
+
+    /// 资产目录变化：让每个实例按文件戳自刷新。返回真变化的实例数。
+    pub fn reload_scripts(&mut self) -> usize {
+        let mut n = 0;
+        for i in &mut self.instances {
+            if i.refresh_script() {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// 按实例 id 注入参数表（不存在该实例 = 忽略；实例持有期参数每版本重放）。
@@ -699,6 +733,54 @@ end
         h.sync_instances(&["HoverDot/png".into()]);
         assert_eq!(h.instances.len(), 1);
         assert_eq!(h.instances[0].id, "HoverDot/png");
+    }
+
+    /// 文件戳热重载：改文件后实例重建；原先**加载失败**的实例在文件修好后自愈。
+    #[test]
+    fn reload_scripts_picks_up_edits_and_heals_broken_files() {
+        let root =
+            std::env::temp_dir().join(format!("curseen_hover_reload_{}", std::process::id()));
+        let dir = root.join("HoverDot");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        // ① 首次就坏的脚本：进入加载失败态；没改文件时刷新不该报"变过"。
+        std::fs::write(dir.join("live.lua"), "function draw(").unwrap();
+        let mut h = HoverDot::new();
+        h.sync_instances_at(&root, &["HoverDot/live".to_string()]);
+        assert!(h.instances[0].core.is_none(), "坏脚本应是加载失败态");
+        assert_eq!(h.reload_scripts(), 0, "没改文件不该重试");
+        // ② 修好 ⇒ 自愈。
+        std::fs::write(
+            dir.join("live.lua"),
+            "function draw(ctx, p) ctx:circle(5, 5, 3, 255, 0, 0, 255) end
+",
+        )
+        .unwrap();
+        assert_eq!(h.reload_scripts(), 1, "修好后要自愈");
+        assert!(h.instances[0].core.is_some());
+        // ③ 再改 ⇒ 重建；同内容不重复。
+        std::fs::write(
+            dir.join("live.lua"),
+            "function draw(ctx, p) ctx:circle(5, 5, 6, 0, 255, 0, 255) end
+-- edit
+",
+        )
+        .unwrap();
+        assert_eq!(h.reload_scripts(), 1);
+        assert_eq!(h.reload_scripts(), 0);
+        // ④ 写到一半：保留旧 VM（屏幕上不闪空），修好后再换。
+        std::fs::write(dir.join("live.lua"), "function draw(").unwrap();
+        assert_eq!(h.reload_scripts(), 1);
+        assert!(h.instances[0].core.is_some(), "坏写入期间旧版本继续工作");
+        std::fs::write(
+            dir.join("live.lua"),
+            "function draw(ctx, p) ctx:circle(5, 5, 3, 255, 0, 0, 255) end
+-- healed
+",
+        )
+        .unwrap();
+        assert_eq!(h.reload_scripts(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

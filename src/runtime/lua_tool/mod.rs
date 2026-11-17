@@ -146,7 +146,14 @@ pub fn run_cli(args: Vec<String>) -> Option<i32> {
     let first = args.first()?.as_str();
     if !matches!(
         first,
-        "--lua-check" | "--lua-trace" | "--lua-shot" | "--mcp" | "--lua-help" | "--help" | "-h"
+        "--lua-check"
+            | "--lua-trace"
+            | "--lua-shot"
+            | "--mcp"
+            | "--mcp-init"
+            | "--lua-help"
+            | "--help"
+            | "-h"
     ) {
         return None;
     }
@@ -163,6 +170,10 @@ fn dispatch(ctx: &Ctx, args: &[String], out: &mut Out) -> i32 {
             0
         }
         "--mcp" => mcp::serve(ctx, out),
+        "--mcp-init" => {
+            let _ = out.write_all(mcp_init_text().as_bytes());
+            0
+        }
         "--lua-check" => {
             let Some(path) = args.get(1).filter(|a| !a.starts_with("--")) else {
                 return usage(out, "--lua-check 需要一个脚本路径");
@@ -458,9 +469,9 @@ pub(crate) fn cmd_check(ctx: &Ctx, path: &str, flags: &Flags) -> (i32, Json) {
                 .to_string(),
         );
     }
-    if !host.hot_reload() {
+    if host == Host::KeySound {
         hints.push(
-            "本目录没有热重载：改完文件要重开面板（或重启）才生效。要边改边看，把脚本放进 `scripts/`。"
+            "KeySound 的热重载在下一次按键生效（每次按键都会检查文件戳），不需要重开面板。"
                 .to_string(),
         );
     }
@@ -694,15 +705,43 @@ fn emit(out: &mut Out, v: &Json) {
 pub const DOCS: &[(&str, &str)] = &[
     (
         "assets/docs/接入指南.md",
-        "接入第一站：怎么连 MCP / 命令行、八个工具、四步闭环、什么算通过",
+        "接入第一站：怎么连 MCP / 命令行、工具清单、四步闭环、什么算通过",
     ),
     (
         "assets/docs/MCP说明.md",
-        "MCP 协议 / 八个工具签名 / 参数默认值口径 / 错误码与排查",
+        "MCP 协议 / 工具签名 / 参数默认值口径 / 错误码与排查",
+    ),
+    (
+        "assets/docs/Lua开发指南.md",
+        "脚本怎么写：挂载目录 / 最小结构 / schema 控件 / 生命周期 / 调试与发布（配 API.md 用）",
     ),
     (
         "assets/docs/README.md",
-        "文档索引：哪份文档讲什么、AI 的阅读顺序",
+        "文档索引：按问题查、AI 的阅读顺序、主题文档的写法",
+    ),
+    (
+        "assets/docs/鼠标特效.md",
+        "拖尾 / 悬浮标 / 点击效果 / 点击声音：面板、配置键、三个脚本目录契约",
+    ),
+    (
+        "assets/docs/虚拟键盘.md",
+        "击键回显 / 击键音效 / 键盘方案 JSON / 直播捕获（窗口与浏览器源）",
+    ),
+    (
+        "assets/docs/屏幕与捕获.md",
+        "屏幕标注 / 放大 / 截图贴图 / GIF / 录屏 + 产物落点与清理",
+    ),
+    (
+        "assets/docs/工具与小部件.md",
+        "便签 / 剪贴板历史 / 计时器：配置、持久化边界、排查",
+    ),
+    (
+        "assets/docs/文件与目录.md",
+        "程序目录版图、读写下界、temp 与 data、AI 能动哪些文件",
+    ),
+    (
+        "assets/docs/脚本扩展与资源包.md",
+        "四类脚本角色 / ext 能力 / 数据落点 / pack.json 与在线包",
     ),
     (
         "assets/docs/配置说明.md",
@@ -710,16 +749,8 @@ pub const DOCS: &[(&str, &str)] = &[
     ),
     ("assets/lua/API.md", "Lua 接口权威表（与代码同源校验）"),
     (
-        "assets/docs/隐藏快捷键手册.md",
-        "面板上不显示的固定快捷键清单（纯文本版）",
-    ),
-    (
         "assets/lua/HoverDot/README.md",
         "悬浮标脚本的额外约定（续帧 / hide_cursor / 坐标系）",
-    ),
-    (
-        "assets/lua/Lua脚本手册.html",
-        "通读版脚本手册（人看，浏览器打开）",
     ),
 ];
 
@@ -750,6 +781,29 @@ pub(crate) fn docs_json() -> Vec<Json> {
         .collect()
 }
 
+/// `--mcp-init`：打印能直接粘贴到客户端的 `mcpServers` 配置块。
+///
+/// 只打印、不改任何客户端的配置：写别人家的配置要猜版本、要备份、要处理未知字段，
+/// 一旦写坏就是"本来能用的另一个服务没了"。路径给本机绝对路径，用户不用手拼。
+fn mcp_init_text() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "curseen.exe".to_string());
+    let block = json!({
+        "mcpServers": {
+            "curseen": {
+                "command": exe,
+                "args": ["--mcp"],
+            }
+        }
+    });
+    format!(
+        "把下面这段放进客户端的 MCP 配置（command 已是本机绝对路径，换目录后重新跑一次本命令）：\n\n{}\n\n\
+         接上后先看 initialize 返回的 instructions；工具清单以 tools/list 为准。\n",
+        serde_json::to_string_pretty(&block).unwrap_or_default()
+    )
+}
+
 fn help() -> String {
     format!(
         r#"CurSeen Lua 工具台（发行版内建）
@@ -760,6 +814,7 @@ fn help() -> String {
   curseen.exe --lua-trace <脚本>            跑 N 帧并给出 pass/fail（默认 300 帧）
   curseen.exe --lua-shot  <脚本>            离屏出一张 PNG（默认 temp/lua_shot/）
   curseen.exe --mcp                         以 MCP 服务器运行（stdio）
+  curseen.exe --mcp-init                    打印可直接粘贴的 MCP 客户端配置块
 
 通用旗标：
   --frames N            跑多少帧（trace/shot，默认 300）
@@ -776,14 +831,15 @@ fn help() -> String {
 
 文档（路径一律相对本程序目录，都在 assets/ 里）：
 {docs}
-  MCP 客户端（没有文件权限）：read_doc 读上面这几份 .md，
-  write_script 落盘脚本，set_active 启用/写参数，delete_script 清理（移到 temp/lua_tool_trash/）。
+  MCP 客户端（没有文件权限）：list_docs 看有哪些文档、read_doc 读原文，
+  write_script 落盘脚本、patch_script 小改（唯一命中），set_active 启用/写参数，
+  delete_script 清理（移到 temp/lua_tool_trash/）。
 
 脚本放哪儿（这条决定用户能不能在面板里选到它）：
   assets/lua/MouseTrail/   拖尾特效下拉
   assets/lua/HoverDot/     悬浮标类型下拉
   assets/lua/ClickFx/      点击效果下拉
-  assets/lua/scripts/      「脚本」页的常驻卡片（**只有这里热重载**）
+  assets/lua/scripts/      「脚本」页的常驻卡片（五个挂载都热重载）
 
 判据（trace 自动算，不需要你自己比对数字）：
   first_frame_draws     第 0 帧必须画出东西（宿主按"这一帧画不画"判活）
@@ -965,8 +1021,11 @@ mod tests {
 
         let scripts = dir.path().join("assets/lua/scripts/mine.lua");
         assert_eq!(ctx.locate(&scripts, None).2, Host::Composite);
-        assert!(Host::Composite.hot_reload(), "只有 scripts/ 有热重载");
-        assert!(!Host::Hover.hot_reload());
+        assert!(Host::Composite.hot_reload());
+        assert!(Host::Hover.hot_reload(), "m86 起五个挂载都热重载");
+        assert!(Host::Click.hot_reload());
+        assert!(Host::Trail.hot_reload());
+        assert!(Host::KeySound.hot_reload());
     }
 
     /// 旗标解析：`--param` 的值按 JSON 解析，失败退回字符串。

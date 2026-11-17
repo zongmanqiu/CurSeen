@@ -1,4 +1,4 @@
-//! 叠层基座：几何换算的**唯一出处** + 穿透/取消手势的**唯一裁决点**。
+﻿//! 叠层基座：几何换算的**唯一出处** + 穿透/取消手势的**唯一裁决点**。
 //!
 //! 三个消费方（截图区域选择 / 屏幕注释·标注 / 贴图窗）共用这套设施：
 //!
@@ -25,10 +25,12 @@
 
 pub mod gif_bar;
 pub mod gif_trim;
+pub mod live_window;
 pub mod mp4_trim;
 pub mod pin;
 pub mod region;
 pub mod region_magnifier;
+pub mod web_out;
 
 use crate::core::geometry::Rect;
 use crate::platform::display::{dpi_scale, ScreenRect};

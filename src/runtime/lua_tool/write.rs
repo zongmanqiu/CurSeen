@@ -118,8 +118,16 @@ fn write_inner(ctx: &Ctx, path: &str, code: &str, overwrite: bool) -> R<Json> {
     }
     // 行尾统一 LF：CRLF 会让 Lua 报错的行号与编辑器对不上。
     let body = code.replace("\r\n", "\n");
-    std::fs::write(&full, body.as_bytes())
-        .map_err(|e| Fail::io(format!("写文件失败：{e}")).at(&full, ctx))?;
+    // 原子写：监听线程可能在同一拍看到"文件出现"，半个脚本会被当成一次热重载。
+    let tmp = full.with_extension("lua.tmp");
+    if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Fail::io(format!("写临时文件失败：{e}")).at(&full, ctx));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &full) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Fail::io(format!("替换脚本失败：{e}")).at(&full, ctx));
+    }
     Ok(json!({
         "ok": true,
         "path": ctx.display(&full),
@@ -131,6 +139,254 @@ fn write_inner(ctx: &Ctx, path: &str, code: &str, overwrite: bool) -> R<Json> {
         "created": !existed,
         "next": "接着跑 lua_check 看语法与参数体检，再 lua_trace 拿 verdict。",
     }))
+}
+
+/// 对**已有**脚本做小补丁：`replace` / `insert_after` / `delete` 按顺序应用。
+///
+/// 三条与 `write_script` 不同的纪律：
+/// 1. **不新建文件**：路径不存在就拒绝（新建是 `write_script` 的事）。
+/// 2. **每条 `old_text` 必须唯一命中**：命中 0 处说明原文已变、命中多处在"改哪一处"
+///    上有歧义；两者都整批拒绝，文件一个字节都不动。
+/// 3. **写前备份**：原文件先复制进 `temp/lua_tool_trash/`，补丁打错还能拿回来。
+///
+/// 回执的 `first_changed_line` / `last_changed_line` 用公共前缀/后缀逐行比较，
+/// 调用方改完只需重读那几行。
+pub(crate) fn patch_script(ctx: &Ctx, path: &str, edits: &Json, preview: bool) -> (i32, Json) {
+    match patch_inner(ctx, path, edits, preview) {
+        Ok(v) => (0, v),
+        Err(f) => (f.code, f.json),
+    }
+}
+
+fn patch_inner(ctx: &Ctx, path: &str, edits: &Json, preview: bool) -> R<Json> {
+    let (full, id, host) = locate_script(ctx, path).map_err(|e| e.at(Path::new(path), ctx))?;
+    if !full.is_file() {
+        return Err(
+            Fail::arg("文件不存在：patch_script 只改已有脚本；新建请用 write_script")
+                .at(&full, ctx),
+        );
+    }
+    let original = std::fs::read_to_string(&full)
+        .map_err(|e| Fail::io(format!("读文件失败：{e}")).at(&full, ctx))?;
+    let list = edits
+        .as_array()
+        .ok_or_else(|| Fail::arg("edits 必须是数组").at(&full, ctx))?;
+    if list.is_empty() {
+        return Err(Fail::arg("edits 是空的").at(&full, ctx));
+    }
+    if list.len() > 20 {
+        return Err(Fail::arg(format!("edits 有 {} 项，最多 20 项", list.len())).at(&full, ctx));
+    }
+
+    let mut text = original.clone();
+    for (n, edit) in list.iter().enumerate() {
+        let at = n + 1;
+        let op = edit
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Fail::arg(format!("第 {at} 项缺少 op")).at(&full, ctx))?;
+        let old = edit
+            .get("old_text")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Fail::arg(format!("第 {at} 项 old_text 是空的")).at(&full, ctx))?;
+        let hits = text.matches(old).count();
+        if hits == 0 {
+            return Err(Fail::arg(format!(
+                "第 {at} 项 old_text 没有命中（原文可能已被改过）：{old:?}"
+            ))
+            .at(&full, ctx));
+        }
+        if hits > 1 {
+            return Err(Fail::arg(format!(
+                "第 {at} 项 old_text 命中 {hits} 处，无法唯一确定改哪一处：{old:?}"
+            ))
+            .at(&full, ctx));
+        }
+        let start = text
+            .find(old)
+            .ok_or_else(|| Fail::arg(format!("第 {at} 项定位失败")).at(&full, ctx))?;
+        let end = start + old.len();
+        let new_text = || {
+            edit.get("new_text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Fail::arg(format!("第 {at} 项 {op} 需要 new_text")).at(&full, ctx))
+        };
+        match op {
+            "replace" => {
+                let new = new_text()?;
+                text.replace_range(start..end, new);
+            }
+            "insert_after" => {
+                let new = new_text()?;
+                text.insert_str(end, new);
+            }
+            "delete" => text.replace_range(start..end, ""),
+            other => {
+                return Err(Fail::arg(format!(
+                    "第 {at} 项 op 只认 replace / insert_after / delete：{other}"
+                ))
+                .at(&full, ctx))
+            }
+        }
+    }
+
+    if text.len() > MAX_SCRIPT_BYTES {
+        return Err(Fail::arg(format!(
+            "补丁后 {} 字节，超过上限 {MAX_SCRIPT_BYTES}",
+            text.len()
+        ))
+        .at(&full, ctx));
+    }
+
+    let changed = text != original;
+    let receipt = line_receipt(&original, &text);
+    if !changed {
+        return Ok(json!({
+            "ok": true,
+            "path": ctx.display(&full),
+            "id": id,
+            "applied": false,
+            "changed": false,
+            "preview": preview,
+            "note": "补丁应用后内容与原来一致，没有写盘。",
+            "next": "内容没变就不必再跑 lua_check。",
+        }));
+    }
+    if preview {
+        return Ok(json!({
+            "ok": true,
+            "path": ctx.display(&full),
+            "id": id,
+            "applied": false,
+            "changed": true,
+            "preview": true,
+            "next": "确认摘要无误后以 preview=false 再调一次才落盘。",
+            "receipt": receipt,
+        }));
+    }
+
+    // 备份：补丁打错还能找回；备份失败就不写，别在没有退路的情况下改用户脚本。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let name = full
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "script.lua".to_string());
+    let trash = ctx.app.join("temp").join("lua_tool_trash");
+    std::fs::create_dir_all(&trash)
+        .map_err(|e| Fail::io(format!("建回收目录失败：{e}")).at(&full, ctx))?;
+    let backup = trash.join(format!("{stamp}_{name}"));
+    std::fs::copy(&full, &backup)
+        .map_err(|e| Fail::io(format!("备份原文件失败：{e}")).at(&full, ctx))?;
+
+    // 原子写：同目录临时文件 → rename，避免中途失败留下半个脚本。
+    let tmp = full.with_extension("lua.tmp");
+    if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Fail::io(format!("写临时文件失败：{e}")).at(&full, ctx));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &full) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Fail::io(format!("替换脚本失败：{e}")).at(&full, ctx));
+    }
+
+    Ok(json!({
+        "ok": true,
+        "path": ctx.display(&full),
+        "id": id,
+        "mount": host.host_global(),
+        "ui_entry": host.ui_entry(),
+        "hot_reload": host.hot_reload(),
+        "applied": true,
+        "changed": true,
+        "preview": false,
+        "backup": ctx.display(&backup),
+        "receipt": receipt,
+        "next": "接着跑 lua_check 复核语法与参数体检。",
+    }))
+}
+
+/// 行级回执：公共前缀 / 后缀逐行比较，给出改动落在哪几行。
+fn line_receipt(before: &str, after: &str) -> Json {
+    let a: Vec<&str> = before.split('\n').collect();
+    let b: Vec<&str> = after.split('\n').collect();
+    let mut prefix = 0;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < a.len() - prefix
+        && suffix < b.len() - prefix
+        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let first = prefix + 1;
+    let last = (a.len() - suffix).max(first);
+    json!({
+        "lines_before": a.len(),
+        "lines_after": b.len(),
+        "first_changed_line": first,
+        "last_changed_line": last,
+        "bytes_before": before.len(),
+        "bytes_after": after.len(),
+    })
+}
+
+/// 读一个脚本的原文（给没有文件系统的 MCP 客户端补"看原文"这一步）。
+///
+/// 路径口径与 `patch_script` 完全一致：`HoverDot/foo`、`HoverDot/foo.lua`、
+/// `assets/lua/HoverDot/foo.lua` 三者等价；只认五个挂载目录。只读，不碰配置/实例。
+pub(crate) fn read_script(ctx: &Ctx, path: &str) -> (i32, Json) {
+    let (full, id, host) = match locate_script(ctx, path) {
+        Ok(v) => v,
+        Err(f) => return (f.code, f.json),
+    };
+    if !full.is_file() {
+        return (
+            2,
+            json!({
+                "ok": false,
+                "path": ctx.display(&full),
+                "id": id,
+                "error": "文件不存在",
+                "next": "先调 list_scripts 看现有脚本；新建用 write_script。",
+            }),
+        );
+    }
+    let text = match std::fs::read_to_string(&full) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                4,
+                json!({
+                    "ok": false,
+                    "path": ctx.display(&full),
+                    "error": format!("读文件失败：{e}"),
+                }),
+            )
+        }
+    };
+    // 行数与 `patch_script` 的行级回执同一口径（按换行符切）。
+    let lines = text.split('\n').count();
+    (
+        0,
+        json!({
+            "ok": true,
+            "path": ctx.display(&full),
+            "id": id,
+            "mount": host.host_global(),
+            "ui_entry": host.ui_entry(),
+            "hot_reload": host.hot_reload(),
+            "bytes": text.len(),
+            "lines": lines,
+            "text": text,
+            "next": "改一两行用 patch_script：old_text 从 text 里原样复制，必须唯一命中。",
+        }),
+    )
 }
 
 /// 删除（= 移到 `temp/lua_tool_trash/`）一个脚本。**不真删**，所以任何脚本都允许删。
@@ -627,7 +883,7 @@ mod tests {
             "CRLF 必须被换成 LF（否则报错行号错位）"
         );
         assert_eq!(v["id"], "HoverDot/a");
-        assert_eq!(v["hot_reload"], false);
+        assert_eq!(v["hot_reload"], true, "m86 起所有挂载都热重载");
 
         // 同名再写：拒绝（这是"别覆盖出厂脚本"的那道闸）
         let (code, v) = write_script(&ctx, "HoverDot/a.lua", "x = 9\n", false);
@@ -645,6 +901,90 @@ mod tests {
             let (code, v) = write_script(&ctx, bad, "x = 1\n", true);
             assert_ne!(code, 0, "`{bad}` 不该被写入：{v}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `read_script`：三种写法等价、元数据对、缺文件/越界都是工具级失败。
+    #[test]
+    fn read_script_returns_source_and_metadata() {
+        let (dir, ctx) = app("read");
+        write_script(&ctx, "HoverDot/r.lua", "a = 1\nb = 2\n", false);
+        for path in ["HoverDot/r", "HoverDot/r.lua", "assets/lua/HoverDot/r.lua"] {
+            let (code, v) = read_script(&ctx, path);
+            assert_eq!(code, 0, "`{path}` 应可读：{v}");
+            assert_eq!(v["id"], "HoverDot/r");
+            assert_eq!(v["text"], "a = 1\nb = 2\n");
+            assert_eq!(v["bytes"], 12);
+            assert_eq!(v["lines"], 3, "按换行切分，与 patch 回执同口径");
+            assert_eq!(v["hot_reload"], true);
+        }
+
+        let (code, v) = read_script(&ctx, "HoverDot/missing");
+        assert_eq!(code, 2, "缺文件应是工具失败：{v}");
+        assert_eq!(v["ok"], false);
+        assert!(v["next"]
+            .as_str()
+            .is_some_and(|s| s.contains("list_scripts")));
+
+        for bad in ["foo", "Sounds/foo.lua", "assets/lua/../config.json"] {
+            let (code, v) = read_script(&ctx, bad);
+            assert_ne!(code, 0, "`{bad}` 不该被读：{v}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// patch：唯一命中才应用、整批原子、回执给行号；preview 不落盘；备份可找回。
+    #[test]
+    fn patch_requires_unique_match_and_reports_lines() {
+        let (dir, ctx) = app("patch");
+        write_script(&ctx, "HoverDot/p.lua", "a = 1\nb = 2\nc = 3\n", false);
+        let path = "HoverDot/p.lua";
+
+        // preview 只回摘要，不落盘
+        let (code, v) = patch_script(
+            &ctx,
+            path,
+            &json!([{ "op": "replace", "old_text": "b = 2", "new_text": "b = 20" }]),
+            true,
+        );
+        assert_eq!(code, 0, "preview 应成功：{v}");
+        assert_eq!(v["applied"], false);
+        assert_eq!(v["receipt"]["first_changed_line"], 2);
+        let body =
+            std::fs::read_to_string(ctx.app.join("assets/lua/HoverDot/p.lua")).expect("读回");
+        assert_eq!(body, "a = 1\nb = 2\nc = 3\n", "preview 不许写盘");
+
+        // 命中 0 处 / 多处都必须整批拒绝，且文件不动
+        for bad in [
+            json!([{ "op": "replace", "old_text": "nope", "new_text": "x" }]),
+            json!([{ "op": "delete", "old_text": "= " }]),
+        ] {
+            let (code, v) = patch_script(&ctx, path, &bad, false);
+            assert_ne!(code, 0, "必须拒绝：{v}");
+            assert_eq!(v["ok"], false);
+        }
+        let body =
+            std::fs::read_to_string(ctx.app.join("assets/lua/HoverDot/p.lua")).expect("读回");
+        assert_eq!(body, "a = 1\nb = 2\nc = 3\n", "失败的补丁一个字节都不许改");
+
+        // 正式落盘：插在 b 之后，回执给出变动行，备份存在
+        let (code, v) = patch_script(
+            &ctx,
+            path,
+            &json!([{ "op": "insert_after", "old_text": "b = 2\n", "new_text": "b2 = 9\n" }]),
+            false,
+        );
+        assert_eq!(code, 0, "应成功：{v}");
+        assert_eq!(v["applied"], true);
+        assert_eq!(v["receipt"]["lines_before"], 4);
+        assert_eq!(v["receipt"]["lines_after"], 5);
+        assert_eq!(v["receipt"]["first_changed_line"], 3);
+        let body =
+            std::fs::read_to_string(ctx.app.join("assets/lua/HoverDot/p.lua")).expect("读回");
+        assert_eq!(body, "a = 1\nb = 2\nb2 = 9\nc = 3\n");
+        let backup = v["backup"].as_str().expect("应有备份路径");
+        assert!(ctx.app.join(backup).is_file(), "备份文件应存在：{backup}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

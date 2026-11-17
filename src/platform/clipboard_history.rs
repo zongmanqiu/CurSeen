@@ -31,7 +31,7 @@
 #![allow(unused_must_use, function_casts_as_integer)]
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -126,6 +126,10 @@ const TARGET_POLL_MS: u32 = 500;
 /// 会落空 + 报错误音，2026-10-07 日志实证；textus 同场景 sleep 50ms 后发 ⇒ 通吃）。
 /// 不在消息泵上 sleep，走计时器。
 const PASTE_SEND_TIMER: usize = 7;
+/// 历史全量重写的防抖计时器（m81 §4.6）：删除/收藏/淘汰风暴只落一次盘。
+const REWRITE_TIMER: usize = 8;
+/// 重写防抖窗口：首个变更后 2 秒统一落盘；窗口内后续变更不再重排到期时间。
+const REWRITE_DEBOUNCE_MS: u32 = 2000;
 const PASTE_SEND_DELAY_MS: u32 = 60;
 /// ★ 发键前「前台稳定」判据（2026-10-07 驱动实验定案）：写回剪贴板会触发目标应用
 /// （QQ/TIM）自己的剪贴板助手气泡弹出抢前台/焦点，固定 60ms 后直接发键 = 赌运气
@@ -497,6 +501,13 @@ fn RGB(r: u8, g: u8, b: u8) -> COLORREF {
 }
 
 // ── 跨线程命令派发 ─────────────────────────────────────────────────────
+/// 缩略图缓存的 LRU 上限（条）。面板可见行 ~15-20，三屏余量足够翻回浏览；
+/// 按 ~1.1MB/条算峰值 ~55MB 且有界（2026-11-16 用户实测拖滚动条涨内存的对策）。
+const THUMB_CACHE_CAP: usize = 48;
+/// 图标位图的 LRU 上限（条）。~2.3KB/条 × 512 = ~1.2MB，即使万条历史也不膨胀
+/// （2026-11-16 用户问 5000/10000 条的对策）；挤出的随时从盘上小图重解（亚毫秒）。
+const THUMB_ICON_CAP: usize = 512;
+
 static CMD_HWND: OnceLock<AtomicUsize> = OnceLock::new();
 static START_ONCE: Once = Once::new();
 static ORIG_EDIT: AtomicUsize = AtomicUsize::new(0);
@@ -854,6 +865,61 @@ fn thumbnail_of(shot: &Shot, max_w: i32) -> Shot {
     }
 }
 
+/// 缩略图 → 列表**图标**位图（双边适配 ≤`max`，盒式均值）。
+///
+/// # 为什么在解码入场时预缩（m81 性能，2026-11-16 用户实测拖滚动条 CPU 15%）
+///
+/// 面板每帧对每个可见行做 `StretchDIBits(≤720px → 24px)`，GDI 要读完整源图
+/// （~1.5MB/行/帧）——拖滚动条时全屏重绘 × ~20 行，这就是 CPU 大头。预缩成
+/// ≤24px 的小位图（~2.3KB）后，每帧从"读 1.5MB"变"读 2.3KB"，且行滚回视图
+/// 不再重复付解码/缩放钱（图标全会话常驻，600 条也才 ~1.4MB）。
+/// 用**盒式均值**而不是最近邻：缩到 24px 时最近邻整行整列丢像素，图标发花。
+fn downscale_to_icon(shot: &Shot, max: i32) -> Shot {
+    if shot.w <= 0 || shot.h <= 0 || (shot.w <= max && shot.h <= max) {
+        return shot.clone();
+    }
+    let sc = (max as f32 / shot.w as f32).min(max as f32 / shot.h as f32);
+    let nw = ((shot.w as f32 * sc) as i32).clamp(1, max);
+    let nh = ((shot.h as f32 * sc) as i32).clamp(1, max);
+    let stride = shot.w as usize * 4;
+    let nstride = nw as usize * 4;
+    let mut out = vec![0u8; nstride * nh as usize];
+    for dy in 0..nh as usize {
+        let sy0 = dy * shot.h as usize / nh as usize;
+        let sy1 = ((dy + 1) * shot.h as usize / nh as usize)
+            .max(sy0 + 1)
+            .min(shot.h as usize);
+        for dx in 0..nw as usize {
+            let sx0 = dx * shot.w as usize / nw as usize;
+            let sx1 = ((dx + 1) * shot.w as usize / nw as usize)
+                .max(sx0 + 1)
+                .min(shot.w as usize);
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            let mut n = 0u32;
+            for sy in sy0..sy1 {
+                let rowbase = sy * stride;
+                for sx in sx0..sx1 {
+                    let p = rowbase + sx * 4;
+                    b += shot.bgra[p] as u32;
+                    g += shot.bgra[p + 1] as u32;
+                    r += shot.bgra[p + 2] as u32;
+                    n += 1;
+                }
+            }
+            let d = dy * nstride + dx * 4;
+            out[d] = (b / n) as u8;
+            out[d + 1] = (g / n) as u8;
+            out[d + 2] = (r / n) as u8;
+            out[d + 3] = 255;
+        }
+    }
+    Shot {
+        w: nw,
+        h: nh,
+        bgra: out,
+    }
+}
+
 /// PNG 文件 → 全尺寸位图。
 ///
 /// ★ 实现已挪到 [`crate::platform::screenshot::load_png`]（m14）：那边是 `save_png` 的语义
@@ -1044,6 +1110,7 @@ fn capture_file_thumb_bg(
         rel: to_app_relative(&p),
         w: shot.w,
         h: shot.h,
+        icon: downscale_to_icon(&shot, ICON_W),
         thumb: shot,
         // 恒 `None`：这一路**故意不存原件**——它是用户自己的文件，原分辨率一直在
         // 原路径上，不需要我们替他再保管一份。（详情见本函数上方的注释。）
@@ -1110,6 +1177,12 @@ fn capture_image_bg(
         }
         let path = dir.join(format!("{hash:016x}.png"));
         let _ = save_png(&thumb, &path);
+        // ★ 图标落盘（Ditto 式持久化，m81 §4.3）：≤24px 小 PNG（~1-2KB）随缩略图一起
+        //   写进 `thumbs/icons/`。下次会话/重启后列表滚动只解这份小图，不再碰 720px。
+        let icon = downscale_to_icon(&thumb, ICON_W);
+        let icons_dir = dir.join("icons");
+        let _ = std::fs::create_dir_all(&icons_dir);
+        let _ = save_png(&icon, &icons_dir.join(format!("{hash:016x}.png")));
         // ★ 全尺寸原件：**恒存**（2026-11-10 用户口径——图片条目本质上都是"文件"，
         //   剪贴板文件夹里必须有一份可上传的备份）。原实现只在**真的被降采样过**时才落：
         //   `thumbnail_of` 对窄于阈值的图原样返回（见其首行 `shot.w <= max_w` 分支），
@@ -1134,6 +1207,7 @@ fn capture_image_bg(
             w: shot.w,
             h: shot.h,
             thumb,
+            icon,
             full: Some(full.0).filter(|s| !s.is_empty()),
         };
         *last = Some((hash, cap.clone()));
@@ -1502,7 +1576,16 @@ pub fn migrate_legacy_panel_state(config: &mut crate::core::config::Config) {
 /// worker 任务（面板线程 → worker）：重活全在后台线程，面板线程只投递/收结果。
 enum CapJob {
     /// 解码一张历史缩略图（懒加载可见行，见 [`ClipboardMgr::ensure_visible_thumbs`]）。
-    Thumb(u64, PathBuf),
+    /// `icon_path` = 图标落盘目标（`thumbs/icons/<hash>.png`；Some 且解码有效才写，
+    /// Ditto 式持久化——下次会话/重启后列表滚动只解这张小图，不再碰 720px）。
+    Thumb {
+        id: u64,
+        path: PathBuf,
+        icon_path: Option<PathBuf>,
+    },
+    /// 只解一张**已落盘的小图标**（≤24px，~1-2KB）。面板线程没有 COM，WIC 解码
+    /// 必须在 worker（m81 §4.3 图标持久化的回传通道）。
+    Icon(u64, PathBuf),
     /// 捕获当前剪贴板图片：DIB→RGBA 解码 + 缩略 + PNG 编码 + 落盘全在 worker。
     /// （2026-09-29 用户报"打开面板悬停转圈好几秒"：旧实现这套同步跑在面板线程，
     /// 且去重在 `push` 里——同一张图每次开面板都白跑全套，消息泵停转 = 忙碌光标。）
@@ -1530,7 +1613,10 @@ enum CapJob {
 /// worker 回传（对应 [`CapJob`]），`run` 消息循环抽干。
 enum CapMsg {
     /// 缩略图解码完成；失败回传空 `Shot` 占位，避免面板对这条反复重试。
-    Thumb(u64, Shot),
+    /// 第三参 = 预缩好的列表图标（≤24px，worker 顺手算好，m81 性能）。
+    Thumb(u64, Shot, Shot),
+    /// 小图标解码完成（图标落盘命中那条快路径）。
+    Icon(u64, Shot),
     /// 剪贴板图片捕获完成；`None` = 剪贴板打开失败 / 自写屏蔽命中 / 已不是图片
     /// （投递与执行之间剪贴板可能已变，与旧同步路径同一语义：拿不到就放弃）。
     Captured(Option<CapturedImg>),
@@ -1552,6 +1638,9 @@ struct CapturedImg {
     h: i32,
     /// 已解码缩略图：入账即插 `thumbs`，首屏不用再解码。
     thumb: Shot,
+    /// 列表图标（≤24px，worker 顺手预缩，m81 性能）：面板直接贴小图，
+    /// 每帧不再从 720px 源读 ~1.5MB。
+    icon: Shot,
     /// ★ 全尺寸原件路径（`images/<同一哈希>.png`，app 相对）。
     ///
     /// 为什么必须另存一份：`thumbs/` 里那份是 `thumbnail_of` 的**降采样副本**，面板显示
@@ -1564,10 +1653,79 @@ struct CapturedImg {
     full: Option<String>,
 }
 
+/// 流式读历史 JSONL：逐行解析（不把整文件读成一个大 String），返回条目 + next_id。
+///
+/// ★ 行序不再严格等价时间序（见 [`append_jsonl_line`]）：载入后按 `ts` 降序**稳定**
+/// 排序还原 newest-first——同秒内的相对顺序保持文件序（同一秒先后本就不可辨）。
+/// 解不开的行静默跳过（崩溃留下的残行只会丢那一条，不会拖垮整个历史）。
+fn read_jsonl_sorted(path: &std::path::Path) -> (Vec<ClipEntry>, u64) {
+    use std::io::BufRead as _;
+    let mut out: Vec<ClipEntry> = Vec::new();
+    let mut next_id = 1u64;
+    if let Ok(f) = std::fs::File::open(path) {
+        for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(e) = serde_json::from_str::<ClipEntry>(line) {
+                if e.id >= next_id {
+                    next_id = e.id + 1;
+                }
+                out.push(e);
+            }
+        }
+    }
+    out.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    (out, next_id)
+}
+
+/// 流式写整表（临时文件 → rename 的前半段）：BufWriter 逐条 `to_writer`，
+/// 内存占用 ~一行，不拼全表大 String（m81 §4.6）。
+fn write_jsonl_streaming(path: &std::path::Path, entries: &[ClipEntry]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let f = std::fs::File::create(path)?;
+    let mut w = std::io::BufWriter::new(f);
+    for e in entries {
+        serde_json::to_writer(&mut w, e)?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()
+}
+
+/// 新条目 **O(1) 追加一行**（m81 §4.6）：每次捕获不再全表重写——万条历史下连续
+/// 复制从"每条全表 IO"变"每条一行"。行落在文件尾部（快照块之后），载入端靠
+/// [`read_jsonl_sorted`] 按 ts 还原顺序。同秒内多条的相对顺序在重启后保持文件序，
+/// 与写入顺序一致，无副作用。失败返回 Err（调用方退回全量重写兑底）。
+fn append_jsonl_line(path: &std::path::Path, e: &ClipEntry) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let mut w = std::io::BufWriter::new(f);
+    serde_json::to_writer(&mut w, e)?;
+    w.write_all(b"\n")?;
+    w.flush()
+}
+
 struct ClipboardMgr {
     cfg: ClipCfg,
     entries: Vec<ClipEntry>,
     thumbs: HashMap<u64, Shot>,
+    /// 列表行**图标位图**（≤[`ICON_W`]，见 [`downscale_to_icon`]，m81 性能优化）：
+    /// 缩略图 ≤720px，每帧 StretchDIBits 缩到 24px 等于每行每帧读 ~1.5MB 源像素——
+    /// 拖滚动条时的 CPU 大头就是它（2026-11-16 用户实测 15%）。图标在解码入场时
+    /// 一次性预缩（~2.3KB/条，全会话 600 条也才 ~1.4MB），绘制只贴小图；
+    /// 预览大图仍用 `thumbs`（≤720px 那份）。
+    thumb_icons: HashMap<u64, Shot>,
+    /// `thumb_icons` 的插入序（上限 [`THUMB_ICON_CAP`]，挤出后随时从盘上小图重解）。
+    icons_order: VecDeque<u64>,
+    /// `thumbs` 的插入序（m81 用户口径 2026-11-16：拖滚动条一拉到底会把每一屏可见行
+    /// 都解码进 `thumbs`，面板开着期间只进不出 —— 600 条 × ~1.1MB ≈ 数百 MB。
+    /// 配合 [`Self::thumb_cache_put`] 的 LRU 上限：超出 [`THUMB_CACHE_CAP`] 挤最旧的；
+    /// 关板仍整体清空（`hide_panel`）。同 id 重复插入先从序里摘掉再入队尾。
+    thumbs_order: VecDeque<u64>,
     /// 任务通道（面板线程 → worker）：只投递**可见行**的缩略图与"捕获当前剪贴板"，
     /// 任何解码/编码都不进面板线程（见 [`Self::ensure_visible_thumbs`]）。
     job_tx: mpsc::Sender<CapJob>,
@@ -1575,6 +1733,17 @@ struct ClipboardMgr {
     thumb_rx: mpsc::Receiver<CapMsg>,
     /// 已投递但尚未回传的缩略图 id（去重回压，避免同一条重复解码）。
     in_flight: HashSet<u64>,
+    /// 上一次 `refresh_panel` 算好的可见索引缓存 `(页签, 查询串, 索引表)`。
+    ///
+    /// ★ m81 #2（用户问 5000/10000 条会不会膨胀）：`visible()` 的成本随历史线性涨
+    /// （搜索态还要对每条 `to_lowercase()`），而面板一次刷新里 draw/ensure/recheck/
+    /// 滚动条/命中测试会各算一遍 = 4×。现在只在刷新漏斗算一次，其余读这张表。
+    /// 键含页签与查询串：切页/改搜索自动失效；entries 成员变化必然走 refresh_panel。
+    vis_cache: Option<(TabKind, String, Vec<usize>)>,
+    /// 历史文件有待重写（m81 §4.6）：删除/收藏/淘汰/重排不直接全表重写，先记脏
+    /// 标记 + 到期时间，由 [`REWRITE_TIMER`] / 关板 / 窗销毁统一落盘（防抖合流）。
+    rewrite_pending: bool,
+    rewrite_due: Option<std::time::Instant>,
     next_id: u64,
     dir: std::path::PathBuf,
     jsonl: std::path::PathBuf,
@@ -1772,9 +1941,34 @@ impl ClipboardMgr {
                 };
                 while let Ok(job) = job_rx.recv() {
                     let msg = match job {
-                        CapJob::Thumb(id, path) => {
+                        CapJob::Thumb {
+                            id,
+                            path,
+                            icon_path,
+                        } => {
                             // 解码失败（文件丢了）也回传空 `Shot` 占位，避免面板对这条反复重试。
-                            CapMsg::Thumb(id, shot_from_png(&path).unwrap_or_default())
+                            let shot = shot_from_png(&path).unwrap_or_default();
+                            // ★ 图标落盘（m81 §4.3）：worker 有 WIC/COM，顺手把 ≤24px
+                            //   图标写成小 PNG——下次会话/重启后滚动零 720px 解码。
+                            let icon = if shot.w > 0 && shot.h > 0 {
+                                if let Some(ip) = &icon_path {
+                                    let icon = downscale_to_icon(&shot, ICON_W);
+                                    let _ = std::fs::create_dir_all(
+                                        ip.parent().unwrap_or(std::path::Path::new(".")),
+                                    );
+                                    let _ = save_png(&icon, ip);
+                                    icon
+                                } else {
+                                    downscale_to_icon(&shot, ICON_W)
+                                }
+                            } else {
+                                Shot::default()
+                            };
+                            CapMsg::Thumb(id, shot, icon)
+                        }
+                        CapJob::Icon(id, path) => {
+                            // 小图标解码（~1-2KB PNG，亚毫秒级）：面板线程没 COM，只能在这里解。
+                            CapMsg::Icon(id, shot_from_png(&path).unwrap_or_default())
                         }
                         CapJob::Capture {
                             self_fmt,
@@ -1818,9 +2012,15 @@ impl ClipboardMgr {
             },
             entries: Vec::new(),
             thumbs: HashMap::new(),
+            thumb_icons: HashMap::new(),
+            icons_order: VecDeque::new(),
+            thumbs_order: VecDeque::new(),
             job_tx,
             thumb_rx,
             in_flight: HashSet::new(),
+            vis_cache: None,
+            rewrite_pending: false,
+            rewrite_due: None,
             next_id: 1,
             dir,
             jsonl: PathBuf::new(),
@@ -1868,51 +2068,80 @@ impl ClipboardMgr {
 
     fn load(&mut self) {
         self.jsonl = self.dir.join("history.jsonl");
-        if let Ok(s) = std::fs::read_to_string(&self.jsonl) {
-            for line in s.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(e) = serde_json::from_str::<ClipEntry>(line) {
-                    if e.id >= self.next_id {
-                        self.next_id = e.id + 1;
-                    }
-                    // ★ 缩略图**不在这里解码**（2026-09-29 用户报"首次打开转圈好几秒"）：
-                    //   历史里每张图片缩略图都是一次 PNG 解码（720px 宽的一张几十毫秒），
-                    //   几百条图片历史若一次性全解 = 卡死数秒。改为只载元数据，像素由
-                    //   `ensure_visible_thumbs` 懒加载——只解当前**可见行**，经 worker 线程
-                    //   解码后 `WM_APP_THUMB_WAKE` 回传刷面板（见 `run` 消息循环抽干）。
-                    self.entries.push(e);
-                }
-            }
-        }
+        let (entries, next_id) = read_jsonl_sorted(&self.jsonl);
+        self.entries = entries;
+        self.next_id = next_id;
+        // ★ 缩略图**不在这里解码**（2026-09-29 用户报"首次打开转圈好几秒"）：
+        //   历史里每张图片缩略图都是一次 PNG 解码，几百条图片历史若一次性全解 =
+        //   卡死数秒。只载元数据，像素由 `ensure_visible_thumbs` 懒加载——只解当前
+        //   **可见行**，经 worker 线程解码后 `WM_APP_THUMB_WAKE` 回传刷面板。
         // 载入即同步贴图镜像：重启后按贴图键就能翻到上次运行留下的图文（这正是用户
         // 报的"重启后只能重复同一段文字"的正面修复）。
         sync_pin_mirror(&self.entries);
     }
 
-    /// 原子重写 JSONL（临时文件 → rename）。
-    fn persist(&self) {
-        let tmp = self.dir.join("history.jsonl.tmp");
-        let mut out = String::new();
-        for e in &self.entries {
-            if let Ok(s) = serde_json::to_string(e) {
-                out.push_str(&s);
-                out.push('\n');
+    /// ★ 历史文件脏标记（m81 §4.6）：删除/收藏/淘汰/重排类变更不立刻全表重写，
+    ///   记脏 + 开防抖计时器；窗口内后续变更直接合并（沿用最早到期时间）。窗口到
+    ///   点 / 关板 / 窗销毁三处收口落盘。例外：面板还没建（无窗口可挂计时器）时
+    ///   立即重写——这条路径只在监控刚启用时走一次，不在性能热路上。
+    fn note_rewrite(&mut self) {
+        if self.rewrite_pending {
+            return; // 已有待落盘的：继续合并，不重排到期时间（风暴只落一次盘）。
+        }
+        self.rewrite_pending = true;
+        self.rewrite_due = Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(REWRITE_DEBOUNCE_MS as u64),
+        );
+        if self.panel.is_invalid() {
+            self.persist();
+        } else {
+            unsafe {
+                SetTimer(Some(self.panel), REWRITE_TIMER, REWRITE_DEBOUNCE_MS, None);
             }
         }
-        if std::fs::write(&tmp, &out).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.jsonl);
+    }
+
+    /// 到期/强制落盘（防抖收口）。`force` = 关板/窗销毁，不等到期。
+    fn flush_rewrite(&mut self, force: bool) {
+        if !self.rewrite_pending {
+            return;
+        }
+        let due = self
+            .rewrite_due
+            .map(|d| std::time::Instant::now() >= d)
+            .unwrap_or(true);
+        if force || due {
+            self.persist();
+        }
+    }
+
+    /// 原子重写 JSONL（临时文件 → rename）。★ m81 §4.6：**流式写**（BufWriter 逐条
+    /// `to_writer`），不再先把全表拼成一个大 String——万条历史的保存瞬时内存尖峰
+    /// 从 ~全表字节（~3MB 级分配）降到 ~一行；调用点只剩防抖收口，不再每次变更都跑。
+    fn persist(&mut self) {
+        self.rewrite_pending = false;
+        self.rewrite_due = None;
+        let tmp = self.dir.join("history.jsonl.tmp");
+        match write_jsonl_streaming(&tmp, &self.entries) {
+            Ok(()) => {
+                let _ = std::fs::rename(&tmp, &self.jsonl);
+            }
+            Err(e) => log::warn!("剪贴板历史重写失败: {e}"),
         }
     }
 
     fn refresh_panel(&mut self) {
+        // ★ 可见索引只在这里算一次（m81 #2）：draw / 滚动 / 命中 / 懒加载全读
+        //   `vis_cache`——成本随历史线性涨的点（搜索态每条 to_lowercase）从每帧 4 次
+        //   降到每刷新 1 次。
+        let vis = visible(&self.entries, self.tab, &self.query);
+        self.vis_cache = Some((self.tab, self.query.clone(), vis.clone()));
         // ★ 懒加载收口：每次重绘前确保**可见行**的图片已投递 worker 解码。幂等
         //   （已解码 `thumbs` / 已投递 `in_flight` 跳过），滚动 / 切页 / 搜索后新进入
         //   视野的行会在这里被补解——首开只解屏幕上那 ~20 行，面板始终即时响应。
-        self.ensure_visible_thumbs();
-        self.recheck_visible_files();
+        self.ensure_visible_thumbs(&vis);
+        self.recheck_visible_files(&vis);
         unsafe {
             if IsWindowVisible(self.panel).as_bool() {
                 // ★ `erase = false`：`WM_ERASEBKGND` 由 `panel_proc` 直接吞掉（返回 1），
@@ -1930,26 +2159,54 @@ impl ClipboardMgr {
     ///   的绝不重复。同类工具有的把缩略图在**捕获时**就生成好小尺寸
     ///   RGBA 存进条目，打开历史只直接 blit——我们落盘的是整图 PNG，故改用"按需懒解码
     ///   可见行"达到同样"打开零解码等待"的效果。
-    fn ensure_visible_thumbs(&mut self) {
-        let vis = visible(&self.entries, self.tab, &self.query);
+    fn ensure_visible_thumbs(&mut self, vis: &[usize]) {
         let rows = visible_rows() as usize;
         let end = (self.scroll + rows).min(vis.len());
         // 直接切片迭代可见段的全局下标，避免 `vi` 仅作索引（clippy: needless_range_loop）。
         let s = self.scroll.min(vis.len());
         for &gi in &vis[s..end] {
-            let e = &self.entries[gi];
+            // 先把需要的字段拷出来（后面要 &mut self，不能带着 entries 的借用走完全程）。
+            let (id, hash, thumb_rel) = {
+                let e = &self.entries[gi];
+                (e.id, e.hash, e.thumb.clone())
+            };
             // ★ 判据是"这条有没有缩略图"而不是"是不是 Kind::Image"：复制单个图片文件时
             //   也会给它补一张预览，那种条目挂在 `Kind::File` 下——用 kind 当门会静默漏掉。
-            let Some(p) = e.thumb.as_deref() else {
+            let Some(p) = thumb_rel.as_deref() else {
                 continue;
             };
-            let id = e.id;
-            if self.thumbs.contains_key(&id) || self.in_flight.contains(&id) {
+            if self.in_flight.contains(&id) {
+                continue;
+            }
+            // ★ 图标快路径（m81 §4.3）：列表只需要 ≤24px 图标——
+            //   ① 内存里已有 → 什么都不用做；
+            //   ② 图标已落盘（上次会话写过）→ 让 worker 解那张 ~1-2KB 的小 PNG，
+            //      不再碰 720px（面板线程没有 COM，解码必须在 worker）；
+            //   ③ 都没有 → 才解 720px 缩略图，worker 顺手把图标写盘（下次走②）。
+            if self.thumb_icons.contains_key(&id) {
+                continue;
+            }
+            let icon_path = self.icon_png_path(hash);
+            if icon_path.is_file() {
+                self.in_flight.insert(id);
+                let _ = self.job_tx.send(CapJob::Icon(id, icon_path));
+                continue;
+            }
+            if self.thumbs.contains_key(&id) {
+                // 720px 已在内存（老路径/刚捕获）：纯代码补图标即可，不必过 worker。
+                if let Some(shot) = self.thumbs.get(&id) {
+                    let icon = downscale_to_icon(shot, ICON_W);
+                    self.thumb_icons.insert(id, icon);
+                }
                 continue;
             }
             self.in_flight.insert(id);
             let path = from_app_relative(p);
-            let _ = self.job_tx.send(CapJob::Thumb(id, path));
+            let _ = self.job_tx.send(CapJob::Thumb {
+                id,
+                path,
+                icon_path: Some(icon_path),
+            });
         }
     }
 
@@ -1959,8 +2216,7 @@ impl ClipboardMgr {
     ///   （反正粘贴那一刻还有一道权威校验兜底），为它常驻一个 ReadDirectoryChangesW
     ///   或定时 stat 全表，与"空载零成本"的产品底线不成比例。这里只在列表刷新时
     ///   对可见的 ~20 行各问一次 `exists()`——微秒级，且不发生在绘制帧里。
-    fn recheck_visible_files(&mut self) {
-        let vis = visible(&self.entries, self.tab, &self.query);
+    fn recheck_visible_files(&mut self, vis: &[usize]) {
         let rows = visible_rows() as usize;
         let end = (self.scroll + rows).min(vis.len());
         let s = self.scroll.min(vis.len());
@@ -2047,7 +2303,8 @@ impl ClipboardMgr {
             e.ts = now_secs();
             self.entries.insert(0, e);
             sync_pin_mirror(&self.entries);
-            self.persist();
+            // 重排/改 ts：记脏防抖（m81 §4.6），不再每次全表重写。
+            self.note_rewrite();
             self.refresh_panel();
             return;
         }
@@ -2069,13 +2326,23 @@ impl ClipboardMgr {
             missing: false,
         };
         self.entries.insert(0, entry);
-        if let Some(shot) = shot {
-            self.thumbs.insert(id, shot);
-        }
-        self.evict();
+        // ★ m81（2026-11-16 用户报"剪贴板一开内存很大"）：这里原先把刚捕获的缩略图像素
+        //   无条件塞进 `thumbs` 常驻缓存。探针实测：本会话捕获 100 张 800–2200px 的图 =
+        //   私有内存 +112MB，关面板、静置 2 分钟都不回落（同 100 条从盘重载只有 30MB）；
+        //   「不限量」档位下 1000 条就是 ~1.4GB——这正是用户看到的"别的剪贴板软件不会这样"。
+        //   缩略图已在盘上（`thumb` 相对路径），面板展示与悬停预览都有"盘上兜底"懒加载
+        //   （见 `thumb_shot_of` 的盘上分支 / `ensure_visible_thumbs`），行可见时毫秒级补解；
+        //   缓存改由 `hide_panel` 统一清空，只在面板开着期间持有可见行的像素。
+        let evicted = self.evict();
         // ★ 淘汰也要反映进贴图镜像（`evict` 只动 `entries`），所以同步放在它之后。
         sync_pin_mirror(&self.entries);
-        self.persist();
+        // ★ m81 §4.6：新条目 **O(1) 追加一行**（万条历史下连续复制不再每条全表 IO）；
+        //   追写失败退回全量重写兑底；有淘汰时文件里残留陈旧行，记脏标记防抖落盘。
+        if append_jsonl_line(&self.jsonl, &self.entries[0]).is_err() {
+            self.persist();
+        } else if evicted {
+            self.note_rewrite();
+        }
         self.refresh_panel();
     }
 
@@ -2086,13 +2353,21 @@ impl ClipboardMgr {
     /// "要允许真无限"，此前加的 10_000 硬上限按该口径拆除）。每条文本本身有
     /// `MAX_TEXT_BYTES` 上限、缩略图有尺寸上限，单条体积有界；条目数的增长由
     /// 用户自己负责（收藏在「收藏」页，不受淘汰影响）。
-    fn evict(&mut self) {
+    /// 返回本次是否真的淘汰了条目（决定要不要记历史文件脏标记）。
+    fn evict(&mut self) -> bool {
         let cap = self.cfg.max_entries;
+        let mut evicted = false;
         while self.entries.len() > cap {
             // 从尾部找第一个非收藏。
             if let Some(pos) = self.entries.iter().rposition(|e| !e.fav) {
                 let e = self.entries.remove(pos);
+                evicted = true;
                 self.thumbs.remove(&e.id);
+                self.thumb_icons.remove(&e.id);
+                self.icons_order.retain(|&x| x != e.id);
+                self.thumbs_order.retain(|&x| x != e.id);
+                // 图标落盘那份也随条目走（hash 命名，与 thumb 同名）。
+                let _ = std::fs::remove_file(self.icon_png_path(e.hash));
                 // 淘汰条目的盘上文件一并清：`full`（超限文本全文 / 全尺寸原件）**和** `thumb`
                 // （列表缩略图）——两者必须一起动手。以前这里只清 `full`，而单个图片文件
                 // 的条目**只有 `thumb` 没有 `full`**，不补这一刀，被淘汰的那种预览图会
@@ -2110,6 +2385,7 @@ impl ClipboardMgr {
                 break; // 全是收藏，不再淘汰。
             }
         }
+        evicted
     }
 
     /// 单个图片文件：投递一张列表缩略图的补做任务（worker 解好后回填，**不动条目顺序**）。
@@ -2296,9 +2572,11 @@ impl ClipboardMgr {
             self.capture();
         }
         if max_changed {
-            self.evict();
+            let evicted = self.evict();
+            if evicted {
+                self.note_rewrite();
+            }
         }
-        self.persist();
         self.refresh_panel();
     }
 
@@ -2329,12 +2607,25 @@ impl ClipboardMgr {
             .collect();
         self.entries.retain(|e| e.fav);
         self.thumbs.retain(|id, _| fav_ids.contains(id));
+        self.thumb_icons.retain(|id, _| fav_ids.contains(id));
+        self.icons_order
+            .retain(|id| self.thumb_icons.contains_key(id));
+        self.thumbs_order.retain(|id| self.thumbs.contains_key(id));
         // 三个目录一起理：`thumbs/` `texts/` `images/`。旧逻辑只扫 `thumbs/`，非收藏条目
         //   一被清空，它的全文文件就永久留在盘上；新增的 `images/` 也会重蹈这处泄漏。
         //   顺带把"条目已不在、文件还留在盘上"的孤儿一并清掉。
-        for d in [&self.thumbs_dir, &self.texts_dir, &self.images_dir] {
-            if let Ok(rd) = std::fs::read_dir(d) {
+        for d in [
+            &self.thumbs_dir,
+            &self.texts_dir,
+            &self.images_dir,
+            &self.thumbs_dir.join("icons"),
+        ] {
+            if let Ok(rd) = std::fs::read_dir(d.as_path()) {
                 for p in rd.flatten() {
+                    if p.path().is_dir() {
+                        // `icons/` 子目录由下面那轮单独清（icon 文件名与 thumb 同名同 keep）。
+                        continue;
+                    }
                     let name = p.file_name().to_string_lossy().into_owned();
                     if !keep.contains(&name) {
                         let _ = std::fs::remove_file(p.path());
@@ -2342,7 +2633,8 @@ impl ClipboardMgr {
                 }
             }
         }
-        self.persist();
+        // 清空属于大变更：记脏防抖（m81 §4.6），2 秒内连删带清只落一次盘。
+        self.note_rewrite();
         self.selected = 0;
         self.scroll = 0;
         sync_pin_mirror(&self.entries);
@@ -2470,9 +2762,62 @@ impl ClipboardMgr {
         self.refresh_panel();
     }
 
+    /// 缩略图缓存的**唯一写入入口**（带 LRU 上限）。
+    ///
+    /// # 为什么要有上限（2026-11-16 用户实测口径）
+    ///
+    /// "打开剪贴板，拖垂直滚动条滑块一拉到底，运行内存就上升"——每滚过一屏，
+    /// 新可见行的缩略图就被解码进 `thumbs`，面板开着期间只进不出：600 条 × ~1.1MB
+    /// ≈ 数百 MB，拉得越深涨得越多。上限 = 拖得再狠也只持有最近约三屏的行；
+    /// 挤掉的行下次可见再解（毫秒级），配合 `hide_panel` 的整体清空，面板关闭归零。
+    fn thumb_cache_put(&mut self, id: u64, shot: Shot, icon: Shot) {
+        self.thumbs_order.retain(|&x| x != id);
+        self.thumbs_order.push_back(id);
+        // 图标走同一个 LRU 入口（2026-11-16 外审补：两处各写一份必然漂移）。
+        self.icon_cache_put(id, icon);
+        self.thumbs.insert(id, shot);
+        while self.thumbs.len() > THUMB_CACHE_CAP {
+            match self.thumbs_order.pop_front() {
+                Some(old) => {
+                    self.thumbs.remove(&old);
+                    // 图标表与缩略图表同生共死（m81 §4.3）：挤缩略图时图标一起走。
+                    self.thumb_icons.remove(&old);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// 图标位图缓存的**唯一写入入口**（带 LRU 上限）。
+    ///
+    /// ★ 2026-11-16 外审揪出：消息泵里 `CapMsg::Icon`（图标快路径回传）原本直接
+    ///   `thumb_icons.insert`——不进 `icons_order`、不受 [`THUMB_ICON_CAP`] 约束，
+    ///   万条历史滚一遍图标表无界（~23MB），§4.5 的"有界"承诺落空。所有图标写入
+    ///   都必须走这里；挤出的随时可从盘上 1–2KB 小图重解（亚毫秒），无 CPU 顾虑。
+    fn icon_cache_put(&mut self, id: u64, icon: Shot) {
+        self.thumb_icons.insert(id, icon);
+        self.icons_order.retain(|&x| x != id);
+        self.icons_order.push_back(id);
+        while self.thumb_icons.len() > THUMB_ICON_CAP {
+            match self.icons_order.pop_front() {
+                Some(old) => {
+                    self.thumb_icons.remove(&old);
+                }
+                None => break,
+            }
+        }
+    }
+
     fn hide_panel(&mut self) {
         self.save_panel_state();
         self.hide_preview();
+        // ★ m81：缩略图缓存只在面板开着时有意义（可见行才需要像素）。关板即清——
+        //   这是"关闭剪贴板要回收内存"的用户口径在数据面上的落点；下次开板由
+        //   `ensure_visible_thumbs` 按可见行毫秒级补解，转圈嫌疑由 worker 通道兜住。
+        self.thumbs.clear();
+        self.thumb_icons.clear();
+        self.icons_order.clear();
+        self.thumbs_order.clear();
         unsafe {
             ShowWindow(self.panel, SW_HIDE);
             PANEL_VISIBLE.store(false, Ordering::Relaxed);
@@ -2482,7 +2827,10 @@ impl ClipboardMgr {
             KillTimer(Some(self.panel), RETRY_TIMER);
             KillTimer(Some(self.panel), TARGET_POLL_TIMER);
             KillTimer(Some(self.panel), PASTE_SEND_TIMER);
+            KillTimer(Some(self.panel), REWRITE_TIMER);
         }
+        // 关板 = 自然检查点：待重写的历史立即落盘（m81 §4.6），不让删除/收藏跨会话漂。
+        self.flush_rewrite(true);
     }
 
     fn toggle(&mut self) {
@@ -2529,6 +2877,11 @@ impl ClipboardMgr {
         if let Some(shot) = self.thumbs.remove(&e.id) {
             drop(shot);
         }
+        self.thumb_icons.remove(&e.id);
+        self.icons_order.retain(|&x| x != e.id);
+        self.thumbs_order.retain(|&x| x != e.id);
+        // 图标落盘那份也随条目走（hash 命名，与 thumb 同名）。
+        let _ = std::fs::remove_file(self.icon_png_path(e.hash));
         if let Some(rel) = &e.thumb {
             let _ = std::fs::remove_file(from_app_relative(rel));
         }
@@ -2541,7 +2894,7 @@ impl ClipboardMgr {
         self.hover = None;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
         sync_pin_mirror(&self.entries);
-        self.persist();
+        self.note_rewrite();
         self.refresh_panel();
     }
 
@@ -2559,8 +2912,17 @@ impl ClipboardMgr {
         self.refresh_panel();
     }
 
+    /// 上一次 `refresh_panel` 算好的可见索引（输入事件路径用；未经刷新时为空表）。
+    /// 克隆一份（10000 条 = 80KB memcpy）——远便宜于重算过滤，且借用立即释放。
+    fn cached_vis(&self) -> Vec<usize> {
+        self.vis_cache
+            .as_ref()
+            .map(|c| c.2.clone())
+            .unwrap_or_default()
+    }
+
     fn move_sel(&mut self, delta: isize) {
-        let vis = visible(&self.entries, self.tab, &self.query);
+        let vis = self.cached_vis();
         if vis.is_empty() {
             return;
         }
@@ -2584,7 +2946,7 @@ impl ClipboardMgr {
     fn toggle_fav(&mut self, global_idx: usize) {
         if let Some(e) = self.entries.get_mut(global_idx) {
             e.fav = !e.fav;
-            self.persist();
+            self.note_rewrite();
             self.refresh_panel();
         }
     }
@@ -2615,7 +2977,7 @@ impl ClipboardMgr {
     }
 
     fn paste_selected(&mut self) {
-        let vis = visible(&self.entries, self.tab, &self.query);
+        let vis = self.cached_vis();
         if self.selected >= vis.len() {
             return;
         }
@@ -2930,7 +3292,8 @@ impl ClipboardMgr {
             self.entries.insert(0, e);
             // 「重新复制」= 上浮到最新：贴图顺序与面板顺序必须一致，镜像跟着重排。
             sync_pin_mirror(&self.entries);
-            self.persist();
+            // 重排：记脏防抖（m81 §4.6），不再每次全表重写。
+            self.note_rewrite();
             self.refresh_panel();
         }
     }
@@ -2938,7 +3301,7 @@ impl ClipboardMgr {
     // ── 滚动（自绘滚动条）──
     /// 把"滑块顶端应落到的 y"换算成 `scroll`。
     fn drag_scroll_to(&mut self, thumb_top: i32) {
-        let vis = visible(&self.entries, self.tab, &self.query);
+        let vis = self.cached_vis();
         let rows = visible_rows() as usize;
         let top = max_scroll(vis.len(), rows);
         if top == 0 {
@@ -2957,7 +3320,7 @@ impl ClipboardMgr {
     /// 滚动条轨道被按下：滑块上方 / 下方 = 翻页，压在滑块上 = 开始拖动。
     /// 返回 `true` 表示这次点击已被滚动条吃掉（调用方别再当行点击处理）。
     fn on_scroll_down(&mut self, y: i32) -> bool {
-        let vis = visible(&self.entries, self.tab, &self.query);
+        let vis = self.cached_vis();
         let rows = visible_rows() as usize;
         let top = max_scroll(vis.len(), rows);
         if top == 0 {
@@ -3009,7 +3372,7 @@ impl ClipboardMgr {
         if (GAP..=list_right()).contains(&x) && (LIST_TOP..=PANEL_H - GAP).contains(&y) {
             let row = (y - LIST_TOP) / ITEM_H;
             let vi = self.scroll as i32 + row;
-            let vis = visible(&self.entries, self.tab, &self.query);
+            let vis = self.cached_vis();
             if row < visible_rows() && vi >= 0 && (vi as usize) < vis.len() {
                 let gi = vis[vi as usize];
                 next = Some(gi);
@@ -3077,8 +3440,30 @@ impl ClipboardMgr {
         };
         // 有缩略图就给预览（不论它是内存截图还是单个图片文件补出来的那张）。
         let shot = self.thumbs.get(&entry.id).cloned();
-        self.preview_entry = Some(entry);
+        self.preview_entry = Some(entry.clone());
         self.preview_shot = shot;
+        // ★ 悬停预览的按需补解（2026-11-16 外审揪出的回归）：图标落盘（§4.4）后，
+        //   列表行只持有 ≤24px 图标，`ensure_visible_thumbs` 对"图标已在"的行直接跳过、
+        //   不再解 720px —— 而本函数原先只读 `thumbs`，取不到就是空窗（2.1.5 里这些行
+        //   会解 720px，预览正常）。这里补上发送端：预览需要大图而没有时，投一个
+        //   解码任务（icon_path 照传，worker 顺手把缺失的盘上小图补齐）；回传侧
+        //   `refresh_preview_if_showing` 正好接住回挂。
+        // ★ 不拿 in_flight 挡（外审二轮指出的竞态）：里面可能只是同 id 的 Icon 小图
+        //   任务在途 —— 悬停要的是 720px，两任务互不冲突；为去重把悬停挡掉（要移出
+        //   重进才补得上）得不偿失。预览同一时刻只挂一行，任务量天然有界。
+        if self.preview_shot.is_none() {
+            if let (Some(rel), Some(e)) = (entry.thumb.as_deref(), self.preview_entry.as_ref()) {
+                let path = from_app_relative(rel);
+                if path.is_file() {
+                    self.in_flight.insert(e.id);
+                    let _ = self.job_tx.send(CapJob::Thumb {
+                        id: e.id,
+                        path,
+                        icon_path: Some(self.icon_png_path(e.hash)),
+                    });
+                }
+            }
+        }
         let (w, h) = self.preview_size();
         let (cx, cy) = unsafe { cursor_pos() };
         let wr = work_rect_at(cx, cy);
@@ -3109,6 +3494,28 @@ impl ClipboardMgr {
             );
             ShowWindow(self.preview, SW_SHOWNA);
             let _ = InvalidateRect(Some(self.preview), None, true);
+        }
+    }
+
+    /// 图标落盘路径（Ditto 式持久化，m81 §4.3）：`thumbs/icons/<hash>.png`（~1-2KB）。
+    /// key 用条目 **hash** 而不是 id：id 是会话内的，重启就变；hash 跟着内容走。
+    fn icon_png_path(&self, hash: u64) -> std::path::PathBuf {
+        self.thumbs_dir
+            .join("icons")
+            .join(format!("{hash:016x}.png"))
+    }
+
+    /// 悬停预览的懒解回传：这条的 720px 刚解好且预览正挂着它 → 补上大图并重绘预览窗。
+    /// （图标快路径下列表不再解 720px，悬停要大图只能按需补。）
+    fn refresh_preview_if_showing(&mut self, id: u64) {
+        if self.preview_entry.as_ref().map(|e| e.id) != Some(id) || self.preview_shot.is_some() {
+            return;
+        }
+        self.preview_shot = self.thumbs.get(&id).cloned();
+        if self.preview_shot.is_some() {
+            unsafe {
+                let _ = InvalidateRect(Some(self.preview), None, true);
+            }
         }
     }
 
@@ -3327,7 +3734,7 @@ impl ClipboardMgr {
         // `DT_END_ELLIPSIS` 只是兜底：正常量级放得下（见单测），真到"9999万+ / 9999万+"
         // 这种不可能出现的规模时优雅截断，也不会画到按钮上去。
         let total = visible(&self.entries, self.tab, "").len();
-        let shown = visible(&self.entries, self.tab, &self.query).len();
+        let shown = self.cached_vis().len();
         SelectObject(hdc, HGDIOBJ(self.font_sm.0));
         // ★ 存储告知条临时借用计数这条空位，到点自动还回去；不为此新增任何布局条——
         //   `LIST_TOP` 牵着滚动与命中测试十几处引用，为一条偶现的告知去动它不值得。
@@ -3379,7 +3786,10 @@ impl ClipboardMgr {
         }
 
         // ── 记录列表 ──
-        let vis = visible(&self.entries, self.tab, &self.query);
+        // ★ 读刷新漏斗算好的缓存（m81 #2）：draw 本身 &self，不能重算；面板可见前
+        //   refresh_panel 必已跑过，缓存必在（兑底空表）。
+        let fallback: Vec<usize> = Vec::new();
+        let vis: &Vec<usize> = self.vis_cache.as_ref().map(|c| &c.2).unwrap_or(&fallback);
         let rows = visible_rows();
         // 裁剪区带出滚动条那一列（它在列表右外侧，但属于同一条）。
         IntersectClipRect(hdc, GAP, LIST_TOP, PANEL_W - GAP, PANEL_H - GAP);
@@ -3418,23 +3828,40 @@ impl ClipboardMgr {
             let folder = entry_is_folder(e);
             // ★ 只看"这条有没有可用的缩略图"，不用 `Kind::Image` 当门：单个图片文件
             //   补做的预览挂在 `Kind::File` 下，按 kind 判的话它永远显示不出来。
-            let drew_thumb = match self.thumbs.get(&e.id) {
-                Some(shot) if shot.w > 0 && shot.h > 0 => {
-                    // 等比缩进格子（短边留白），绝不拉伸变形。
-                    let sc = (ICON_W as f32 / shot.w as f32).min(ICON_W as f32 / shot.h as f32);
-                    let dw = ((shot.w as f32 * sc) as i32).clamp(1, ICON_W);
-                    let dh = ((shot.h as f32 * sc) as i32).clamp(1, ICON_W);
+            // ★ 先看**图标位图**（≤24px，入场时预缩好，m81 性能）：每帧只读 ~2.3KB；
+            //   没有才退回 ≤720px 缩略图的老路（读 ~1.5MB/行/帧，拖动时就是 CPU 大头）。
+            let drew_thumb = match self.thumb_icons.get(&e.id) {
+                Some(icon) if icon.w > 0 && icon.h > 0 => {
+                    // 图标位图已经是适配过格子的尺寸（downscale_to_icon 双边适配），
+                    // 居中贴上即可。
                     draw_shot_to(
                         hdc,
-                        ix + (ICON_W - dw) / 2,
-                        iy + (ICON_W - dh) / 2,
-                        dw,
-                        dh,
-                        shot,
+                        ix + (ICON_W - icon.w) / 2,
+                        iy + (ICON_W - icon.h) / 2,
+                        icon.w,
+                        icon.h,
+                        icon,
                     );
                     true
                 }
-                _ => false,
+                _ => match self.thumbs.get(&e.id) {
+                    Some(shot) if shot.w > 0 && shot.h > 0 => {
+                        // 等比缩进格子（短边留白），绝不拉伸变形。
+                        let sc = (ICON_W as f32 / shot.w as f32).min(ICON_W as f32 / shot.h as f32);
+                        let dw = ((shot.w as f32 * sc) as i32).clamp(1, ICON_W);
+                        let dh = ((shot.h as f32 * sc) as i32).clamp(1, ICON_W);
+                        draw_shot_to(
+                            hdc,
+                            ix + (ICON_W - dw) / 2,
+                            iy + (ICON_W - dh) / 2,
+                            dw,
+                            dh,
+                            shot,
+                        );
+                        true
+                    }
+                    _ => false,
+                },
             };
             if !drew_thumb {
                 draw_kind_icon(
@@ -4516,6 +4943,11 @@ unsafe extern "system" fn listener_proc(
         return LRESULT(0);
     }
     if msg == WM_DESTROY {
+        // 退出前把待重写的历史落盘（m81 §4.6）：防抖窗口内的删除/收藏不能丢。
+        let mgr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ClipboardMgr;
+        if !mgr.is_null() {
+            (*mgr).flush_rewrite(true);
+        }
         let _ = RemoveClipboardFormatListener(hwnd);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -4771,6 +5203,11 @@ unsafe extern "system" fn panel_proc(
                         if (*mgr).top_notice.take().is_some() {
                             (*mgr).refresh_panel();
                         }
+                    }
+                    REWRITE_TIMER => {
+                        // 历史重写防抖到点（m81 §4.6）：一次性把窗口内合并的变更落盘。
+                        KillTimer(Some((*mgr).panel), REWRITE_TIMER);
+                        (*mgr).flush_rewrite(true);
                     }
                     RETRY_TIMER => {
                         // 捕获读失败重试：重新走一遍 capture（内部自带归零/再定时的判定）。
@@ -5158,8 +5595,26 @@ fn run() {
             let mut got = false;
             while let Ok(m) = mgr.thumb_rx.try_recv() {
                 match m {
-                    CapMsg::Thumb(id, shot) => {
-                        mgr.thumbs.insert(id, shot);
+                    CapMsg::Thumb(id, shot, icon) => {
+                        // ★ 面板已收起时的迟到回传只清在途、不入缓存（否则关板后
+                        //   在途解码又把像素塞回来，hide_panel 的清空白做）。
+                        if PANEL_VISIBLE.load(Ordering::Relaxed) {
+                            mgr.thumb_cache_put(id, shot, icon);
+                            // 悬停预览的懒解回传：预览正挂着这条就补上大图并重绘预览窗。
+                            mgr.refresh_preview_if_showing(id);
+                        }
+                        mgr.in_flight.remove(&id);
+                        got = true;
+                    }
+                    CapMsg::Icon(id, icon) => {
+                        // 图标落盘命中的快路径回传：只插图标表，720px 不解（要预览时再按需）。
+                        // ★ 必须走 `icon_cache_put`（带 LRU 上限）：直接 insert 会绕过
+                        //   icons_order 与 THUMB_ICON_CAP（2026-11-16 外审揪出）。
+                        // ★ 与 Thumb 臂同款 PANEL_VISIBLE 守卫（外审二轮补）：关板后的
+                        //   在途回传不回填缓存，守住“关板归零”的口径。
+                        if PANEL_VISIBLE.load(Ordering::Relaxed) {
+                            mgr.icon_cache_put(id, icon);
+                        }
                         mgr.in_flight.remove(&id);
                         got = true;
                     }
@@ -5172,7 +5627,7 @@ fn run() {
                                 Some(c.rel),
                                 c.w,
                                 c.h,
-                                Some(c.thumb),
+                                Some(c.thumb.clone()),
                                 // ★ 全尺寸原件：`full` 字段本来是给超限大文本留的，语义完全一致
                                 //   （"正文放盘上、条目里留个预览"），所以直接复用，不去新开字段。
                                 //   顺带白拿三条既有清理路径（`evict`/`clear`/`delete_entry`
@@ -5180,6 +5635,14 @@ fn run() {
                                 c.full,
                                 None,
                             );
+                            // 图标位图入缓存（capture_image_bg 已在 worker 预缩好）：
+                            // 条目 id = push 后的表头条（去重上浮/新入账都在表头）。
+                            if PANEL_VISIBLE.load(Ordering::Relaxed) {
+                                if let Some(e) = mgr.entries.first() {
+                                    let id = e.id;
+                                    mgr.thumb_cache_put(id, c.thumb, c.icon);
+                                }
+                            }
                         }
                     }
                     CapMsg::FileThumb(id, cap) => {
@@ -5198,8 +5661,13 @@ fn run() {
                             }
                         }
                         if let Some(shot) = decoded {
-                            mgr.thumbs.insert(id, shot);
-                            mgr.persist();
+                            // ★ 同上：面板收起后迟到回传不入缓存（盘上文件已写好，下次可见再解）。
+                            if PANEL_VISIBLE.load(Ordering::Relaxed) {
+                                let icon = downscale_to_icon(&shot, ICON_W);
+                                mgr.thumb_cache_put(id, shot, icon);
+                            }
+                            // 回填 thumb 相对路径属于文件变更：记脏防抖（m81 §4.6）。
+                            mgr.note_rewrite();
                             got = true;
                         }
                     }
@@ -5366,10 +5834,54 @@ mod tests {
         assert_eq!(image_entry_file_rel(&none), None);
     }
 
+    /// 门禁护栏（m81 批次二教训，2026-11-16）：真剪贴板端到端用例跑在**真实系统剪贴板**上。
+    /// 任何本程序实例（主程序 / 录制子进程）的剪贴板监控都会把测试写入的裸图**当场捕获
+    /// 并重写上板**，断言必然红——那不是代码缺陷，是环境干扰。ToolHelp 进程快照探测：
+    /// 检测到实例 → 打印原因并返回 false（调用方跳过）；没有实例 → true（放行）。
+    fn no_curseen_instance_or_skip() -> bool {
+        use windows::Win32::System::Diagnostics::ToolHelp::*;
+        let mut pids: Vec<u32> = Vec::new();
+        unsafe {
+            if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                let mut entry = PROCESSENTRY32W {
+                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                    ..Default::default()
+                };
+                if Process32FirstW(snap, &mut entry).is_ok() {
+                    loop {
+                        // ★ szExeFile 是定长 [u16; 260]，带结尾 NUL——不 trim 掉的话
+                        //   "curseen.exe\0" 永远不等于 "curseen.exe"，护栏恒放行（首版踩过）。
+                        let name = String::from_utf16_lossy(&entry.szExeFile);
+                        let name = name.trim_end_matches('\0').to_ascii_lowercase();
+                        if name == "curseen.exe" || name == "curseen-rec.exe" {
+                            pids.push(entry.th32ProcessID);
+                        }
+                        if Process32NextW(snap, &mut entry).is_err() {
+                            break;
+                        }
+                    }
+                }
+                let _ = windows::Win32::Foundation::CloseHandle(snap);
+            }
+        }
+        if pids.is_empty() {
+            true
+        } else {
+            eprintln!(
+                "跳过（环境干扰护栏，m81 批次二）：检测到本程序实例在跑（pid {pids:?}）——\
+                 它们的剪贴板监控会把测试写入的裸图当场重写上板。停掉所有 CurSeen 实例再跑门禁。"
+            );
+            false
+        }
+    }
+
     /// 裸图判定：文件板 / 自写屏蔽命中 → 拒绝；纯位图板 → 放行。
     /// （文本/HTML 板不拒——重写会原样搬走它们，不算损失。）
     #[test]
     fn 裸图判定_文件板拒绝_纯图放行() {
+        if !no_curseen_instance_or_skip() {
+            return;
+        }
         unsafe {
             // 文件板：绝不算裸图。
             write_files(&["C:\\curseen_probe\\a.png".to_string()]);
@@ -5398,6 +5910,9 @@ mod tests {
     /// 这就是"复制图片 → 桌面直接 Ctrl+V 贴出文件"的产品判据。
     #[test]
     fn 捕获裸图后板上出现文件引用() {
+        if !no_curseen_instance_or_skip() {
+            return;
+        }
         let tmp = std::env::temp_dir().join("curseen_clip_rewrite_e2e");
         let thumbs = tmp.join("thumbs");
         let images = tmp.join("images");
@@ -5934,6 +6449,301 @@ mod tests {
         );
         assert_eq!(mgr.entries.len(), 3);
         assert!(mgr.entries.iter().any(|e| e.text == before));
+    }
+
+    // ── m81 §4.6 历史持久化（追加一行 + 防抖 + 流式重写） ──
+
+    fn clipjsonl_test_dir(tag: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("curseen_clipjsonl_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn text_entry(id: u64, text: &str, ts: u64) -> ClipEntry {
+        ClipEntry {
+            id,
+            kind: Kind::Text,
+            text: text.into(),
+            files: vec![],
+            thumb: None,
+            w: 0,
+            h: 0,
+            full: None,
+            html: None,
+            fav: false,
+            ts,
+            hash: id,
+            missing: false,
+        }
+    }
+
+    /// 追加行落在快照块尾部，载入端按 ts 降序稳定还原 newest-first；同秒内保持文件序。
+    #[test]
+    fn jsonl_append_lines_load_back_newest_first() {
+        let d = clipjsonl_test_dir("append");
+        let p = d.join("history.jsonl");
+        // 上一会话的快照块（3 条，ts 乱序无所谓）
+        write_jsonl_streaming(
+            &p,
+            &[
+                text_entry(1, "old", 100),
+                text_entry(2, "new", 200),
+                text_entry(3, "mid", 150),
+            ],
+        )
+        .unwrap();
+        // 本会话的两条追加（落在文件尾部）+ 同秒一条
+        append_jsonl_line(&p, &text_entry(4, "newest", 300)).unwrap();
+        append_jsonl_line(&p, &text_entry(5, "same-second", 300)).unwrap();
+        let (entries, next_id) = read_jsonl_sorted(&p);
+        let ts_list: Vec<u64> = entries.iter().map(|e| e.ts).collect();
+        assert_eq!(ts_list, vec![300, 300, 200, 150, 100], "降序还原");
+        // 同秒两条：稳定排序保持文件序（先追加的 4 在前，写入顺序即复制顺序）。
+        assert_eq!(entries[0].text, "newest");
+        assert_eq!(entries[1].text, "same-second");
+        assert_eq!(next_id, 6);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 流式重写往返：逐条 to_writer 的文件与旧版全表字符串写出的字节级等价，
+    /// 且行数不芜（一行一条）。
+    #[test]
+    fn jsonl_streaming_rewrite_roundtrip() {
+        let d = clipjsonl_test_dir("stream");
+        let p = d.join("history.jsonl.tmp");
+        let entries: Vec<ClipEntry> = (1..=50)
+            .map(|i| text_entry(i, &format!("t{i}"), 1000 - i))
+            .collect();
+        write_jsonl_streaming(&p, &entries).unwrap();
+        let (back, next_id) = read_jsonl_sorted(&p);
+        assert_eq!(back.len(), 50);
+        assert_eq!(next_id, 51);
+        assert_eq!(back[0].id, 1, "ts 最高（1000-1）在最前");
+        assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 50);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// push 走追加快路径；淘汰后记脏；面板无效（测试环境）→ 立即落盘，
+    /// 文件收敛到与内存一致（不再保留被淘汰的陈旧行）。
+    #[test]
+    fn push_appends_and_evicted_rewrite_converges_file() {
+        let mut mgr = ClipboardMgr::new();
+        let d = clipjsonl_test_dir("push");
+        mgr.dir = d.clone();
+        mgr.jsonl = d.join("history.jsonl");
+        mgr.cfg.max_entries = 2;
+        for i in 0..5 {
+            mgr.push(
+                Kind::Text,
+                format!("t{i}"),
+                vec![],
+                None,
+                0,
+                0,
+                None,
+                None,
+                None,
+            );
+        }
+        assert_eq!(mgr.entries.len(), 2);
+        assert!(!mgr.rewrite_pending, "面板无效路径应立即落盘并清脏标记");
+        let (back, _) = read_jsonl_sorted(&mgr.jsonl);
+        assert_eq!(back.len(), 2, "文件不应保留被淘汰的陈旧行");
+        assert_eq!(back[0].text, "t4");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 防抖窗口：未到期不写、到期/强制才写；写完清脏标记。
+    #[test]
+    fn flush_rewrite_honors_due_window() {
+        let mut mgr = ClipboardMgr::new();
+        let d = clipjsonl_test_dir("flush");
+        mgr.dir = d.clone();
+        mgr.jsonl = d.join("history.jsonl");
+        mgr.entries = vec![text_entry(1, "a", 10)];
+        // 直接置脏（不经 note_rewrite —— 它在面板无效时会立即写）：未到期 → 不写。
+        mgr.rewrite_pending = true;
+        mgr.rewrite_due = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        mgr.flush_rewrite(false);
+        assert!(mgr.rewrite_pending);
+        assert!(!mgr.jsonl.exists());
+        // 强制（关板/窗销毁）→ 立即写。
+        mgr.flush_rewrite(true);
+        assert!(!mgr.rewrite_pending);
+        let (back, _) = read_jsonl_sorted(&mgr.jsonl);
+        assert_eq!(back.len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ★ 缩略图缓存 LRU 上限（2026-11-16 用户实测"拖滚动条一拉到底内存上涨"）：
+    /// 超过 [`THUMB_CACHE_CAP`] 条时挤掉最旧的；重新插入的 id 视为最新，不先被挤。
+    #[test]
+    fn thumb_cache_put_caps_and_evicts_oldest() {
+        let mut mgr = ClipboardMgr::new();
+        let shot = || Shot {
+            w: 2,
+            h: 2,
+            bgra: vec![0u8; 16],
+        };
+        let cap = THUMB_CACHE_CAP as u64;
+        for id in 1..=(cap + 5) {
+            let s = shot();
+            let icon = downscale_to_icon(&s, ICON_W);
+            mgr.thumb_cache_put(id, s, icon);
+        }
+        assert_eq!(mgr.thumbs.len(), THUMB_CACHE_CAP, "超限必须挤旧");
+        for id in 1..=5u64 {
+            assert!(!mgr.thumbs.contains_key(&id), "最旧的 {id} 应被挤出");
+        }
+        for id in (cap + 1)..=(cap + 5) {
+            assert!(mgr.thumbs.contains_key(&id), "最新插入的 {id} 应在场");
+        }
+        // 重新插入已有 id = 视为最新：再来一条，挤掉的应是次旧（7）而不是它（6）。
+        {
+            let s = shot();
+            let icon = downscale_to_icon(&s, ICON_W);
+            mgr.thumb_cache_put(6, s, icon);
+        }
+        {
+            let s = shot();
+            let icon = downscale_to_icon(&s, ICON_W);
+            mgr.thumb_cache_put(cap + 6, s, icon);
+        }
+        // 图标表同步被挤：最旧的 1..=5 也不该在图标表里。
+        for id in 1..=5u64 {
+            assert!(!mgr.thumb_icons.contains_key(&id), "图标表同步挤出 {id}");
+        }
+        assert!(mgr.thumbs.contains_key(&6), "重新插入的 6 不该最先被挤");
+        assert!(!mgr.thumbs.contains_key(&7), "被挤的应是次旧 7");
+        assert_eq!(mgr.thumbs.len(), THUMB_CACHE_CAP, "总数恒为上限");
+        assert_eq!(
+            mgr.thumb_icons.len(),
+            THUMB_CACHE_CAP,
+            "图标表与缩略图表同步挤出（本用例到不了 512 的图标上限）"
+        );
+    }
+
+    /// ★★ 图标缓存的 LRU 上限（2026-11-16 外审揪出的绕行）：`CapMsg::Icon` 快路径
+    /// 回传原先直接 `thumb_icons.insert`，不进 `icons_order`、不受上限约束——万条
+    /// 历史滚一遍图标表无界。修复后所有图标写入都走 `icon_cache_put`，这里钉住上限。
+    #[test]
+    fn icon_cache_put_caps_the_icon_lru() {
+        let mut mgr = ClipboardMgr::new();
+        let shot = || Shot {
+            w: 2,
+            h: 2,
+            bgra: vec![0u8; 16],
+        };
+        let cap = THUMB_ICON_CAP as u64;
+        for id in 1..=(cap + 10) {
+            mgr.icon_cache_put(id, shot());
+        }
+        assert_eq!(
+            mgr.thumb_icons.len(),
+            THUMB_ICON_CAP,
+            "图标表被自己的上限封顶（外审修复：快路径不再绕过）"
+        );
+        assert!(!mgr.thumb_icons.contains_key(&1), "最旧的被挤出");
+        assert!(mgr.thumb_icons.contains_key(&(cap + 10)), "最新在表");
+    }
+
+    /// ★★ 悬停预览的按需补解（2026-11-16 外审揪出的回归）：图标落盘后列表行只有
+    /// 24px 图标、720px 不在内存 —— 悬停这些行时 `show_preview_for` 必须投解码任务
+    /// （修复前 = 预览窗永远空壳，2.1.5 里这些行会解 720px）。钉住发送端：预览无图
+    /// + thumb 文件在盘 → in_flight 挂上（任务已投）；盘上无文件则不投（免无谓往返）。
+    #[test]
+    fn hovering_a_row_without_720px_requests_a_decode() {
+        let mut mgr = ClipboardMgr::new();
+        let rel = "temp/clipboard/thumbs/hover_probe.png";
+        let abs = crate::core::paths::from_app_relative(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"png").unwrap();
+        mgr.entries.push(ClipEntry {
+            id: 7,
+            kind: Kind::Image,
+            text: String::new(),
+            files: vec![],
+            thumb: Some(rel.into()),
+            w: 100,
+            h: 80,
+            full: None,
+            html: None,
+            fav: false,
+            ts: 1,
+            hash: 42,
+            missing: false,
+        });
+        mgr.show_preview_for(0);
+        assert!(
+            mgr.in_flight.contains(&7),
+            "悬停无 720px 的行必须投解码任务（回归锁）"
+        );
+        // thumb 不在盘（is_file 门不过）→ 不投。
+        let mut mgr2 = ClipboardMgr::new();
+        mgr2.entries.push(ClipEntry {
+            id: 8,
+            kind: Kind::Image,
+            text: String::new(),
+            files: vec![],
+            thumb: Some("temp/clipboard/thumbs/no_such_file_hover.png".into()),
+            w: 100,
+            h: 80,
+            full: None,
+            html: None,
+            fav: false,
+            ts: 2,
+            hash: 43,
+            missing: false,
+        });
+        mgr2.show_preview_for(0);
+        assert!(!mgr2.in_flight.contains(&8), "盘上无缩略图文件不该投任务");
+        // 清理：测试在程序相对目录留的探针文件（外审二轮提醒）。
+        let _ = std::fs::remove_file(&abs);
+    }
+
+    /// ★ 图标预缩（m81 性能）：双边适配 ≤24、盒式均值对纯色块的结果精确等于源色。
+    #[test]
+    fn downscale_to_icon_fits_both_sides_and_averages() {
+        // 800×100 的横条 → 24×3（双边适配，不是按宽算出 24×30 那种爆高）。
+        let mut bgra = vec![0u8; 800 * 100 * 4];
+        for p in bgra.chunks_exact_mut(4) {
+            p.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        let icon = downscale_to_icon(
+            &Shot {
+                w: 800,
+                h: 100,
+                bgra,
+            },
+            24,
+        );
+        assert_eq!(icon.w, 24);
+        assert_eq!(icon.h, 3);
+        for p in icon.bgra.chunks_exact(4) {
+            assert_eq!(&p[0..3], &[10, 20, 30], "纯色块盒式均值必须保色");
+        }
+        // 竖图也不爆高。
+        let icon2 = downscale_to_icon(
+            &Shot {
+                w: 100,
+                h: 800,
+                bgra: vec![0; 100 * 800 * 4],
+            },
+            24,
+        );
+        assert!(icon2.w <= 24 && icon2.h <= 24);
+        // 已小于上限：原样返回。
+        let icon3 = downscale_to_icon(
+            &Shot {
+                w: 16,
+                h: 16,
+                bgra: vec![1; 16 * 16 * 4],
+            },
+            24,
+        );
+        assert_eq!((icon3.w, icon3.h), (16, 16));
     }
 
     #[test]

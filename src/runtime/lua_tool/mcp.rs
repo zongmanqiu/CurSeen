@@ -36,17 +36,79 @@ use super::{Ctx, Flags, Out};
 /// 与服务端版本无关的协议版本兜底：客户端不报时用它。
 const DEFAULT_PROTOCOL: &str = "2024-11-05";
 
+/// 协议版本协商表（新→旧）。客户端报的版本不在表里时回最新的一个——MCP 的规则是
+/// 服务端只能答应自己实现过的版本，原样回显一个未来版本等于替客户端撒谎。
+const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// 单帧上限 8 MiB。超过就整帧丢弃并回一条 -32700：不设上限时一行就能把进程的内存
+/// 吃光；只清缓冲不丢到行尾，剩下的半帧会被当成新帧，之后的帧边界全部错位。
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+
+/// 从 stdin 读一帧（到 `\n` 为止，去掉行尾 `\r`）。返回 false = EOF。
+///
+/// 用 `fill_buf` 分块读而不是 `read_line`：后者没有上限，超长帧会先分配再判断。
+/// 超限时把这一帧剩下的字节一路吃到行尾，绝不把半帧留在管道里。
+fn read_frame(stdin: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Option<bool>> {
+    buf.clear();
+    let mut discarding = false;
+    loop {
+        let avail = stdin.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(if buf.is_empty() && !discarding {
+                None
+            } else {
+                Some(!discarding)
+            });
+        }
+        match avail.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                if !discarding {
+                    // 一整个块里就带行尾时也要先量长度：只在前面的"没找到换行"分支
+                    // 判上限，超长行会在这里被整段收进缓冲——上限就形同虚设。
+                    if buf.len() + i > MAX_FRAME {
+                        discarding = true;
+                        buf.clear();
+                    } else {
+                        buf.extend_from_slice(&avail[..i]);
+                    }
+                }
+                stdin.consume(i + 1);
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                return Ok(Some(!discarding));
+            }
+            None => {
+                let n = avail.len();
+                if !discarding {
+                    buf.extend_from_slice(avail);
+                    if buf.len() > MAX_FRAME {
+                        discarding = true;
+                        buf.clear();
+                    }
+                }
+                stdin.consume(n);
+            }
+        }
+    }
+}
+
 /// 运行到 stdin 关闭为止。返回进程退出码（0）。
 pub fn serve(ctx: &Ctx, out: &mut Out) -> i32 {
     let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut lock = stdin.lock();
+    let mut frame: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => return 0, // EOF：客户端收工
-            Ok(_) => {}
-            Err(_) => return 0, // stdin 不可读（直接双击运行等）：安静退出，别刷错误
+        let ok = match read_frame(&mut lock, &mut frame) {
+            Ok(Some(ok)) => ok,
+            Ok(None) => return 0, // EOF：客户端收工
+            Err(_) => return 0,   // stdin 不可读（直接双击运行等）：安静退出，别刷错误
+        };
+        if !ok {
+            reply(out, &error(None, -32700, "帧超过 8 MiB 上限，已整帧丢弃"));
+            continue;
         }
+        let line = String::from_utf8_lossy(&frame);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -86,6 +148,12 @@ fn initialize(req: &Json) -> Json {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_PROTOCOL);
+    // 只答应实现过的版本：客户端报了未来版本就回最新的一个，由它决定要不要断开。
+    let asked = if SUPPORTED_PROTOCOLS.contains(&asked) {
+        asked
+    } else {
+        SUPPORTED_PROTOCOLS[0]
+    };
     json!({
         "protocolVersion": asked,
         "capabilities": { "tools": {} },
@@ -103,16 +171,19 @@ const INSTRUCTIONS: &str = "\
 CurSeen 的 Lua 脚本工具台。目标：脚本达到 verdict=pass，并且用户真的能在面板里选到它。
 
 标准闭环（四步，别跳）：
-  1) write_script   写到 assets/lua/<挂载目录>/<名字>.lua
+  1) write_script   写到 assets/lua/<挂载目录>/<名字>.lua（小改用 patch_script）
   2) lua_check      语法 / 参数体检（参数声明了有没有被真读、默认值在不在滑块网格上）
   3) lua_trace      离屏跑 N 帧 → verdict=pass|fail。判据由工具算，不需要你解释数字。
-  4) set_active     改 config.json 启用并写参数（用户重启一次后就能在面板里看到）
+  4) set_active     改 config.json 启用并写参数（配置要重启一次才完全生效）
+  5) host_status    宿主在跑时可查：它有没有看见这次文件改动（seen_at / pending）
 
 放哪个目录决定用户在哪能选到它（放错 = 用户根本找不到）：
   assets/lua/MouseTrail/  拖尾特效下拉（轨迹类：on_move + step + draw）
   assets/lua/HoverDot/    悬浮标类型下拉（跟随类：draw 每帧画一次）
   assets/lua/ClickFx/     点击效果下拉（on_press 触发一次，之后自行淡出停止）
-  assets/lua/scripts/     「脚本」页的常驻卡片，不进上面三个下拉；**只有这里热重载**
+  assets/lua/KeySound/    击键音效（按键触发一次：run(ctx, params)，不是逐帧绘制）
+  assets/lua/scripts/     「脚本」页的常驻卡片，不进上面四个下拉
+五个目录都支持热重载：特效/悬浮标/点击/复合脚本在文件变化后重建 VM；KeySound 在下一次按键生效。
 
 铁律（trace 会自动判，不过就是不过）：
 1. draw 第 0 帧必须产出指令——宿主按「这一帧画不画」判活，首帧不画 = 实例当场判死。
@@ -121,12 +192,19 @@ CurSeen 的 Lua 脚本工具台。目标：脚本达到 verdict=pass，并且用
 3. 点击效果：必须自己停笔（返回前先判寿命），否则实例永不释放。
 4. 参数只能在 schema() 里声明，并且在脚本里真的读（params.<key>），否则面板上拖动无效果。
 
-第一次接入先读 assets/docs/接入指南.md：怎么连、八个工具、四步闭环、什么算通过。
+第一次接入先读 assets/docs/接入指南.md：怎么连、工具清单、四步闭环、什么算通过。
 
-读文档用 read_doc（只收 .md）：
+读文档用 read_doc（只收 .md；不确定有哪些文档先调 list_docs）：
   assets/docs/接入指南.md        接入第一站：MCP / 命令行配置、工具表、闭环、判据口径
   assets/docs/MCP说明.md         MCP 协议 / 工具签名 / 参数默认值口径 / 排查
-  assets/docs/README.md          索引：哪份文档回答什么
+  assets/docs/Lua开发指南.md     脚本怎么写：结构 / schema 控件 / 生命周期 / 调试 / 发布
+  assets/docs/README.md          索引：哪份文档回答什么、按问题查
+  assets/docs/鼠标特效.md        拖尾 / 悬浮标 / 点击效果 / 点击声音 + 三个脚本目录契约
+  assets/docs/虚拟键盘.md        击键回显 / 击键音效 / 键盘方案 JSON / 直播捕获
+  assets/docs/屏幕与捕获.md      标注 / 放大 / 截图贴图 / GIF / 录屏 + 产物落点
+  assets/docs/工具与小部件.md    便签 / 剪贴板历史 / 计时器（无脚本接口）
+  assets/docs/文件与目录.md      程序版图 / 读写下界 / temp 与 data / 清理
+  assets/docs/脚本扩展与资源包.md role / ext 能力 / pack.json / 在线包
   assets/docs/配置说明.md        config.json 每个键 + 案例（要手改配置时读）
   assets/lua/API.md              Lua 接口权威表
   assets/lua/HoverDot/README.md  悬浮标脚本额外约定（续帧 / hide_cursor / 坐标系）
@@ -230,8 +308,42 @@ fn tools_list(_ctx: &Ctx) -> Json {
                 },
             },
             {
+                "name": "patch_script",
+                "description": "对已有脚本做小补丁（不重发全文）：replace / insert_after / delete 按顺序应用。\
+                                每条 old_text 必须在当前文本里**唯一命中**，否则整批拒绝、文件不动；\
+                                preview=true 只回变更摘要不落盘。写盘前把原文件备份到 temp/lua_tool_trash/。\
+                                回执带 changed / lines_before / lines_after / first_changed_line / last_changed_line，\
+                                改完只需重读变动的那几行。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "已有脚本的路径，写法同 write_script" },
+                        "edits": {
+                            "type": "array",
+                            "description": "1-20 项，按顺序应用。op=replace 需要 new_text；insert_after 把 new_text 插到 old_text 之后；delete 删除 old_text。",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "op": { "type": "string", "enum": ["replace", "insert_after", "delete"] },
+                                    "old_text": { "type": "string" },
+                                    "new_text": { "type": "string" },
+                                },
+                                "required": ["op", "old_text"],
+                            },
+                        },
+                        "preview": { "type": "boolean", "description": "true 只回变更摘要，不写盘（默认 false）" },
+                    },
+                    "required": ["path", "edits"],
+                },
+            },
+            {
+                "name": "list_docs",
+                "description": "列出随包说明文档（path + 一句话说明）。不确定该读哪份时先调它，再用 read_doc 读原文。",
+                "inputSchema": { "type": "object", "properties": {} },
+            },
+            {
                 "name": "set_active",
-                "description": "启用/停用一个脚本，并可顺带写入它的参数（改 config.json）。                                不必记各种参数表的口径：悬浮标用裸 stem、拖尾是扁平命名空间、                                点击落在 ripple_bindings.<键>、scripts/ 落在 lua_ext.composite_active——                                这个工具按挂载点替你写对。返回 changed 列出真的改了哪些键。                                ★ 只有 scripts/ 支持热重载；其它目录改完要重开面板或重启。",
+                "description": "启用/停用一个脚本，并可顺带写入它的参数（改 config.json）。                                不必记各种参数表的口径：悬浮标用裸 stem、拖尾是扁平命名空间、                                点击落在 ripple_bindings.<键>、scripts/ 落在 lua_ext.composite_active——                                这个工具按挂载点替你写对。返回 changed 列出真的改了哪些键。                                五个挂载都支持热重载：特效/悬浮标/点击脚本改文件后重建实例，KeySound 在下一次按键生效。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -263,6 +375,22 @@ fn tools_list(_ctx: &Ctx) -> Json {
                     },
                     "required": ["path"],
                 },
+            },
+            {
+                "name": "read_script",
+                "description": "读一个脚本的原文（只读）。路径写法同 patch_script：HoverDot/foo、HoverDot/foo.lua、assets/lua/... 三者等价；只认五个挂载目录。返回全文、行数、字节数与宿主入口。改脚本前先用它核对 old_text。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "相对程序目录的脚本路径，如 HoverDot/foo" },
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "host_status",
+                "description": "读宿主（已启动的 CurSeen GUI）状态：在不在跑、pid、上次资产重扫时间、各挂载脚本数；并把磁盘最新修改时间与宿主看见的时间对比。写完脚本想确认「宿主有没有看见」时调它。宿主没开不是错误，返回 running=false。",
+                "inputSchema": { "type": "object", "properties": {} },
             },
             {
                 "name": "list_scripts",
@@ -317,12 +445,17 @@ fn tools_call(ctx: &Ctx, req: &Json) -> Result<Json, (i32, String)> {
     }
     let parsed = Flags::parse(&flags).map_err(|e| (-32602, e))?;
 
-    let (code, payload, image) = match name {
+    let (code, mut payload, image) = match name {
         "list_scripts" => (
             0,
             json!({ "ok": true, "scripts": super::list_scripts(ctx) }),
             None,
         ),
+        "list_docs" => (0, json!({ "ok": true, "docs": super::docs_json() }), None),
+        "host_status" => {
+            let (code, v) = host_status(ctx);
+            (code, v, None)
+        }
         "lua_check" | "lua_trace" | "lua_shot" => {
             let path = args
                 .get("path")
@@ -359,6 +492,21 @@ fn tools_call(ctx: &Ctx, req: &Json) -> Result<Json, (i32, String)> {
             let (code, v) = super::write::write_script(ctx, path, code, overwrite);
             (code, v, None)
         }
+        "patch_script" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or((-32602, "patch_script 需要 path".to_string()))?;
+            let edits = args
+                .get("edits")
+                .ok_or((-32602, "patch_script 需要 edits".to_string()))?;
+            let preview = args
+                .get("preview")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let (code, v) = super::write::patch_script(ctx, path, edits, preview);
+            (code, v, None)
+        }
         "delete_script" => {
             let path = args
                 .get("path")
@@ -381,6 +529,14 @@ fn tools_call(ctx: &Ctx, req: &Json) -> Result<Json, (i32, String)> {
             let (code, v) = super::write::set_active(ctx, script, enabled, button, params);
             (code, v, None)
         }
+        "read_script" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or((-32602, "read_script 需要 path".to_string()))?;
+            let (code, v) = super::write::read_script(ctx, path);
+            (code, v, None)
+        }
         "read_doc" => {
             let path = args
                 .get("path")
@@ -391,6 +547,15 @@ fn tools_call(ctx: &Ctx, req: &Json) -> Result<Json, (i32, String)> {
         }
         other => return Err((-32602, format!("没有这个工具：{other}"))),
     };
+
+    // 失败时直接把下一步写给调用方：模型省一轮猜"接下来该干嘛"，工具的后台说明
+    // 也不必散落在每段 description 里。已有 `next` 的（如 write_script）不覆盖。
+    if let Some(hint) = next_hint(name, code, &payload) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("next")
+                .or_insert_with(|| Json::String(hint.to_string()));
+        }
+    }
 
     let mut content = vec![json!({
         "type": "text",
@@ -410,10 +575,91 @@ fn tools_call(ctx: &Ctx, req: &Json) -> Result<Json, (i32, String)> {
     }))
 }
 
-/// 读一份随包文档，原文进文本块。
+/// 失败/成功后给调用方的下一步。`None` = 这个工具不需要额外指路。
+fn next_hint(name: &str, code: i32, payload: &Json) -> Option<&'static str> {
+    let ok = code == 0 && payload.get("ok").and_then(|v| v.as_bool()) != Some(false);
+    match (name, ok) {
+        ("lua_check", true) => {
+            Some("语法与参数体检通过后，用 lua_trace 拿 verdict；改完再跑 lua_check。")
+        }
+        ("lua_check", false) => Some("按 error / warnings 修脚本，然后重跑 lua_check。"),
+        ("lua_trace", true) => Some("看构图用 lua_shot；确认行为后用 set_active 启用。"),
+        ("lua_trace", false) => Some("按 failed[] 与逐帧账本修脚本，然后重跑 lua_trace。"),
+        ("lua_shot", true) => Some("图只回答构图；行为判据仍以 lua_trace 为准。"),
+        ("patch_script", true) => {
+            Some("接着跑 lua_check；本次若 preview=true，改完记得以 preview=false 落盘。")
+        }
+        ("read_script", true) => {
+            Some("改一两行用 patch_script：old_text 从 text 里原样复制，必须唯一命中。")
+        }
+        ("read_script", false) => Some("先调 list_scripts 看现有脚本；新建用 write_script。"),
+        ("patch_script", false) => {
+            Some("old_text 必须唯一命中；先用 read_script / read_doc 核对原文，整批未写入。")
+        }
+        ("list_docs", true) => Some("用 read_doc 读取 path 指向的原文。"),
+        ("read_doc", false) => Some("先调 list_docs 看有哪些文档；路径写相对程序目录的写法。"),
+        ("set_active", true) => {
+            Some("文件改动已热重载；配置项要用户重启一次才完全生效。可调 host_status 确认宿主看见了改动。")
+        }
+        ("host_status", _) => {
+            Some("running=false 就让用户先启动 CurSeen；pending_ms>0 时等一秒再查一次。")
+        }
+        _ => None,
+    }
+}
+
+/// 宿主状态：状态文件 + pid 存活 + 现场扫盘（磁盘比宿主新 = 可能还没被看见）。
+fn host_status(ctx: &Ctx) -> (i32, Json) {
+    let lua = ctx.app.join("assets").join("lua");
+    let disk = json!({
+        "mounts": crate::runtime::host_state::count_scripts(&lua),
+        "latest_mtime_ms": crate::runtime::host_state::latest_mtime_ms(&lua),
+    });
+    let state_file = crate::runtime::host_state::REL;
+    let Some(state) = crate::runtime::host_state::read(&ctx.app) else {
+        return (
+            0,
+            json!({
+                "ok": true,
+                "running": false,
+                "state_file": state_file,
+                "disk": disk,
+                "hint": "宿主没有启动过（或状态文件被清理）。先让用户启动 curseen.exe；热重载/面板状态都依赖它。",
+            }),
+        );
+    };
+    let pid = state.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let running = crate::platform::process::pid_alive(pid);
+    let seen_at = state
+        .get("last_assets_change_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let latest = disk["latest_mtime_ms"].as_u64().unwrap_or(0);
+    let pending_ms = latest.saturating_sub(seen_at);
+    let hint = if !running {
+        "状态文件在，但 pid 已退出：用户关掉了 CurSeen。启动后再看。"
+    } else if pending_ms > 1500 {
+        "磁盘上有比宿主上次重扫更新的脚本：等一秒再查；仍不消失说明目录监听没在工作，让用户重开面板或重启。"
+    } else {
+        "宿主在跑，且已看见最近一次改动。"
+    };
+    (
+        0,
+        json!({
+            "ok": true,
+            "running": running,
+            "state_file": state_file,
+            "state": state,
+            "disk": disk,
+            "pending_ms": pending_ms,
+            "hint": hint,
+        }),
+    )
+}
+
 ///
-/// 只收 `.md`：`Lua脚本手册.html` 有 90KB 标签，塞进上下文纯属浪费 token，那一份
-/// 是给人用浏览器看的（工具描述里也这么说，别指望模型自己想到）。
+/// 只收 `.md`：`操作手册.html` 是给人用浏览器看的（操作与快捷键），标签塞进上下文
+/// 纯属浪费 token；AI 需要的规则都在同目录的 `.md` 里。
 fn read_doc(ctx: &Ctx, path: &str) -> (i32, Json) {
     let full = match ctx.resolve(path) {
         Ok(p) => p,
@@ -426,7 +672,7 @@ fn read_doc(ctx: &Ctx, path: &str) -> (i32, Json) {
             json!({
                 "ok": false,
                 "path": shown,
-                "error": "read_doc 只读 .md。HTML 手册是给人用浏览器看的（assets/lua/Lua脚本手册.html），它的内容与 assets/lua/API.md 同源。",
+                "error": "read_doc 只读 .md。操作手册.html 是给人用浏览器看的（操作与快捷键）；接口规则见 assets/lua/API.md 与 assets/docs/。",
             }),
         );
     }
@@ -528,6 +774,39 @@ mod tests {
         );
     }
 
+    /// 客户端报了实现不了的协议版本时，回的是**我们支持的最新版**，不是原样回显——
+    /// 答应一个没实现的版本等于替客户端撒谎，严格客户端会按新语义解析我们的帧。
+    #[test]
+    fn initialize_falls_back_to_a_supported_protocol() {
+        let future = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2099-01-01" }
+        });
+        assert_eq!(
+            initialize(&future)["protocolVersion"],
+            SUPPORTED_PROTOCOLS[0]
+        );
+        let old = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        });
+        assert_eq!(initialize(&old)["protocolVersion"], "2024-11-05");
+    }
+
+    /// 超长帧必须整帧丢弃：只清缓冲不吞到行尾，剩下的半帧会被当成新帧，之后的帧边界
+    /// 全部错位（AHKDeck 的 mcp 端点踩过同一个坑）。
+    #[test]
+    fn oversized_frame_is_dropped_whole() {
+        use std::io::Cursor;
+        let big = format!("{}\n{{\"ok\":1}}\n", "x".repeat(MAX_FRAME + 16));
+        let mut r = Cursor::new(big.into_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(read_frame(&mut r, &mut buf).expect("读第一帧"), Some(false));
+        assert!(buf.is_empty(), "超限帧不该留下半截内容");
+        assert_eq!(read_frame(&mut r, &mut buf).expect("读第二帧"), Some(true));
+        assert_eq!(buf, br#"{"ok":1}"#);
+    }
+
     /// 工具名必须与 `tools_call` 的分支一一对应（改名后忘了改一边 = 调用永远报"没有这个工具"）。
     #[test]
     fn tool_names_line_up_with_dispatch() {
@@ -544,12 +823,97 @@ mod tests {
             "lua_trace",
             "lua_shot",
             "write_script",
+            "patch_script",
             "delete_script",
             "set_active",
             "read_doc",
+            "list_docs",
             "list_scripts",
+            "read_script",
+            "host_status",
         ] {
             assert!(names.contains(&expect), "缺少工具 {expect}：{names:?}");
+        }
+    }
+
+    /// 宿主状态：没启动过的程序目录必须如实返回 `running:false`，而不是报错或假装在线。
+    #[test]
+    fn host_status_is_honest_when_no_host_has_run() {
+        let app = fake_app("curseen_mcp_host_status_off");
+        let ctx = Ctx::from_app_dir(app.clone());
+        let (code, v) = host_status(&ctx);
+        assert_eq!(code, 0);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["running"], false);
+        assert_eq!(v["state_file"], "temp/lua_tool_state.json");
+        let _ = std::fs::remove_dir_all(&app);
+    }
+
+    /// 同一进程写一份状态文件 ⇒ 读到自己的 pid，`running:true`。
+    #[test]
+    fn host_status_reads_a_live_state_file() {
+        let app = fake_app("curseen_mcp_host_status_on");
+        std::fs::create_dir_all(app.join("temp")).unwrap();
+        std::fs::write(
+            app.join("temp/lua_tool_state.json"),
+            json!({
+                "schema": 1,
+                "version": "test",
+                "pid": std::process::id(),
+                "started_at_ms": 1,
+                "updated_at_ms": 2,
+                "asset_revision": 1,
+                "last_assets_change_ms": 2,
+                "panel_open": false,
+                "hot_reload": ["MouseTrail"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(app.join("assets/lua/HoverDot")).unwrap();
+        std::fs::write(app.join("assets/lua/HoverDot/x.lua"), "x=1").unwrap();
+        let ctx = Ctx::from_app_dir(app.clone());
+        let (code, v) = host_status(&ctx);
+        assert_eq!(code, 0);
+        assert_eq!(v["running"], true, "自己的 pid 必须判为存活：{v}");
+        assert_eq!(v["disk"]["mounts"]["HoverDot"], 1);
+        let _ = std::fs::remove_dir_all(&app);
+    }
+
+    /// `next` 提示里点名的工具必须真的存在：这次就是它让 AI 去用不存在的 `read_script`。
+    #[test]
+    fn every_tool_named_in_next_hint_exists() {
+        let ctx = super::super::Ctx::from_app_dir(std::env::temp_dir());
+        let list = tools_list(&ctx);
+        let names: Vec<&str> = list["tools"]
+            .as_array()
+            .expect("tools 是数组")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        let src = include_str!("mcp.rs");
+        let start = src.find("fn next_hint").expect("应有 next_hint");
+        let end = src[start + 1..]
+            .find("\n/// ")
+            .map(|i| start + 1 + i)
+            .unwrap_or(src.len());
+        let mut hinted = Vec::new();
+        for line in src[start..end].lines() {
+            let Some(rest) = line.trim_start().strip_prefix("(\"") else {
+                continue;
+            };
+            let Some(q) = rest.find('"') else { continue };
+            let name = &rest[..q];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                hinted.push(name.to_string());
+            }
+        }
+        assert!(!hinted.is_empty(), "没抽到任何提示工具名，门禁自己失明了");
+        for name in hinted {
+            assert!(
+                names.contains(&name.as_str()),
+                "next 提示点名了不存在的工具 `{name}`：{names:?}"
+            );
         }
     }
 

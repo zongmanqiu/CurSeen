@@ -6,7 +6,7 @@
 
 | 文件夹 | 归谁 | 放什么 |
 |---|---|---|
-| `lua/` | 统一脚本 | **唯一 Lua 脚本根**（递归）。所有 role=effect/keysound/image/composite 的 `.lua` 都放这里（可按子目录整理）；API 权威参考 `lua/API.md`、随包手册 `lua/Lua脚本手册.html` |
+| `lua/` | 统一脚本 | **唯一 Lua 脚本根**（递归）。所有 role=effect/keysound/image/composite 的 `.lua` 都放这里（可按子目录整理）；API 权威参考 `lua/API.md`（写法与接入见 `docs/`，供 AI 读） |
 | `lua/scripts/` | 通用扩展与在线包根 | `role=image`（贴图右键「脚本」）与 `role=composite`（复合脚本）。散置单文件**文件名即 id**；在线包 / 自打包是 `<id>/` 文件夹（`pack.json` + 平铺脚本 + `info/` 文档）。官方资源（AI 写脚本 / 图片体检 / OCR / 条码识别 / 鼠标包）都在 CurSeen-Scripts，安装后落在 `scripts/<id>/` |
 | `lua/KeySound/` | 击键音效 | 键盘页「击键音效」下拉的两个内置脚本：统一音效 / 分类音效 |
 | `lua/MouseTrail/` | 鼠标拖尾 | 拖尾特效脚本，文件名即特效 id |
@@ -24,7 +24,7 @@
 | `images/` | 关于页 | 赞助二维码：**源是矢量** `WeChatPay.svg` / `ALiPay.svg`（真码，模块铺满 viewBox、无静默区）。产物 `WeChatPay.png` / `ALiPay.png` 由 `cargo run --example gen_icon --features icon-gen` 渲染（额外补 4 模块白边作静默区），`ui/pages/about.rs` 用 `include_bytes!` **编译期嵌进 exe**；换二维码 = 覆盖这两个 SVG 再跑该命令并重新编译。★ 源用矢量是刻意的：它是编码数据，模块必须落在像素网格上，位图缩放/抗锯齿会降低识别率，而矢量可按需渲染到任意尺寸（高 DPI 也不糊）。布局（160px / 间隔 28 / 白框 2px / 说明字在图上方）照抄 Pecia 的 `AboutPanel::draw()` |
 
 | `cache/` | 联网清单缓存 | `scripts.json`（官方资源）与 `update.json`（本体更新）：联网刷新时替换，离线也能判断与显示；**程序读写，别手改**（`update.json` 是本机运行期缓存，不进发行包） |
-| `docs/` | 随包文档 | 给人（和 AI）看的说明，程序不读不写：`接入指南.md`（外部 AI 接入第一站）、`MCP说明.md`（MCP 协议专章）、`README.md`（文档索引）、`配置说明.md`（`config.json` 键表 + 案例）、`隐藏快捷键手册.md`/`.html`。**目录名与内容必须对得上**——会变的 JSON 归 `cache/`，文档归这里；新增**给 AI 看的**文档要同时登记 `DOCS_MANIFEST.md` 与 `lua_tool::DOCS`（`--help` / `--lua-check` / MCP `instructions` 会报路径），否则 AI 找不到它；`隐藏快捷键手册.md` 已进 `DOCS`，同名 `.html` 是给人看的浏览器版、内容重复故不进 |
+| `docs/` | 随包文档 | 给人（和 AI）看的说明，程序不读不写：`README.md`（按问题查的索引）、`接入指南.md`（外部 AI 接入第一站）、`MCP说明.md`（MCP 协议专章）、`Lua开发指南.md`、`配置说明.md`（`config.json` 键表 + 案例）、六份**主题文档**（`鼠标特效` / `虚拟键盘` / `屏幕与捕获` / `工具与小部件` / `文件与目录` / `脚本扩展与资源包`）、`操作手册.html`（唯一一份人读手册：操作 + 固定快捷键，设置页「帮助」打开）。**目录名与内容必须对得上**——会变的 JSON 归 `cache/`，文档归这里；新增**给 AI 看的**文档要同时登记 `DOCS_MANIFEST.md` 与 `lua_tool::DOCS`（`--help` / `--lua-check` / MCP `instructions` 会报路径），否则 AI 找不到它 |
 
 ## 两条约定
 

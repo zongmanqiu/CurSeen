@@ -13,6 +13,7 @@ curseen.exe --lua-check assets/lua/HoverDot/foo.lua        :: 能否加载 + sch
 curseen.exe --lua-trace assets/lua/HoverDot/foo.lua        :: 跑 N 帧，给 verdict
 curseen.exe --lua-shot  assets/lua/MouseTrail/foo.lua      :: 离屏出 PNG
 curseen.exe --mcp                                          :: 以 MCP 服务器运行（stdio）
+curseen.exe --mcp-init                                     :: 打印可粘贴的 MCP 客户端配置块（只打印，不改别人家配置）
 ```
 
 **路径一律相对程序目录**（`curseen.exe` 所在目录）。绝对路径只接受落在程序目录内的，
@@ -71,17 +72,17 @@ check 却说读不到"——`write_script` 返回的 `id` 就是简写，调用�
 
 | 目录 | 出现在 | 热重载 |
 |---|---|---|
-| `assets/lua/MouseTrail/` | 「拖尾效果」卡片的效果下拉 | ❌ |
-| `assets/lua/HoverDot/` | 「悬浮标」卡片的类型下拉 | ❌ |
-| `assets/lua/ClickFx/` | 「点击效果」各键的下拉 | ❌ |
+| `assets/lua/MouseTrail/` | 「拖尾效果」卡片的效果下拉 | ✅ 文件变化后重建 |
+| `assets/lua/HoverDot/` | 「悬浮标」卡片的类型下拉 | ✅ 文件变化后重建 |
+| `assets/lua/ClickFx/` | 「点击效果」各键的下拉 | ✅ 文件变化后重建 |
 | `assets/lua/scripts/`（含 `scripts/包名/`） | 「脚本」页的常驻卡片，**不进**上面三个下拉 | ✅ 每帧 stat |
-| `assets/lua/KeySound/` | 「点击声音」卡片的音效脚本 | ❌ |
+| `assets/lua/KeySound/` | 「点击声音」卡片的音效脚本 | ✅ 下一次按键 |
 
 底层驱动是同一份（`mouse_script_works_wherever_the_file_is_dropped` 钉住"丢哪都一样"），
 **差别只在 UI 入口与热重载**。所以：
 
 - 效果要能被卡片选中 → 必须放对应特效目录；
-- 整套程序（热键、开窗、复合） → 放 `scripts/`（也只有它会热重载）；
+- 整套程序（热键、开窗、复合） → 放 `scripts/`；
 - 键音脚本吃的是 `run(ctx, params)`（按键触发），**不是**逐帧脚本，本工具会明确拒绝驱动它。
 
 ## 五、MCP
@@ -95,18 +96,27 @@ check 却说读不到"——`write_script` 返回的 `id` 就是简写，调用�
 | `lua_trace` | `--lua-trace` |
 | `lua_shot` | `--lua-shot`（**额外返回 PNG 图片块**，无文件系统权限的客户端也能"看见"） |
 | `list_scripts` | 扫五个挂载点，返回 id / 宿主 / UI 入口 / 是否热重载 |
+| `read_script` | **没有 CLI 对应**：读脚本原文 + 行数 / 字节数（路径写法同 `patch_script`） |
 | `read_doc` | 读一份随包 `.md`（`assets/docs/…` / `assets/lua/API.md` 等），原文进文本块 |
+| `list_docs` | 列 `docs` 常量里的全部随包文档（path + 一句话） |
 | `write_script` | **没有 CLI 对应**：把 `code` 写到 `assets/lua/<挂载目录>/<名字>.lua`，默认不覆盖 |
+| `patch_script` | **没有**：`replace`/`insert_after`/`delete`，`old_text` 必须唯一命中、整批原子、写前备份 |
 | `delete_script` | **没有**：删除 = 移进 `temp/lua_tool_trash/`（不真删，可找回） |
 | `set_active` | **没有**：启用/停用脚本并写参数（按挂载点改对 `config.json` 的键） |
+| `host_status` | **没有**：读 `temp/lua_tool_state.json` + pid 存活 + 扫盘对比，回答宿主有没有看见改动 |
 
-后三个是**给没有文件系统的客户端补的笔**：它们没有 CLI 等价物是刻意的——会用命令行的
+写与改的四个是**给没有文件系统的客户端补的笔**：它们没有 CLI 等价物是刻意的——会用命令行的
 agent 直接写文件更直接，不该再学一套动词。
+
+协议侧另有两条护栏：单帧上限 8 MiB（超长整帧丢弃，剩下的字节一路吃到行尾，避免半帧
+打乱后续分帧）；`initialize` 只答应支持表里的版本，未知版本回退到最新版而不是原样回显。
+失败时工具结果可能带 `next`（下一步该调哪个工具），由 `next_hint` 统一补。
 
 ## 五之二、闭环（没有文件系统的客户端）
 
 ```
 write_script(path, code)          → 落盘，返回 id / ui_entry / hot_reload
+patch_script(path, edits)         → 只改几行：唯一命中才应用，回执给 first/last_changed_line
 lua_check(path)                   → 语法 + schema 体检（warnings 为空才算干净）
 lua_trace(path, frames)           → verdict=pass|fail（judged=false 表示这类脚本离屏判不了）
 set_active(script, params)        → 改 config.json；用户重启一次后就在面板里
@@ -155,9 +165,10 @@ AI 最容易浪费时间的两个问题不是"怎么写"，而是"**说明在哪
 
 | 文档 | 回答什么 |
 |---|---|
-| `assets/docs/接入指南.md` | **外部 AI / 测试者第一站**：两种接法、八个工具、四步闭环、判据口径、安全边界 |
-| `assets/docs/MCP说明.md` | MCP 专章：握手、工具签名、参数默认值口径、错误码、排查（给外部客户端，不重复实现细节） |
-| `assets/docs/README.md` | 索引：哪份文档讲什么、AI 的阅读顺序 |
+| `assets/docs/接入指南.md` | **外部 AI / 测试者第一站**：两种接法、十二个工具、四步闭环、判据口径、安全边界 |
+| `assets/docs/MCP说明.md` | MCP 专章：握手、工具签名、`patch_script` 回执、参数默认值口径、错误码、排查（给外部客户端，不重复实现细节） |
+| `assets/docs/README.md` | 索引：按问题查、AI 的阅读顺序、主题文档的写法 |
+| `assets/docs/鼠标特效.md` 等六份主题文档 | 功能域规则：鼠标特效 / 虚拟键盘 / 屏幕与捕获 / 工具与小部件 / 文件与目录 / 脚本扩展与资源包 |
 | `assets/docs/配置说明.md` | `config.json` 每个键怎么写 + 五个案例（**启用 / 调参前必读**） |
 | `assets/lua/API.md` | Lua 接口权威表（与手册同源校验） |
 | `assets/lua/HoverDot/README.md` | 悬浮标脚本的额外约定（续帧 / `hide_cursor` / 坐标系） |
@@ -176,7 +187,7 @@ AI 最容易浪费时间的两个问题不是"怎么写"，而是"**说明在哪
   判据基线，属于需单独量化回归面的行为变更；当前口径写在随包《MCP说明.md》§5。
 - **`set_active` 改完要重启**：配置是启动时读一次、之后只读内存；而且程序运行中打开面板
   会用内存里的配置**覆盖**文件。所以顺序必须是"退出程序 → 改 → 启动"，或者"改完立刻重启"。
-- **只有 `scripts/` 热重载**：脚本内容改完立刻生效；特效目录改完要重开面板/重启。
+- **五个挂载都热重载**：脚本内容改完立刻生效；`KeySound/` 在下一次按键生效。
 
 - **只判"能不能跑"，不判"好不好看"**。出图是给人/多模态看的，别把"看着还行"当成判据。
 - **图片类悬浮标**（`HoverDot/png`、以及任何 `ctx:image(...)` 的脚本）在离屏里**没有位图**：
@@ -186,8 +197,8 @@ AI 最容易浪费时间的两个问题不是"怎么写"，而是"**说明在哪
   脚本说它坏了，AI 会照着去改。）
 - **没有真机环境**：DPI 换算、多屏负坐标、覆盖层合成都不在离屏路径里。离屏通过 ≠ 真机好看；
   真机验收仍需人眼（或后续的 IPC 通道）。
-- **不动正在运行的实例**：本工具是"另一台无头引擎"，不连正在跑的 CurSeen。真机反复调参
-  目前只能"改文件 → 重开面板/重启"；给三个特效目录加热重载是下一步，不是本工具的职责。
+- **不动正在运行的实例**：本工具是"另一台无头引擎"，不连正在跑的 CurSeen。但它写的文件会被
+  宿主热重载；`host_status` 只读状态文件，用来看宿主是否看见改动，不驱动实例。
 - **提权**：工具分支在 `main()` 最前面，早于提权与单实例仲裁，所以它永远普通权限、
   不会把正在运行的实例顶掉。
 

@@ -138,11 +138,13 @@ pub(crate) fn kept_total_ns(ranges: &[(i64, i64)]) -> i64 {
 /// 见 [`frame_rgba_at]）。
 /// 返回 `(reader, video_idx, audio_idx)`。
 ///
+/// ★ 两个下标都是 `Option`（m81 #3）：纯录音（M4A）没有视频流——`video_idx` 为 `None`
+///   不是错误，调用方按需取用（时长扫存在的流、预览对音频报错、裁剪按有无视频分账）。
 /// ★ `pub(crate)`：拼接（`mp4_concat`）逐段建 reader 时也走这条"不解码"的路。
 pub(crate) unsafe fn open_passthrough_reader(
     src: &Path,
     attrs: Option<&IMFAttributes>,
-) -> WinResult<(IMFSourceReader, u32, Option<u32>)> {
+) -> WinResult<(IMFSourceReader, Option<u32>, Option<u32>)> {
     let url = HSTRING::from(src.as_os_str());
     let reader: IMFSourceReader = MFCreateSourceReaderFromURL(&url, attrs)?;
     let mut video_idx = None;
@@ -165,9 +167,7 @@ pub(crate) unsafe fn open_passthrough_reader(
         let _ = reader.SetStreamSelection(idx, true);
         let _ = reader.SetCurrentMediaType(idx, None, &mt);
     }
-    let v = video_idx
-        .ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
-    Ok((reader, v, audio_idx))
+    Ok((reader, video_idx, audio_idx))
 }
 
 /// 读一帧（不解码），返回 `(时间戳, 是否关键帧, 是否到尾, 样本本体)`。
@@ -209,17 +209,24 @@ pub fn mp4_duration(src: &Path) -> Option<f64> {
 pub fn mp4_duration_ns(src: &Path) -> Option<i64> {
     let _mf = MfGuard::start();
     unsafe {
-        let (reader, video_idx, _audio) = match open_passthrough_reader(src, None) {
+        let (reader, video_idx, audio_idx) = match open_passthrough_reader(src, None) {
             Ok(x) => x,
             Err(e) => {
                 log::warn!("mp4_duration：SourceReader 打不开 {}（{e}）", src.display());
                 return None;
             }
         };
+        // 扫存在的流：屏幕录制必有视频（音频终点不会更晚，扫视频即可）；
+        // 纯录音（M4A，m81 #3）只有音频——改扫音频流。
+        let scan_idx = match (video_idx, audio_idx) {
+            (Some(v), _) => v,
+            (None, Some(a)) => a,
+            (None, None) => return None,
+        };
         let mut max_end_ns = 0i64;
-        // 只扫视频流（屏幕录制必有视频，音频终点不会更晚）。
+        // 只扫这一条流。
         for _ in 0..(1 << 22) {
-            let (ts, _, eos, _) = read_raw(&reader, video_idx).unwrap_or((0, false, true, None));
+            let (ts, _, eos, _) = read_raw(&reader, scan_idx).unwrap_or((0, false, true, None));
             if eos {
                 break;
             }
@@ -253,7 +260,9 @@ pub fn frame_rgba_at(src: &Path, t_s: f64) -> Result<(u32, u32, Vec<u8>), String
         let _ = attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1);
         // ★ 用解析出来的**视频流下标**（见模块头"流索引不能写死 0"）。
         let (reader, video_idx, audio_idx) =
-            open_passthrough_reader(src, Some(&attrs)).map_err(|e| format!("打不开视频：{e}"))?;
+            open_passthrough_reader(src, Some(&attrs)).map_err(|e| format!("打不开媒体：{e}"))?;
+        // 纯音频文件（M4A）没有画面可预览——调用方（裁剪窗）对音频走占位展示。
+        let video_idx = video_idx.ok_or_else(|| "音频文件没有画面预览".to_string())?;
         log::debug!("frame_rgba_at：视频流 {video_idx}，音频流 {audio_idx:?}");
         // 原生（压缩）类型：要拿画面尺寸，还要把它的属性整包拷进输出类型。
         let native = reader
@@ -415,17 +424,27 @@ pub fn trim_ranges_progress(
     unsafe {
         let (reader, video_idx, audio_idx) = open_passthrough_reader(src, None)?;
 
-        // ① 预扫一遍视频流拿关键帧时间戳（不解码，很快）。顺带记末帧时间戳——进度要以
-        //   "走到全片几分之几"为刻度，UI 上才是匀速的。
+        // ① 预扫拿关键帧时间戳与总时长（不解码，很快）。有视频扫视频；纯录音
+        //   （M4A，m81 #3）没有视频流，改扫音频流——AAC 样本不参与关键帧吸附，
+        //   空表时 `snap_start` 原样返回。顺带记末样本时间戳——进度刻度用。
+        let (prescan_idx, has_video) = match (video_idx, audio_idx) {
+            (Some(v), _) => (v, true),
+            (None, Some(a)) => (a, false),
+            (None, None) => {
+                return Err(windows::core::Error::from_hresult(
+                    windows::Win32::Foundation::E_FAIL,
+                ));
+            }
+        };
         let mut keyframes = Vec::new();
         let mut total_ns = 0i64;
         loop {
-            let (ts, clean, eos, _) = read_raw(&reader, video_idx)?;
+            let (ts, clean, eos, _) = read_raw(&reader, prescan_idx)?;
             if eos {
                 break;
             }
             total_ns = total_ns.max(ts);
-            if clean {
+            if clean && has_video {
                 keyframes.push(ts);
             }
         }
@@ -458,8 +477,11 @@ pub fn trim_ranges_progress(
                 e
             })?;
 
-        // ③ 目标：MP4 封装器直吃压缩样本。
-        let video_type = reader.GetCurrentMediaType(video_idx)?;
+        // ③ 目标：MP4 封装器直吃压缩样本。视频轨可选（M4A 只有音频，m81 #3）。
+        let video_type = match video_idx {
+            Some(i) => Some(reader.GetCurrentMediaType(i)?),
+            None => None,
+        };
         let audio_type = match audio_idx {
             Some(i) => Some(reader.GetCurrentMediaType(i)?),
             None => None,
@@ -505,10 +527,13 @@ pub fn trim_ranges_progress(
             log::warn!("trim：MFCreateSinkWriterFromMediaSink 失败：{e}");
             e
         })?;
-        let v_out = writer.AddStream(&video_type).map_err(|e| {
-            log::warn!("trim：AddStream(视频) 失败：{e}");
-            e
-        })?;
+        let v_out = match &video_type {
+            Some(vt) => Some(writer.AddStream(vt).map_err(|e| {
+                log::warn!("trim：AddStream(视频) 失败：{e}");
+                e
+            })?),
+            None => None,
+        };
         let a_out = match &audio_type {
             Some(at) => Some(writer.AddStream(at).map_err(|e| {
                 log::warn!("trim：AddStream(音频) 失败：{e}");
@@ -522,18 +547,22 @@ pub fn trim_ranges_progress(
         })?;
 
         // ④ 逐流拷贝 + 时间戳重映射。进度按"流"分账：视频占大头（样本体积在那儿），
-        //   有音频时给它留 [`AUDIO_SPAN`]，没有音频则视频跑满 0→1。
-        let v_span = if a_out.is_some() {
-            1.0 - AUDIO_SPAN
-        } else {
-            1.0
+        //   有音频时给它留 [`AUDIO_SPAN`]，没有音频则视频跑满 0→1；纯录音（无视频，
+        //   m81 #3）则音频独占全程。
+        let (v_span, a_base, a_span) = match (v_out.is_some(), a_out.is_some()) {
+            (true, true) => (1.0 - AUDIO_SPAN, 1.0 - AUDIO_SPAN, AUDIO_SPAN),
+            (true, false) => (1.0, 0.0, 0.0),
+            (false, true) => (0.0, 0.0, 1.0),
+            (false, false) => (0.0, 0.0, 0.0),
         };
-        copy_stream(
-            &reader, video_idx, true, &ranges, &writer, v_out, total_ns, 0.0, v_span, on,
-        )?;
+        if let (Some(vi), Some(vo)) = (video_idx, v_out) {
+            copy_stream(
+                &reader, vi, true, &ranges, &writer, vo, total_ns, 0.0, v_span, on,
+            )?;
+        }
         if let (Some(ai), Some(ao)) = (audio_idx, a_out) {
             copy_stream(
-                &reader, ai, false, &ranges, &writer, ao, total_ns, v_span, AUDIO_SPAN, on,
+                &reader, ai, false, &ranges, &writer, ao, total_ns, a_base, a_span, on,
             )?;
         }
         on(1.0);

@@ -597,6 +597,14 @@ PipWindow::present ──发布面板位图──▶ 共享槽 ──▶ Session
    `pin_ring_cap` 约束。
 9. **VM 稳态受约束**：`scripting/runtime.rs::EngineCache` 按脚本路径缓存长期 VM，按
    `(mtime, len)` 热重载并 `gc()` 清理已删脚本；`FxCore` 实例常驻而非每帧重建。
+10. **第二块呈现表面接进同一扇帧门（m82 B4，2026-11-17）**：直播合成窗 `CurSeen 虚拟键盘`
+    **没有**自己那份心跳。生产侧 `render()` 每真的重算一遍 `live_draw_list` 才置一次
+    `Runtime::live_frame_pending`，33ms 轮询只负责排空它并跨窗失效。曾经的写法是在那个
+    轮询里无条件 `mark_dirty_all()` + 跨窗失效，于是键盘一动不动时也按 30fps 画两整块
+    1920×1080——零输入窗口实测**中位单核 26%**，而把路由关掉是 **0%**。判据锁在
+    `runtime::frame::tests::live_frame_pending_is_produced_by_the_live_route_only`。
+    ★ 形状教训：**新增一块呈现表面 = 复用既有帧门，而不是再开一个定时器**；后者会
+    悄悄吃掉「静止零功耗」这条既有语义，而且没人报错。
 
 ### 9.2 仍值得做的 targeted 优化（按 ROI 排序）
 

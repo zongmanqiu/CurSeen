@@ -27,7 +27,8 @@
 //! 钉出生点、用 `cursor_*` 跟光标，两边宿主给的都是同一个值。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value as Json;
 
@@ -58,6 +59,10 @@ pub struct FxCore {
     pub engine: ScriptingEngine,
     /// 脚本 id（相对 lua 根，含目录前缀）。
     pub id: String,
+    /// 加载时的引擎根（热重载按同一根重读）。
+    root: PathBuf,
+    /// 上次加载的 `(mtime, 字节数)`：与 `EngineCache` / `Companion` 同一判据。
+    stamp: (Option<SystemTime>, u64),
     /// 本宿主在 Lua 全局 `host` 里的标识（`trail`/`hover`/`clickfx`/`panel`）。
     host: &'static str,
     params: HashMap<String, Json>,
@@ -93,9 +98,12 @@ impl FxCore {
         let engine = ScriptingEngine::new(root)?;
         engine.load_script(id)?;
         let hide_cursor = engine.get_hide_cursor();
+        let stamp = script_stamp(root, id);
         Ok(Self {
             engine,
             id: id.to_string(),
+            root: root.to_path_buf(),
+            stamp,
             host,
             params: HashMap::new(),
             cursor: (0.0, 0.0),
@@ -114,6 +122,34 @@ impl FxCore {
             mouse_down: false,
             mouse_button: "left",
         })
+    }
+
+    /// 热重载检查：脚本文件 `(mtime, 字节数)` 变了就重建 VM。
+    ///
+    /// 保参数、保屏幕/墙钟注入值，状态（出生点 / 判活 / 累加器）清零——与
+    /// `Companion::ensure_fresh` 同一语义。**加载失败保留旧 VM**：AI 写到一半的脚本
+    /// 不该把正在显示的画面临时变空；文件修好后下一次检查会重建。
+    /// 返回 `true` = 文件确实变过（成功或失败都算）。
+    pub fn ensure_fresh(&mut self) -> bool {
+        let stamp = script_stamp(&self.root, &self.id);
+        if stamp == self.stamp {
+            return false;
+        }
+        self.stamp = stamp;
+        match Self::load(&self.root, &self.id, self.host) {
+            Ok(mut fresh) => {
+                fresh.params = std::mem::take(&mut self.params);
+                fresh.screen = self.screen;
+                fresh.wall_ms = self.wall_ms;
+                fresh.elapsed = self.elapsed;
+                *self = fresh;
+                log::info!("脚本 {} 已热重载（文件改动生效）", self.id);
+            }
+            Err(e) => {
+                log::warn!("脚本 {}.lua 热重载失败，继续用旧版本：{e}", self.id);
+            }
+        }
+        true
     }
 
     // ---- 宿主每帧喂的输入 -------------------------------------------------
@@ -304,6 +340,14 @@ impl FxCore {
     }
 }
 
+/// `(mtime, 字节数)`：字节数兜住同一次时间戳粒度内的改写（同 `EngineCache` 的坑）。
+fn script_stamp(root: &Path, id: &str) -> (Option<SystemTime>, u64) {
+    match std::fs::metadata(root.join(format!("{id}.lua"))) {
+        Ok(m) => (m.modified().ok(), m.len()),
+        Err(_) => (None, 0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +386,51 @@ function draw(ctx, p)
   ctx:circle(cursor_x, origin_y, 4, 255, 0, 0, 255)
 end
 "#;
+
+    /// 热重载：文件戳变了就重建 VM；同内容不白重建；坏脚本保留旧 VM，修好后自愈。
+    #[test]
+    fn script_change_hot_reloads_and_recovers_from_a_broken_write() {
+        let good = r#"
+function draw(ctx, p) ctx:circle(10, 10, 4, 255, 0, 0, 255) end
+"#;
+        let (dir, mut c) = core_with(good);
+        let mut params = HashMap::new();
+        params.insert("keep".to_string(), Json::from(7));
+        c.set_params(params);
+        let mut list = DrawList::new();
+        assert!(c.render(&mut list).produced);
+
+        assert!(!c.ensure_fresh(), "文件没变不该重建");
+        let healed = r#"
+function draw(ctx, p) ctx:circle(20, 20, 8, 0, 255, 0, 255) ctx:circle(30, 30, 2, 0, 0, 255, 255) end
+-- 改过
+"#;
+        std::fs::write(dir.join("demo.lua"), healed).unwrap();
+        assert!(c.ensure_fresh(), "字节数变了必须重载");
+        assert_eq!(c.params.get("keep"), Some(&Json::from(7)), "参数要保住");
+        let mut list = DrawList::new();
+        assert!(c.render(&mut list).produced, "新版本要能画");
+
+        // 写到一半：加载失败不该把旧 VM 扔掉，也不该反复重建。
+        std::fs::write(dir.join("demo.lua"), "function draw(ctx").unwrap();
+        assert!(c.ensure_fresh());
+        assert!(!c.ensure_fresh(), "坏文件只尝试一次，别每拍重读");
+        let mut list = DrawList::new();
+        assert!(c.render(&mut list).produced, "坏写入期间旧版本继续工作");
+
+        // 修好（含原来坏文件之后）⇒ 自愈。
+        std::fs::write(
+            dir.join("demo.lua"),
+            format!(
+                "{healed}
+-- fixed"
+            ),
+        )
+        .unwrap();
+        assert!(c.ensure_fresh());
+        let mut list = DrawList::new();
+        assert!(c.render(&mut list).produced, "修好后要恢复绘制");
+    }
 
     #[test]
     fn unified_frame_sequence_moves_steps_and_draws() {

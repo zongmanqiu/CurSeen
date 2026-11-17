@@ -76,6 +76,7 @@ impl Runtime {
             crate::platform::working_set::request_trim_soon();
         }
         self.panel_dirty = false;
+        self.write_host_state();
     }
 
     /// 取一次「配置刚被面板改过，请覆盖层补一帧」的请求（边沿触发，取过即无）。

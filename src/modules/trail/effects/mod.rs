@@ -77,6 +77,10 @@ pub trait TrailEffect {
     }
     /// 返回默认设置（通过 trait object 调用）。
     fn defaults(&self) -> EffectDefaults;
+    /// 资产目录变化时检查脚本文件；`true` = 文件变过并已重载。静态特效 no-op。
+    fn reload_script(&mut self) -> bool {
+        false
+    }
 }
 
 /// 注册表条目（历史遗留，现已弃用——见模块头注释）。
